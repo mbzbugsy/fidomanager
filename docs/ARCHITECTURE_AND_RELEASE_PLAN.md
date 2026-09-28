@@ -18,7 +18,7 @@ The application must not assume support based on vendor identity. All behaviour 
 
 Authenticator management must work locally and offline. The application must not require an account, backend service, cloud storage, telemetry, analytics, or remote configuration.
 
-No authenticator information should leave the machine unless the user explicitly initiates an export or future update check that is documented and narrowly scoped.
+No authenticator information should leave the machine unless the user explicitly initiates an export or another clearly documented optional feature.
 
 ### Vendor neutrality
 
@@ -73,7 +73,8 @@ Rust owns:
 - reset operations;
 - device-session lifecycle;
 - error normalization;
-- per-device operation serialization.
+- per-device operation serialization;
+- optional security-provider integrations.
 
 ### FIDO implementation
 
@@ -116,13 +117,15 @@ fidomanager/
 │   │   ├── credential.rs
 │   │   ├── errors.rs
 │   │   └── traits.rs
-│   └── fido-libfido2/
-│       ├── discovery.rs
-│       ├── device.rs
-│       ├── credential_management.rs
-│       ├── pin.rs
-│       ├── reset.rs
-│       └── ffi/
+│   ├── fido-libfido2/
+│   │   ├── discovery.rs
+│   │   ├── device.rs
+│   │   ├── credential_management.rs
+│   │   ├── pin.rs
+│   │   ├── reset.rs
+│   │   └── ffi/
+│   └── security-providers/
+│       └── boogoo/
 ├── tests/
 ├── docs/
 │   ├── ARCHITECTURE_AND_RELEASE_PLAN.md
@@ -135,6 +138,8 @@ fidomanager/
 ├── LICENSE
 └── THIRD_PARTY_NOTICES.md
 ```
+
+The `security-providers` area is optional and must not become a dependency of the core FIDO management path.
 
 ## 5. Architectural layers
 
@@ -151,7 +156,7 @@ Contains platform-independent concepts such as:
 - stable application error types
 - backend traits/interfaces
 
-This crate must not depend on Tauri, USB/HID APIs, or libfido2.
+This crate must not depend on Tauri, USB/HID APIs, libfido2, BooGooCypher, or network transport.
 
 ### Transport / implementation layer: `fido-libfido2`
 
@@ -176,7 +181,8 @@ Responsibilities:
 - timeout/cancellation policy;
 - reconnect handling;
 - destructive-operation confirmation state;
-- mapping domain values into frontend DTOs.
+- mapping domain values into frontend DTOs;
+- mediating optional security-provider operations.
 
 ### Presentation layer
 
@@ -189,9 +195,10 @@ Responsibilities:
 - PIN dialogs;
 - destructive-operation confirmation;
 - accessibility;
-- error presentation.
+- error presentation;
+- explicit export/provider selection where available.
 
-The presentation layer must never perform direct FIDO/HID operations.
+The presentation layer must never perform direct FIDO/HID operations or call BooGooCypher directly.
 
 ## 6. Backend abstraction
 
@@ -319,7 +326,8 @@ Do not initially implement:
 - NFC;
 - BLE;
 - remote device management;
-- cloud synchronization.
+- cloud synchronization;
+- BooGooCypher integration in the initial MVP.
 
 These features must be evaluated separately after the CTAP core is stable.
 
@@ -373,13 +381,22 @@ Do not expose shell execution, unrestricted filesystem APIs, process spawning, a
 
 Sensitive native commands must validate operation state server-side rather than trusting frontend state.
 
+If optional network-backed security providers are introduced later, network access must remain in the Rust backend. The WebView must not receive general-purpose HTTP capability.
+
 ## 13. Network policy
 
 Core FIDO management must require no network connection.
 
 The frontend should have no general-purpose HTTP capability.
 
-A future signed application-update check is the only expected network feature, and it must remain isolated from authenticator management and must not transmit authenticator identifiers.
+Optional integrations may use the network only when explicitly enabled by the user and must remain isolated from authenticator-management operations. They must not make FIDO inspection, PIN management, credential management, or reset dependent on service availability.
+
+Expected future network-capable features are limited to:
+
+- signed application-update checks;
+- optional user-initiated encrypted export through a configured security provider such as BooGooCypher.
+
+Neither path may transmit authenticator identifiers unless the user has explicitly chosen data that contains such identifiers for export.
 
 ## 14. Logging
 
@@ -388,6 +405,8 @@ Release builds should log minimally.
 Never log:
 
 - PINs;
+- API credentials;
+- encryption keys;
 - credential secret material;
 - full credential identifiers by default;
 - USB serial numbers by default;
@@ -404,6 +423,8 @@ Prefer stable error categories such as:
 - `UserPresenceRequired`
 - `CredentialNotFound`
 - `ProtocolError`
+- `SecurityProviderUnavailable`
+- `SecurityProviderAuthenticationFailed`
 
 ## 15. Error handling
 
@@ -421,6 +442,8 @@ Map them into stable application errors containing only what the UI requires, fo
 
 Technical context must never expose secrets.
 
+Errors from optional security providers must remain distinguishable from FIDO/CTAP errors so a remote integration failure can never be misrepresented as authenticator failure.
+
 ## 16. Destructive operations
 
 Credential deletion and reset must be isolated from ordinary inspection flows.
@@ -428,6 +451,8 @@ Credential deletion and reset must be isolated from ordinary inspection flows.
 The frontend must never be the sole authority for whether a destructive operation is permitted. The backend must validate that a matching user confirmation state exists and has not expired.
 
 The backend must reject stale or replayed destructive requests.
+
+Optional export/encryption providers must never gain authority to initiate CTAP mutations.
 
 ## 17. Testing strategy
 
@@ -473,7 +498,8 @@ Use Playwright or equivalent for:
 - screen sizes;
 - destructive-operation dialogs;
 - unsupported-capability presentation;
-- offline operation.
+- offline operation;
+- optional-provider-disabled behaviour.
 
 ### Hardware-in-the-loop testing
 
@@ -513,7 +539,193 @@ Users should not need to install Homebrew or system packages on macOS or Windows
 
 Shared libraries must load only from trusted application locations.
 
-## 20. Platform rollout
+## 20. Optional BooGooCypher integration
+
+BooGooCypher is a possible future integration for encrypted exports and other explicitly user-initiated protected data flows.
+
+It is **not** part of the FIDO management trust path and must never become required for ordinary authenticator management.
+
+### Architectural boundary
+
+The integration must sit behind a generic security-provider interface rather than leaking BooGoo-specific concepts throughout FidoManager.
+
+Conceptually:
+
+```text
+FidoManager
+│
+├── FIDO Core
+│   └── libfido2
+│
+├── Local application data
+│
+└── Optional security providers
+    ├── None / local
+    └── BooGooCypher
+        └── HTTPS API
+```
+
+A provider interface may resemble:
+
+```rust
+trait EncryptionProvider {
+    async fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>>;
+    async fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>>;
+}
+```
+
+The exact Rust API remains subject to review. The important architectural requirement is that FIDO core code must not depend on BooGooCypher types, endpoints, authentication headers, or wire formats.
+
+### Initial use cases
+
+Reasonable future uses include:
+
+- encrypted diagnostic exports;
+- encrypted device-information reports;
+- encrypted FidoManager configuration backups;
+- encrypted compatibility/audit bundles;
+- future protected metadata exports if the application later manages additional authenticator functions.
+
+The integration must not claim to back up FIDO private keys. Private credential keys are intended to remain non-exportable inside authenticators.
+
+### Data minimization
+
+Encryption is not a justification for retaining unnecessary data.
+
+The preferred order remains:
+
+1. do not persist information that FidoManager does not need;
+2. minimize retained metadata;
+3. encrypt only information that has a legitimate persistence/export requirement.
+
+### Frontend/backend boundary
+
+The Svelte/WebView frontend must never call BooGooCypher directly.
+
+All provider communication occurs from the Rust backend:
+
+```text
+Tauri UI
+   │
+   ▼
+Rust application service
+   │
+   ▼
+EncryptionProvider
+   │
+   ▼
+BooGooCypher client
+   │ HTTPS
+   ▼
+BooGooCypher API
+```
+
+The frontend may request an operation such as `export encrypted`, but the backend owns provider selection, authentication, endpoint validation, payload construction, timeout handling, and error normalization.
+
+### API credential handling
+
+Credentials such as an `X-BooGoo-Key` must never be embedded in frontend code, committed configuration, browser storage, logs, or export payloads.
+
+If persistent API credentials are needed, use OS-provided protected secret storage:
+
+- macOS Keychain;
+- Windows Credential Manager / DPAPI-backed storage;
+- Linux Secret Service/keyring where available.
+
+The credentials must be scoped only to the BooGoo provider and must not grant authority to perform FIDO operations.
+
+Internal service-to-service credentials used by a BooGooCypher deployment must not be exposed to the desktop client unless they are explicitly designed as client credentials.
+
+### Provider modes
+
+Future configuration may distinguish:
+
+```text
+Encryption provider
+
+○ Disabled
+○ BooGooCypher — Local/LAN
+○ BooGooCypher — Remote HTTPS
+```
+
+The default is `Disabled`.
+
+A LAN deployment and a remote deployment must share the same provider abstraction so FidoManager does not couple itself to a particular hosting topology.
+
+### Network isolation
+
+Enabling BooGooCypher must not grant general network access to the WebView.
+
+The Rust provider client should use an allowlisted endpoint configured by the user. Redirect behaviour, TLS validation, proxy behaviour, and certificate errors must be reviewed before release.
+
+Provider failure must degrade only the requested provider feature. Core FIDO management must continue working offline.
+
+### Future hardware-bound encryption research
+
+A later research path may investigate deriving or unwrapping an export-protection key using authenticator-supported mechanisms such as CTAP `hmac-secret`, where supported.
+
+A possible model is:
+
+```text
+Authenticator
+    │
+    │ hardware-bound secret derivation
+    ▼
+Key-encryption key
+    │
+    ▼
+unwrap export/data key
+    │
+    ▼
+BooGooCypher-encrypted archive
+```
+
+This is explicitly **not** part of MVP or the first BooGoo integration.
+
+Before implementation it requires separate review of:
+
+- authenticator capability requirements;
+- recovery when a security key is lost or reset;
+- multi-key recovery/enrollment;
+- salt and context binding;
+- cloning/replay assumptions;
+- key rotation;
+- portability across authenticators;
+- whether the resulting design still satisfies vendor neutrality.
+
+No design should make user data unrecoverable without clearly presenting that consequence before encryption.
+
+### Threat-model additions
+
+Introducing BooGooCypher adds threats that do not exist in the offline core:
+
+- API credential theft;
+- malicious or compromised provider endpoint;
+- TLS interception or endpoint substitution;
+- accidental export of identifiers/credential metadata;
+- availability failure;
+- replay of export requests;
+- confusing provider errors with authenticator errors;
+- future dependency on a service that was intended to be optional.
+
+These threats must be added to `SECURITY_MODEL.md` before implementation.
+
+### Release gate
+
+BooGooCypher support must not ship merely because the API client works.
+
+Before enabling it in a public build:
+
+- the provider interface must be reviewed;
+- exact exported data fields must be documented;
+- secret-storage behaviour must be tested on each target OS;
+- no provider secret may cross into the WebView;
+- the provider endpoint configuration must be constrained and validated;
+- offline regression tests must prove core management works without the provider;
+- failure and timeout handling must be tested;
+- the security model must include the new network trust boundary.
+
+## 21. Platform rollout
 
 ### Stage A: macOS development target
 
@@ -545,7 +757,7 @@ Initial targets:
 
 Validate hidraw access and udev behaviour. Missing permissions must produce a useful explanation rather than a generic device-not-found error.
 
-## 21. CI pipeline
+## 22. CI pipeline
 
 Every pull request should run:
 
@@ -573,9 +785,9 @@ cargo test
 - lockfile verification;
 - Tauri compile smoke test.
 
-PR builds must never receive production signing credentials.
+PR builds must never receive production signing credentials or production BooGooCypher credentials.
 
-## 22. Release pipeline
+## 23. Release pipeline
 
 Use semantic versioning.
 
@@ -612,7 +824,7 @@ publish GitHub Release
 
 Prefer native runners for each target OS rather than cross-compiling security-sensitive installers without a clear reason.
 
-## 23. Signing
+## 24. Signing
 
 ### macOS
 
@@ -637,7 +849,7 @@ At minimum provide:
 - SHA-256 checksums;
 - signed release metadata where practical.
 
-## 24. Updates
+## 25. Updates
 
 Do not enable silent automatic updates in the first alpha.
 
@@ -653,7 +865,9 @@ When an updater is introduced:
 
 Authenticator management must continue working if the update service is unavailable.
 
-## 25. Release artifacts
+Updater network configuration and BooGooCypher provider configuration must remain separate trust paths.
+
+## 26. Release artifacts
 
 Expected artifacts:
 
@@ -676,7 +890,7 @@ Additionally:
 - release notes;
 - third-party notices.
 
-## 26. Build provenance
+## 27. Build provenance
 
 Record for each build:
 
@@ -693,7 +907,7 @@ Generate an SBOM in SPDX or CycloneDX format.
 
 Consider provenance attestations before stable release.
 
-## 27. Branching strategy
+## 28. Branching strategy
 
 Keep the branch model simple:
 
@@ -705,7 +919,7 @@ vX.Y.Z     immutable release tags
 
 Use pull requests for changes to `main`. Require CI before merge once repository bootstrap is complete.
 
-## 28. Security policy
+## 29. Security policy
 
 Before public alpha add `SECURITY.md` defining:
 
@@ -716,7 +930,7 @@ Before public alpha add `SECURITY.md` defining:
 
 Security reports must not require a public GitHub issue.
 
-## 29. Licensing
+## 30. Licensing
 
 Proposal: Apache-2.0.
 
@@ -730,7 +944,7 @@ Third-party licences must be preserved in `THIRD_PARTY_NOTICES.md`.
 
 Before branding is finalized, separately verify trademark requirements around use of `FIDO` in the product name or public marketing.
 
-## 30. ADRs to create early
+## 31. ADRs to create early
 
 - ADR-001: Desktop application rather than web/mobile
 - ADR-002: Tauri 2 + Rust
@@ -739,8 +953,9 @@ Before branding is finalized, separately verify trademark requirements around us
 - ADR-005: no cloud account and no telemetry
 - ADR-006: no automatic updater during initial alpha
 - ADR-007: WebView PIN-memory limitation accepted provisionally for MVP, subject to review before 1.0
+- ADR-008: optional security-provider architecture; BooGooCypher remains outside the core FIDO trust path
 
-## 31. Milestones
+## 32. Milestones
 
 ### Milestone 0 — Repository foundation
 
@@ -806,7 +1021,19 @@ Still read-only.
 
 Windows and Linux validation expand after the macOS core is stable.
 
-## 32. Pre-1.0 security gates
+### Post-MVP / later milestone — Optional encrypted export
+
+Only after the core FIDO manager is stable:
+
+- define the generic `EncryptionProvider` contract;
+- implement encrypted export format independently of any one provider;
+- implement BooGooCypher provider behind that contract;
+- use OS secret storage for provider credentials;
+- test offline degradation;
+- complete provider-specific threat-model review;
+- separately evaluate any hardware-bound `hmac-secret` design.
+
+## 33. Pre-1.0 security gates
 
 Version 1.0 must not ship until these have been explicitly reviewed:
 
@@ -823,7 +1050,16 @@ Version 1.0 must not ship until these have been explicitly reviewed:
 11. platform-specific HID permissions.
 12. vendor-neutral behaviour on multiple authenticators.
 
-## 33. Review questions
+If BooGooCypher support is included before 1.0, additionally review:
+
+13. provider API credential storage.
+14. endpoint validation and TLS behaviour.
+15. export data minimization.
+16. provider isolation from CTAP mutation authority.
+17. provider-failure/offline behaviour.
+18. separation of updater and provider trust roots.
+
+## 34. Review questions
 
 External reviewers should specifically challenge:
 
@@ -839,3 +1075,7 @@ External reviewers should specifically challenge:
 10. Is delaying automatic updates until after alpha the correct trade-off?
 11. Which CTAP features would be expensive to add later if the abstraction is wrong?
 12. Which platform-specific behaviours are currently missing from the plan?
+13. Is the proposed optional security-provider boundary sufficient to keep BooGooCypher out of the core FIDO trust path?
+14. Should encrypted export use a generic provider-independent envelope format before handing ciphertext processing to BooGooCypher?
+15. Are OS secret stores sufficient for BooGoo API credentials, or should additional application-level protection be required?
+16. Is a future `hmac-secret`-based hardware-bound export scheme compatible with vendor neutrality and practical recovery requirements?
