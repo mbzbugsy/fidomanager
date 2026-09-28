@@ -1,48 +1,73 @@
 # FidoManager Architecture and Release Plan
 
-Status: Proposed  
-Target: Initial architecture and security review  
+Status: Proposed, revision 2  
+Target: Independent architecture and security review  
 Repository: `mbzbugsy/fidomanager`
+
+This revision incorporates the first independent security review. The principal architectural change is that the WebView is no longer trusted to collect authenticator PINs or to prove user consent for sensitive operations.
 
 ## 1. Purpose
 
-FidoManager is a local, vendor-neutral desktop application for inspecting and managing FIDO2 / CTAP authenticators.
+FidoManager is a local, vendor-neutral desktop application for inspecting and managing FIDO2 / CTAP authenticators such as Thetis, YubiKey, Feitian and similar security keys.
 
-The project addresses a practical gap between vendor-specific management applications, limited browser management UIs, and powerful but low-level CLI tooling.
+The project addresses a practical gap between vendor-specific management tools, limited browser management UIs, and powerful but low-level CLI tooling.
 
-The application must not assume support based on vendor identity. All behaviour should be driven by authenticator-reported capabilities.
+The application must not infer support from vendor identity. Behaviour should be driven by authenticator capabilities, current device configuration, platform availability, adapter support, authorization requirements and application policy.
 
 ## 2. Core principles
 
 ### Local first
 
-Authenticator management must work locally and offline. The application must not require an account, backend service, cloud storage, telemetry, analytics, or remote configuration.
+Core authenticator management must work offline and must not require an account, backend service, cloud storage, telemetry, analytics or remote configuration.
 
-No authenticator information should leave the machine unless the user explicitly initiates an export or another clearly documented optional feature.
+No authenticator information leaves the machine unless the user explicitly invokes a documented export or other optional network-backed feature.
 
 ### Vendor neutrality
 
-Core logic must depend on FIDO / CTAP capabilities rather than manufacturer checks.
+Core logic depends on CTAP/FIDO semantics, not manufacturer checks.
 
-Vendor-specific extensions may be added later, but only behind explicit extension boundaries.
+Evidence-backed compatibility workarounds may exist behind a narrowly governed compatibility layer, but vendor identity must not become the core dispatch mechanism.
 
-### Capability-driven UI
+### Capability-driven, state-aware UI
 
-The UI must expose only operations supported by the connected authenticator. Unsupported operations should remain hidden or be explicitly shown as unavailable.
+The application must distinguish at least:
 
-### Safe failure
+1. authenticator-advertised support;
+2. current authenticator configuration;
+3. adapter/library support;
+4. OS/transport availability;
+5. current authentication/authorization requirements;
+6. application policy.
 
-Ambiguous device state, CTAP errors, transport errors, malformed responses, disconnects, and timeouts must fail closed.
+A single boolean such as `supportsCredentialManagement` is not sufficient to model all of those states.
 
-The application must never infer success for a destructive operation.
+Unknown CTAP versions/options must be preserved for diagnostics but must not automatically enable operations.
+
+### Explicit trust boundaries
+
+The Svelte/WebView renderer is presentation-only for sensitive workflows.
+
+A compromised renderer is in scope. It must not be able to:
+
+- obtain authenticator PINs through the legitimate workflow;
+- manufacture proof of user consent for credential deletion, PIN mutation or reset;
+- submit arbitrary device paths or raw CTAP commands;
+- choose native library paths;
+- gain generic network, filesystem, shell or process-spawn authority.
+
+### Safe failure and explicit uncertainty
+
+A timeout or disconnect after a mutation has been dispatched is not equivalent to failure.
+
+FidoManager must model uncertain outcomes explicitly and must never automatically retry an operation whose completion is unknown.
 
 ### Minimal privilege
 
-The frontend must not have shell access, unrestricted filesystem access, arbitrary network access, or direct HID/USB access.
+No renderer receives direct HID/USB access. Privileged platform access, if required, must be isolated behind the smallest practical native boundary.
 
 ### Transparent security
 
-The project should remain open source. Security-sensitive boundaries must be documented well enough for independent review.
+The project is open source. Security-sensitive architecture, secret handling, release provenance and destructive workflows must be documented for external review.
 
 ## 3. Proposed technology stack
 
@@ -50,13 +75,7 @@ The project should remain open source. Security-sensitive boundaries must be doc
 
 Tauri 2.
 
-Rationale:
-
-- cross-platform desktop packaging;
-- Rust backend;
-- smaller runtime footprint than Electron;
-- explicit permissions/capabilities model;
-- good fit for a thin frontend and security-sensitive native core.
+Tauri is retained for cross-platform packaging and presentation, but it is not treated as the security policy layer.
 
 ### Native backend
 
@@ -64,41 +83,39 @@ Rust stable.
 
 Rust owns:
 
+- session and operation policy;
 - authenticator discovery;
-- CTAP transport integration;
 - libfido2 integration;
-- capability parsing;
-- PIN operations;
-- credential management;
-- reset operations;
-- device-session lifecycle;
-- error normalization;
-- per-device operation serialization;
-- optional security-provider integrations.
+- capability/state mapping;
+- native PIN/UV workflow orchestration;
+- native final authorization for sensitive operations;
+- per-device workers and complete transactions;
+- reset state machines;
+- explicit mutation outcomes;
+- optional security-provider integrations;
+- network access for approved backend-only features.
 
 ### FIDO implementation
 
-libfido2.
+libfido2 through a narrow project-owned safe Rust adapter over reviewed low-level bindings.
 
-Do not reimplement CTAP framing, USB HID transport, or CBOR handling without a compelling reason.
+Do not reimplement CTAP framing, USB HID transport or CBOR handling without a compelling reason.
 
-A small Rust adapter should wrap only the libfido2 functionality used by FidoManager. The rest of the application must depend on internal Rust interfaces rather than raw libfido2 symbols.
+The selected binding strategy must preserve opaque native types, ownership rules, nullability, lengths, error mapping and the pinned native-library ABI/version policy.
 
 ### Frontend
 
-Proposed:
+- Svelte
+- TypeScript
+- pnpm
 
-- Svelte;
-- TypeScript;
-- pnpm.
-
-The frontend is intentionally thin and must contain no authenticator protocol logic.
+The frontend remains intentionally thin. It may display sanitized metadata and request workflows, but it does not own authenticator protocol logic, PINs, authorization tokens or destructive-operation approval.
 
 ## 4. Repository structure
 
 ```text
 fidomanager/
-├── src/
+├── src/                         # Svelte/WebView presentation
 │   ├── components/
 │   ├── pages/
 │   ├── stores/
@@ -106,24 +123,16 @@ fidomanager/
 ├── src-tauri/
 │   ├── src/
 │   │   ├── main.rs
-│   │   ├── commands/
+│   │   ├── commands/            # narrow Tauri command adapter
 │   │   └── state.rs
 │   ├── capabilities/
 │   └── tauri.conf.json
 ├── crates/
-│   ├── fido-core/
-│   │   ├── device.rs
-│   │   ├── capabilities.rs
-│   │   ├── credential.rs
-│   │   ├── errors.rs
-│   │   └── traits.rs
-│   ├── fido-libfido2/
-│   │   ├── discovery.rs
-│   │   ├── device.rs
-│   │   ├── credential_management.rs
-│   │   ├── pin.rs
-│   │   ├── reset.rs
-│   │   └── ffi/
+│   ├── fido-core/               # platform-independent domain model
+│   ├── fido-service/            # workflows, policy, sessions, outcomes
+│   ├── fido-native-ui/          # native PIN + sensitive confirmations
+│   ├── fido-libfido2/           # safe adapter + low-level bindings
+│   ├── fido-platform/           # platform-specific access/broker clients
 │   └── security-providers/
 │       └── boogoo/
 ├── tests/
@@ -139,177 +148,425 @@ fidomanager/
 └── THIRD_PARTY_NOTICES.md
 ```
 
-The `security-providers` area is optional and must not become a dependency of the core FIDO management path.
+The exact crate split may change after prototypes, but the trust boundaries should remain explicit.
 
-## 5. Architectural layers
+## 5. Revised architecture
 
-### Domain layer: `fido-core`
+```text
+Svelte / WebView
+      │
+      │ typed workflow requests + sanitized DTOs
+      ▼
+Tauri command adapter
+      │
+      │ caller/capability checks, payload validation,
+      │ opaque handle resolution, rate/size limits
+      ▼
+fido-service
+      │
+      ├── session + policy state
+      ├── operation reservation
+      ├── mutation outcome tracking
+      ├── native confirmation requests
+      └── optional export orchestration
+      │
+      ├──────────────► Native interaction module
+      │                 PIN/UV collection
+      │                 final sensitive confirmation
+      │
+      ▼
+Per-device worker
+      │
+      │ complete serialized transactions
+      ▼
+fido-libfido2
+      │
+      ▼
+OS HID / platform transport
+      │
+      ▼
+Authenticator
+```
 
-Contains platform-independent concepts such as:
+Optional network-backed security providers and the updater sit beside this path. Neither may issue CTAP mutations.
 
-- `Device`
-- `DeviceCapabilities`
-- `Credential`
-- `RelyingParty`
-- `PinStatus`
+## 6. Domain layer: `fido-core`
+
+`fido-core` contains platform-independent concepts and must not depend on Tauri, libfido2, USB/HID, BooGooCypher or networking.
+
+Expected concepts include:
+
+- `DeviceSessionId`
+- `DeviceSnapshot`
 - `AuthenticatorVersion`
+- `CapabilityState`
+- `RelyingParty`
+- `RelyingPartyHash`
+- `CredentialHandle`
+- `CredentialMetadata`
+- `AuthorizationRequirement`
+- `OperationKind`
+- `OperationOutcome`
+- structured recovery actions
 - stable application error types
-- backend traits/interfaces
 
-This crate must not depend on Tauri, USB/HID APIs, libfido2, BooGooCypher, or network transport.
+Device/account strings are untrusted input and must retain enough structure to sanitize safely for display.
 
-### Transport / implementation layer: `fido-libfido2`
+## 7. Application service layer: `fido-service`
 
-Responsibilities:
-
-- enumerate authenticators;
-- open and close authenticator sessions;
-- query authenticator information;
-- perform CTAP operations;
-- translate libfido2 errors into stable domain errors;
-- own FFI memory and lifecycle rules.
-
-No layer above this should understand libfido2 pointers or native error constants.
-
-### Application service layer: Tauri backend
+`fido-service` owns the security-relevant workflows independently of Tauri.
 
 Responsibilities:
 
-- application state;
-- device session lifecycle;
-- operation queues;
-- timeout/cancellation policy;
-- reconnect handling;
-- destructive-operation confirmation state;
-- mapping domain values into frontend DTOs;
-- mediating optional security-provider operations.
+- session creation/invalidation;
+- opaque handle issuance/resolution;
+- per-device operation reservation;
+- authentication workflow orchestration;
+- authorization scope/lifetime;
+- native confirmation requests;
+- complete transaction boundaries;
+- cancellation and timeout semantics;
+- outcome reconciliation;
+- reset reconnect ceremony;
+- policy decisions;
+- export orchestration.
 
-### Presentation layer
+The service layer must be unit/integration testable without a WebView.
 
-Responsibilities:
+## 8. Tauri command boundary
 
-- device list;
-- device details;
-- credential browser;
-- capability display;
-- PIN dialogs;
-- destructive-operation confirmation;
-- accessibility;
-- error presentation;
-- explicit export/provider selection where available.
+Tauri commands are a narrow adapter, not business logic.
 
-The presentation layer must never perform direct FIDO/HID operations or call BooGooCypher directly.
+Rules:
 
-## 6. Backend abstraction
+- declare an explicit application-command permission manifest;
+- explicitly select production capability files;
+- validate caller context using framework-provided context rather than a caller-supplied label;
+- use opaque session/credential handles instead of accepting authoritative device paths or credential metadata from the renderer;
+- bound request size and request rate;
+- reject stale handles;
+- expose no `execute_ctap`, `open_device(path)`, `load_library`, generic HTTP, shell or arbitrary filesystem command;
+- test direct hostile invocation of every sensitive command without the intended UI.
 
-Define a backend interface conceptually equivalent to:
+The renderer can request a workflow such as `begin_delete_credential(handle)` but cannot supply the final authorization decision.
+
+## 9. Native interaction boundary
+
+Sensitive user interaction must happen outside the WebView.
+
+Native interaction is required for:
+
+- authenticator PIN entry;
+- PIN set/change input;
+- final authorization of credential deletion;
+- final authorization of authenticator reset;
+- any future operation whose security property depends on proving deliberate user intent.
+
+The operation description shown to the user must be constructed from backend-owned state, not renderer-provided labels.
+
+Native UI does not claim universal protection from OS compromise, accessibility abuse or spoofing. The intended guarantee is narrower:
+
+> The legitimate sensitive workflow neither exposes the PIN to JavaScript nor treats JavaScript as proof of user approval.
+
+## 10. Authentication and authorization model
+
+Separate these concepts explicitly:
+
+1. PIN collection or built-in user verification;
+2. PIN/UV authorization/token acquisition;
+3. operation authorization scope;
+4. PIN modification.
+
+Credential inspection may require authentication even though it does not intentionally mutate credential state. Therefore secret-handling and authorization design must exist before credential enumeration is implemented.
+
+Rules:
+
+- reserve the device transaction before collecting sensitive authentication where practical;
+- request the minimum appropriate authorization scope;
+- keep PIN/UV tokens entirely native;
+- expire/invalidate authorization contexts explicitly;
+- never persist PIN/UV tokens to disk in the MVP;
+- never automatically retry an incorrect PIN;
+- do not silently set a PIN to unlock management features;
+- distinguish PIN, UV and operation-specific authorization requirements.
+
+## 11. Secret handling
+
+Protected material includes more than PIN text:
+
+- PIN input;
+- PIN/UV tokens;
+- PIN-derived values;
+- provider API credentials;
+- encryption/data keys;
+- secret-bearing CTAP extension data such as keys returned for other protocol features.
+
+Rules:
+
+- do not expose secret values to the renderer;
+- do not persist PINs or PIN/UV tokens;
+- minimize copies;
+- use owned zeroizing buffers in Rust where practical;
+- audit native-library copies and cleanup;
+- never include secrets in logs, tracing, panic formatting or diagnostic exports;
+- reject embedded NULs before C-string boundaries;
+- apply protocol-correct text/byte validation rather than JavaScript string-length assumptions;
+- document that OS paging, hibernation and crash collection prevent a universal guarantee that sensitive bytes never reach storage.
+
+## 12. Device identity and privacy
+
+Default identity remains session-scoped and ephemeral.
+
+AAGUID, product strings, VID/PID and USB paths are useful metadata but are not proof that a reconnected device is the same physical authenticator.
+
+Persistent fingerprints are not introduced for MVP.
+
+If persistent aliases or inventory are added later they require explicit privacy review and must never be confused with cryptographic proof of physical continuity.
+
+## 13. Per-device worker and transaction model
+
+One worker owns one live native device handle and its authorization context.
+
+Serialize complete transactions, not individual library calls.
+
+Example:
 
 ```text
-AuthenticatorBackend
-    enumerate_devices()
-    open_device()
-    get_info()
-    get_pin_status()
-    enumerate_credentials()
-    set_pin()
-    change_pin()
-    delete_credential()
-    reset()
+Credential inspection transaction
+  reserve worker
+  → collect/authenticate natively
+  → acquire scoped authorization
+  → enumerate RPs
+  → enumerate credentials
+  → release/erase authorization
+  → publish sanitized result
 ```
 
-libfido2 provides the production implementation.
+Rules:
 
-Tests use a fake backend.
+- no background polling may interleave with stateful enumeration;
+- queues are bounded;
+- stale requests expire before execution;
+- approved mutations may not sit indefinitely in a queue;
+- cancellation must not simply drop an async future while the native call continues;
+- the worker is not released to another operation until a blocking native call has actually completed or been reconciled;
+- multiple FidoManager instances must be considered;
+- browsers/vendor tools are external actors whose access cannot be fully serialized by FidoManager.
 
-This allows deterministic testing of disconnects, capability differences, protocol failures, retries, and destructive-operation state.
+## 14. Mutation outcome model
 
-## 7. Device identity and privacy
+Every mutation returns one of at least four semantic outcomes:
 
-Do not create persistent fingerprints for authenticators.
+| Outcome | Meaning |
+| --- | --- |
+| `NotDispatched` | No mutation request reached the authenticator. |
+| `Rejected` | A definitive rejection was received. |
+| `ConfirmedSuccessful` | A success response was received. |
+| `OutcomeUnknown` | Dispatch may have occurred but completion cannot be established. |
 
-AAGUID identifies an authenticator model, not necessarily an individual device. USB paths may change across reconnects.
+For `OutcomeUnknown`:
 
-FidoManager should therefore use an ephemeral session-scoped internal device ID.
+- never retry automatically;
+- block further mutations for that session until reconciliation or deliberate recovery;
+- communicate uncertainty explicitly;
+- use read-back where meaningful without pretending it proves which actor caused state;
+- after an uncertain PIN change, never automatically test both old and new PINs.
 
-Persistent device identity must not be added without a concrete use case and explicit privacy review.
+Error handling should use structured recovery actions such as:
 
-## 8. Device operation model
+- `AskForPin`
+- `Reauthenticate`
+- `PowerCycleRequired`
+- `WaitForDevice`
+- `ReconcileOutcome`
+- `ManualRecoveryRequired`
 
-Operations must be serialized per physical authenticator.
+A generic `retryable: true` is insufficient for sensitive operations.
 
-Multiple concurrent CTAP operations against the same device can create ambiguous state and poor UX.
+## 15. Capability and availability model
 
-Recommended model:
+Represent these dimensions separately:
 
 ```text
-DeviceWorker
-  └── queue
-      ├── GetInfo
-      ├── EnumerateCredentials
-      ├── ChangePin
-      ├── DeleteCredential
-      └── Reset
+advertised_support
+current_configuration
+adapter_support
+platform_availability
+authorization_requirement
+application_policy
 ```
 
-Only one operation runs per authenticator. Different authenticators may operate concurrently.
+Do not model CTAP evolution as a simple numeric version ladder. Preserve unknown version/option strings and negotiate explicit operation support.
 
-Operations should support explicit timeouts and device-removal detection. Cancellation should be supported where technically possible.
+Reserve architecture for:
 
-## 9. MVP functionality
+- permission-scoped PIN/UV authorization;
+- built-in UV independent of PIN text;
+- credential-management variants;
+- persistent or read-only authorization modes where supported;
+- structured PIN policy/configuration;
+- future reset/configuration requirements.
 
-### Phase 1: read-only device inspection
+## 16. Credential-management data model
 
-- enumerate connected authenticators;
-- display transport;
-- display product/manufacturer strings where available;
-- display AAGUID;
-- display supported CTAP versions;
-- display capabilities;
-- display PIN state/capability and retry information where available;
-- handle insertion, removal, reconnect, and unsupported operations.
+The domain model must retain both textual and binary RP identity material where available.
 
-No mutation operations in the first implementation milestone.
+At minimum preserve:
 
-### Phase 2: credential inspection
+- original RP ID hash;
+- optional RP ID text;
+- optional display name;
+- completeness/validation status.
 
-Where supported:
+Do not assume a returned RP ID string is always complete enough to recompute the authoritative hash.
 
-- enumerate relying parties;
-- enumerate discoverable/resident credentials;
-- display RP and user metadata;
-- display abbreviated credential IDs;
-- refresh state after reconnects.
+Before implementing credential enumeration, verify the selected libfido2 release exposes the required RP-hash semantics. If it does not, choose one of:
 
-Still read-only.
+1. an upstream-supported API;
+2. a narrowly reviewed project patch while pursuing upstream support;
+3. an explicit product limitation.
 
-### Phase 3: PIN management
+Unsupported/incomplete enumeration must never be presented as an empty authenticator.
 
-- set PIN;
-- change PIN;
-- report retries and blocked state accurately;
-- never persist PIN values.
+## 17. Destructive workflow authorization
 
-### Phase 4: credential deletion
+Credential deletion and reset require native, operation-specific authorization.
 
-- explicit confirmation;
-- display RP/account details;
-- execute once;
-- refresh authenticator state after completion;
-- never optimistically report success.
+A destructive workflow should:
 
-### Phase 5: reset
+1. resolve the renderer's opaque target to backend-owned state;
+2. reserve the device operation slot;
+3. construct the exact operation description from backend state;
+4. present native operation-specific confirmation;
+5. collect required authentication natively;
+6. revalidate session continuity and authorization;
+7. consume the approval exactly once;
+8. execute the operation;
+9. return a confirmed or explicitly uncertain outcome.
 
-Reset belongs in a dedicated Danger Zone.
+There must be no IPC equivalent to `confirm(id, true)` that can be invoked by renderer code to prove consent.
 
-Requirements:
+## 18. Credential deletion semantics
 
-1. explicit navigation;
-2. clear destructive-impact text;
-3. deliberate confirmation;
-4. physical-presence flow required by the authenticator;
-5. full device re-enumeration after completion.
+Deletion confirmation should display trustworthy backend-owned RP/account context and explain:
 
-## 10. Explicit non-goals for MVP
+- the credential on the authenticator will be deleted;
+- deleting it locally does not remove the registration from the website/service;
+- enumeration may be incomplete on unsupported devices;
+- no automatic retry occurs after an uncertain result.
+
+After confirmed deletion, refresh device state.
+
+## 19. Reset state machine
+
+Reset is a separate workflow, not a normal mutation with generic reconnect handling.
+
+Reset may require device-specific timing/power-cycle behaviour. The workflow must model explicit states such as:
+
+```text
+Idle
+→ AwaitingNativeConfirmation
+→ AwaitingExpectedDisconnect
+→ AwaitingCandidateReconnect
+→ AwaitingFreshCandidateConfirmation
+→ ExecutingReset
+→ Confirmed / OutcomeUnknown / Failed
+```
+
+Rules:
+
+- never transfer authorization automatically to a same-model replacement;
+- if multiple candidate devices make selection ambiguous, stop;
+- prefer a single connected candidate during reset where practical;
+- require fresh native confirmation of the reconnected candidate;
+- state clearly that FidoManager cannot cryptographically prove physical continuity for every authenticator;
+- reset warnings must cover credentials the application cannot enumerate;
+- describe the operation as a FIDO reset and do not imply unrelated PIV/OTP/OpenPGP applications are reset unless separately verified.
+
+## 20. MVP and implementation milestones
+
+### Milestone 0 — Repository foundation
+
+- architecture/security documentation;
+- ADR skeleton;
+- Tauri/Rust/Svelte bootstrap;
+- CI/dependency policy;
+- no device mutation.
+
+### Milestone 1 — Read-only device discovery
+
+- enumerate roaming authenticators;
+- insertion/removal handling;
+- `GetInfo`;
+- AAGUID and transport;
+- raw/normalized capability state;
+- version/option preservation;
+- no PIN collection;
+- no credential enumeration.
+
+This milestone may proceed while sensitive workflows are still under review.
+
+### Milestone 2 — Native authentication foundation
+
+Before credential inspection:
+
+- native PIN/UV interaction module;
+- scoped authorization model;
+- token lifetime/invalidation;
+- secret lifecycle tests;
+- no automatic wrong-PIN retry;
+- worker transaction reservation;
+- hostile-renderer tests proving PIN is not available to WebView.
+
+### Milestone 3 — Credential inspection
+
+- authenticated bounded inspection transaction;
+- enumerate RPs/credentials where fully supported;
+- preserve RP hash + optional text;
+- sanitize metadata;
+- clear views/authorization on disconnect;
+- explicit incomplete/unsupported states.
+
+### Milestone 4 — PIN management
+
+- set/change PIN through native interaction;
+- structured retry/block/policy errors;
+- explicit uncertain-outcome handling;
+- no mutation release until native call finishes/reconciles.
+
+### Milestone 5 — Credential deletion
+
+- native final confirmation;
+- backend-owned target description;
+- one-shot authorization;
+- stale/replay/race tests;
+- uncertain-outcome semantics;
+- real hardware validation on at least two independent authenticator implementations before a public mutation-capable build.
+
+### Milestone 6 — Reset
+
+- dedicated reset state machine;
+- reconnect ambiguity handling;
+- device-specific reset requirements;
+- native re-confirmation after reconnect;
+- sacrificial hardware tests only.
+
+### Milestone 7 — Public alpha
+
+A public alpha may expose only features whose security gates have passed.
+
+Required before any mutation-capable alpha:
+
+- renderer/IPC boundary review;
+- native auth/confirmation review;
+- platform process/elevation design;
+- packaged-app security tests;
+- signed build;
+- security policy and advisory channel;
+- SBOM and traceable build metadata;
+- compatibility claim limited to hardware actually tested.
+
+## 21. Explicit non-goals for initial MVP
 
 Do not initially implement:
 
@@ -322,442 +579,307 @@ Do not initially implement:
 - firmware updates;
 - biometric enrollment;
 - enterprise attestation configuration;
-- vendor-specific features;
 - NFC;
 - BLE;
 - remote device management;
 - cloud synchronization;
-- BooGooCypher integration in the initial MVP.
+- BooGooCypher in the initial FIDO MVP.
 
-These features must be evaluated separately after the CTAP core is stable.
+## 22. libfido2 / FFI policy
 
-## 11. PIN and secret handling
+Use a narrow project-owned safe adapter over reviewed generated low-level bindings or a reviewed `-sys` crate.
 
-PIN handling is security-sensitive.
+Required properties:
 
-Rules:
+- opaque native types;
+- RAII ownership and documented free/close order;
+- no borrowed pointer outliving its owner;
+- checked lengths/counts/nullability/integer conversions;
+- explicit embedded-NUL handling;
+- no implicit `Send`/`Sync` assumptions;
+- no unwinding across C callbacks;
+- no raw pointers or secret native structures in frontend DTOs;
+- documented native-library version and ABI policy.
 
-- never write a PIN to disk;
-- never log a PIN;
-- never include it in panic messages or diagnostics;
-- never cache it between operations;
-- zeroize native/Rust buffers where practical;
-- destroy native buffers immediately after use.
+Review `build.rs`, native acquisition, bindgen inputs, compiler flags, optional features and transitive native libraries.
 
-### WebView limitation
+Pin an approved libfido2 release. Do not download native libraries at application runtime.
 
-A Tauri frontend means a PIN temporarily exists in JavaScript memory, which cannot be reliably and deterministically zeroized.
+## 23. Linking strategy
 
-For the MVP:
+Initial preference, subject to platform validation:
 
-- use a password input;
-- disable autocomplete;
-- never place the PIN in persistent frontend state;
-- send it directly to the backend;
-- clear the UI field immediately;
-- ensure IPC payloads are never logged.
+### macOS
 
-This limitation is explicitly provisional and must be reviewed before 1.0.
+Prefer a bundled/static libfido2 arrangement where practical, with system Apple frameworks dynamically linked. Do not ship Homebrew build-machine paths.
 
-If a compromised-renderer threat must be mitigated more strongly, native secure input or a non-WebView UI architecture must be evaluated.
+### Windows
 
-## 12. Tauri security configuration
+Prefer static libfido2 where practical to reduce private DLL loading complexity. Remaining runtime DLL loads still require audit.
 
-Production builds should use a restrictive Content Security Policy.
+### Linux
 
-Conceptual baseline:
+- distro packages (`.deb`/`.rpm`): prefer system shared libraries with explicit minimum versions;
+- portable bundles: controlled bundled non-system dependencies with a documented patch/update obligation.
 
-```text
-default-src 'self'
-script-src 'self'
-style-src 'self'
-img-src 'self' data:
-connect-src 'none'
-```
+Static linking does not remove the obligation to track native dependency vulnerabilities.
 
-No remote JavaScript, remote fonts, arbitrary navigation, or iframe content.
+## 24. Windows privilege/elevation feasibility gate
 
-Do not expose shell execution, unrestricted filesystem APIs, process spawning, arbitrary HTTP, or clipboard access without an explicit feature requirement.
+Windows process architecture is not considered final until an early Windows 11 spike verifies the exact access requirements for:
 
-Sensitive native commands must validate operation state server-side rather than trusting frontend state.
+- enumeration;
+- credential management;
+- PIN operations;
+- reset.
 
-If optional network-backed security providers are introduced later, network access must remain in the Rust backend. The WebView must not receive general-purpose HTTP capability.
+If privileged direct HID access is required, do not elevate the Tauri/WebView process.
 
-## 13. Network policy
+Use a small on-demand native broker with:
 
-Core FIDO management must require no network connection.
+- fixed typed operation protocol;
+- authenticated local IPC;
+- strict peer/session validation;
+- no raw CTAP command interface;
+- no arbitrary paths/DLL/executable input;
+- native authorization inside the trusted operation path;
+- minimal privileges and lifetime.
 
-The frontend should have no general-purpose HTTP capability.
+The broker boundary must be decided before substantial Windows-specific UI investment.
 
-Optional integrations may use the network only when explicitly enabled by the user and must remain isolated from authenticator-management operations. They must not make FIDO inspection, PIN management, credential management, or reset dependent on service availability.
+## 25. Tauri/WebView hardening
 
-Expected future network-capable features are limited to:
+Production builds require:
 
-- signed application-update checks;
-- optional user-initiated encrypted export through a configured security provider such as BooGooCypher.
+- no remote JavaScript or remote fonts;
+- restrictive CSP matched to the pinned Tauri IPC mechanism;
+- constrained forms, frames, objects, navigation, new windows, downloads and custom protocols;
+- no arbitrary external URL opening;
+- explicit app-command permission manifest;
+- no generic HTTP in the renderer;
+- no shell/process-spawn access;
+- no unrestricted filesystem/clipboard capability;
+- no renderer-controlled update URLs, provider URLs or trust keys.
 
-Neither path may transmit authenticator identifiers unless the user has explicitly chosen data that contains such identifiers for export.
+CSP is defense-in-depth, not the sole outbound-network sandbox.
 
-## 14. Logging
+## 26. Logging and diagnostics
 
-Release builds should log minimally.
+Release logging is minimal.
 
 Never log:
 
-- PINs;
-- API credentials;
+- PINs or PIN/UV tokens;
+- provider API credentials;
 - encryption keys;
-- credential secret material;
-- full credential identifiers by default;
+- raw secret-bearing CTAP payloads;
+- full credential IDs by default;
 - USB serial numbers by default;
-- user IDs from credentials unless part of an explicit diagnostic export.
+- RP/user metadata by default.
 
-Prefer stable error categories such as:
+Diagnostic export must be explicit, previewable and redacted by default.
 
-- `TransportUnavailable`
-- `DeviceRemoved`
-- `PinInvalid`
-- `PinBlocked`
-- `OperationDenied`
-- `UnsupportedOperation`
-- `UserPresenceRequired`
-- `CredentialNotFound`
-- `ProtocolError`
-- `SecurityProviderUnavailable`
-- `SecurityProviderAuthenticationFailed`
+Treat metadata as ephemeral where practical. Clear credential views on disconnect and consider lock/inactivity clearing before public release.
 
-## 15. Error handling
+Do not fetch RP favicons/logos because doing so could disclose account relationships.
 
-Raw libfido2 errors should never reach the frontend.
+## 27. Testing strategy
 
-Map them into stable application errors containing only what the UI requires, for example:
+### Unit/property tests
 
-```json
-{
-  "code": "PIN_INVALID",
-  "user_message": "The PIN was not accepted.",
-  "retryable": true
-}
-```
+Test:
 
-Technical context must never expose secrets.
+- capability/state mapping;
+- handle/session invalidation;
+- authorization scope/lifetime;
+- one-shot approval consumption;
+- outcome transitions;
+- queue expiry;
+- reset state machine;
+- export/provider isolation.
 
-Errors from optional security providers must remain distinguishable from FIDO/CTAP errors so a remote integration failure can never be misrepresented as authenticator failure.
+### Fake-backend integration tests
 
-## 16. Destructive operations
-
-Credential deletion and reset must be isolated from ordinary inspection flows.
-
-The frontend must never be the sole authority for whether a destructive operation is permitted. The backend must validate that a matching user confirmation state exists and has not expired.
-
-The backend must reject stale or replayed destructive requests.
-
-Optional export/encryption providers must never gain authority to initiate CTAP mutations.
-
-## 17. Testing strategy
-
-### Unit tests
-
-`fido-core` should comprehensively test:
-
-- capability mapping;
-- operation eligibility;
-- error mapping;
-- state transitions;
-- destructive-operation eligibility.
-
-### Backend integration tests
-
-Use a fake authenticator backend to simulate:
+Simulate:
 
 - insertion/removal;
-- wrong PIN;
-- blocked PIN;
-- unsupported credential management;
-- timeout;
-- user-presence timeout;
-- credential removal between enumeration and deletion;
-- reconnect with a different device.
+- wrong PIN and block states;
+- timeout/user-presence timeout;
+- mutation success with lost response;
+- stale/replayed/reordered requests;
+- credential disappearance between enumeration and deletion;
+- reconnect with another identical model;
+- competing client changes;
+- suspend/resume/session lock.
 
-### FFI tests
+### Real adapter/native tests
 
-Validate:
+Add:
 
-- ownership;
-- null handling;
-- native string conversion;
-- buffer lengths;
-- error conversion;
-- cleanup on early-return paths.
+- transport-level fault injection;
+- sanitizer/instrumented native-library tests where practical;
+- malformed-device response handling;
+- FFI ownership/null/length cleanup tests;
+- packaged-app tests for real IPC, navigation and library loading.
 
-### UI tests
+### Hostile renderer tests
 
-Use Playwright or equivalent for:
+Directly invoke every sensitive Tauri command without using intended UI and prove that renderer code cannot:
 
-- keyboard navigation;
-- screen sizes;
-- destructive-operation dialogs;
-- unsupported-capability presentation;
-- offline operation;
-- optional-provider-disabled behaviour.
+- obtain PINs;
+- approve a destructive operation;
+- replace a target credential/device;
+- replay stale approvals;
+- access provider/updater secrets.
 
-### Hardware-in-the-loop testing
+### Hardware testing
 
-CI cannot replace real authenticators.
+Use dedicated sacrificial keys for destructive tests.
 
-Maintain a manual compatibility matrix. Initial reference hardware is a Thetis FIDO2 key. Before 1.0, validate against at least one YubiKey and one independent additional vendor.
+Before any public deletion/reset support, validate at least two independent authenticator implementations.
 
-## 18. Compatibility matrix
+Never identify a destructive test target solely by model name.
 
-Maintain `docs/DEVICE_COMPATIBILITY.md`.
+## 28. Compatibility matrix
 
-Example:
+Maintain `docs/DEVICE_COMPATIBILITY.md` by exact tested combinations where practical:
 
-```text
-| Device | OS | Detection | Info | PIN | Credentials | Delete | Reset |
-|--------|----|-----------|------|-----|-------------|--------|-------|
-| Thetis | macOS ARM64 | ✅ | ✅ | TBD | TBD | TBD | TBD |
-```
+- device/model;
+- firmware;
+- OS/version/architecture;
+- detection;
+- capability parsing;
+- authentication;
+- credential enumeration;
+- PIN operations;
+- deletion;
+- reset;
+- known limitations.
 
-One successful device must never be treated as proof of protocol-wide compatibility.
+A successful Thetis test does not imply protocol-wide compatibility.
 
-## 19. libfido2 integration and supply chain
+## 29. Optional BooGooCypher integration
 
-Do not download an unpinned native library at application launch.
+BooGooCypher is a possible post-MVP provider for encrypted exports and explicitly user-initiated protected data flows.
 
-Build dependencies must be reproducible.
+It is not part of the FIDO management trust path and must never be required for ordinary authenticator management.
 
-Recommended release strategy:
-
-- pin an approved libfido2 release;
-- verify source archive checksum;
-- build/package it in CI;
-- record the exact version in build metadata;
-- preserve all required third-party licence notices.
-
-Users should not need to install Homebrew or system packages on macOS or Windows.
-
-Shared libraries must load only from trusted application locations.
-
-## 20. Optional BooGooCypher integration
-
-BooGooCypher is a possible future integration for encrypted exports and other explicitly user-initiated protected data flows.
-
-It is **not** part of the FIDO management trust path and must never become required for ordinary authenticator management.
-
-### Architectural boundary
-
-The integration must sit behind a generic security-provider interface rather than leaking BooGoo-specific concepts throughout FidoManager.
-
-Conceptually:
+### Boundary
 
 ```text
-FidoManager
-│
-├── FIDO Core
-│   └── libfido2
-│
-├── Local application data
-│
-└── Optional security providers
-    ├── None / local
-    └── BooGooCypher
-        └── HTTPS API
+fido-service
+   │
+   └── export orchestration
+          │
+          ▼
+   EncryptionProvider
+          │
+          └── BooGooCypher client ──HTTPS──► BooGooCypher API
 ```
 
-A provider interface may resemble:
+The renderer never calls BooGooCypher directly.
 
-```rust
-trait EncryptionProvider {
-    async fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>>;
-    async fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>>;
-}
-```
+The FIDO core must not depend on BooGoo endpoints, headers, wire formats or availability.
 
-The exact Rust API remains subject to review. The important architectural requirement is that FIDO core code must not depend on BooGooCypher types, endpoints, authentication headers, or wire formats.
-
-### Initial use cases
-
-Reasonable future uses include:
+### Reasonable future uses
 
 - encrypted diagnostic exports;
 - encrypted device-information reports;
-- encrypted FidoManager configuration backups;
-- encrypted compatibility/audit bundles;
-- future protected metadata exports if the application later manages additional authenticator functions.
+- protected FidoManager configuration backups;
+- compatibility/audit bundles;
+- future metadata exports.
 
-The integration must not claim to back up FIDO private keys. Private credential keys are intended to remain non-exportable inside authenticators.
+FidoManager must never claim to export/back up non-exportable FIDO private credential keys.
+
+### Provider credential handling
+
+If persistent API credentials such as `X-BooGoo-Key` are required, store them only through OS-protected secret storage:
+
+- macOS Keychain;
+- Windows Credential Manager / DPAPI-backed mechanisms;
+- Linux Secret Service/keyring where available.
+
+Provider credentials never cross into the WebView and never grant CTAP mutation authority.
+
+### Network/provider policy
+
+- provider disabled by default;
+- local/LAN and remote HTTPS deployments use the same provider abstraction;
+- endpoint is explicit and constrained;
+- redirects, proxy behaviour, TLS validation and certificate errors require review;
+- provider failure affects only the requested provider feature;
+- core management remains offline-capable;
+- updater and BooGoo trust roots/configuration remain separate.
 
 ### Data minimization
 
-Encryption is not a justification for retaining unnecessary data.
+Encryption is not justification for collecting or persisting unnecessary metadata.
 
-The preferred order remains:
+Prefer:
 
-1. do not persist information that FidoManager does not need;
-2. minimize retained metadata;
-3. encrypt only information that has a legitimate persistence/export requirement.
+1. do not store it;
+2. minimize it;
+3. encrypt only legitimate retained/exported data.
 
-### Frontend/backend boundary
+### Future hardware-bound export research
 
-The Svelte/WebView frontend must never call BooGooCypher directly.
+A later design may investigate authenticator-supported mechanisms such as `hmac-secret` to derive/unwrap export protection keys.
 
-All provider communication occurs from the Rust backend:
+This requires a separate ADR/security review covering:
 
-```text
-Tauri UI
-   │
-   ▼
-Rust application service
-   │
-   ▼
-EncryptionProvider
-   │
-   ▼
-BooGooCypher client
-   │ HTTPS
-   ▼
-BooGooCypher API
-```
+- capability requirements;
+- recovery after key loss/reset;
+- multi-key recovery;
+- salt/context binding;
+- replay/cloning assumptions;
+- rotation;
+- portability/vendor neutrality;
+- explicit unrecoverability warnings.
 
-The frontend may request an operation such as `export encrypted`, but the backend owns provider selection, authentication, endpoint validation, payload construction, timeout handling, and error normalization.
+It is not part of MVP or the first BooGoo integration.
 
-### API credential handling
+## 30. Network policy
 
-Credentials such as an `X-BooGoo-Key` must never be embedded in frontend code, committed configuration, browser storage, logs, or export payloads.
+Core authenticator operations require no network connection.
 
-If persistent API credentials are needed, use OS-provided protected secret storage:
+Only narrowly scoped backend modules may use networking:
 
-- macOS Keychain;
-- Windows Credential Manager / DPAPI-backed storage;
-- Linux Secret Service/keyring where available.
+- future signed update checks;
+- explicitly enabled security providers such as BooGooCypher.
 
-The credentials must be scoped only to the BooGoo provider and must not grant authority to perform FIDO operations.
+Neither may transmit authenticator metadata unless the user explicitly selected that data for export.
 
-Internal service-to-service credentials used by a BooGooCypher deployment must not be exposed to the desktop client unless they are explicitly designed as client credentials.
+Network authority must not be shared with the FIDO operation layer.
 
-### Provider modes
+## 31. Platform rollout
 
-Future configuration may distinguish:
+### macOS first
 
-```text
-Encryption provider
-
-○ Disabled
-○ BooGooCypher — Local/LAN
-○ BooGooCypher — Remote HTTPS
-```
-
-The default is `Disabled`.
-
-A LAN deployment and a remote deployment must share the same provider abstraction so FidoManager does not couple itself to a particular hosting topology.
-
-### Network isolation
-
-Enabling BooGooCypher must not grant general network access to the WebView.
-
-The Rust provider client should use an allowlisted endpoint configured by the user. Redirect behaviour, TLS validation, proxy behaviour, and certificate errors must be reviewed before release.
-
-Provider failure must degrade only the requested provider feature. Core FIDO management must continue working offline.
-
-### Future hardware-bound encryption research
-
-A later research path may investigate deriving or unwrapping an export-protection key using authenticator-supported mechanisms such as CTAP `hmac-secret`, where supported.
-
-A possible model is:
-
-```text
-Authenticator
-    │
-    │ hardware-bound secret derivation
-    ▼
-Key-encryption key
-    │
-    ▼
-unwrap export/data key
-    │
-    ▼
-BooGooCypher-encrypted archive
-```
-
-This is explicitly **not** part of MVP or the first BooGoo integration.
-
-Before implementation it requires separate review of:
-
-- authenticator capability requirements;
-- recovery when a security key is lost or reset;
-- multi-key recovery/enrollment;
-- salt and context binding;
-- cloning/replay assumptions;
-- key rotation;
-- portability across authenticators;
-- whether the resulting design still satisfies vendor neutrality.
-
-No design should make user data unrecoverable without clearly presenting that consequence before encryption.
-
-### Threat-model additions
-
-Introducing BooGooCypher adds threats that do not exist in the offline core:
-
-- API credential theft;
-- malicious or compromised provider endpoint;
-- TLS interception or endpoint substitution;
-- accidental export of identifiers/credential metadata;
-- availability failure;
-- replay of export requests;
-- confusing provider errors with authenticator errors;
-- future dependency on a service that was intended to be optional.
-
-These threats must be added to `SECURITY_MODEL.md` before implementation.
-
-### Release gate
-
-BooGooCypher support must not ship merely because the API client works.
-
-Before enabling it in a public build:
-
-- the provider interface must be reviewed;
-- exact exported data fields must be documented;
-- secret-storage behaviour must be tested on each target OS;
-- no provider secret may cross into the WebView;
-- the provider endpoint configuration must be constrained and validated;
-- offline regression tests must prove core management works without the provider;
-- failure and timeout handling must be tested;
-- the security model must include the new network trust boundary.
-
-## 21. Platform rollout
-
-### Stage A: macOS development target
-
-Primary target:
+Primary development target:
 
 - Apple Silicon macOS;
 - Thetis authenticator.
 
-Produce signed/notarized packages for public alpha.
+Validate the packaged, quarantined/notarized application, not just development builds. Test hubs, reconnects, sleep/wake and minimum supported macOS.
 
-Intel/universal builds may follow once the native dependency story is stable.
+### Windows second, but architecture spike early
 
-### Stage B: Windows
+Run the privilege/access feasibility spike before freezing cross-platform process boundaries.
 
-Initial target:
+Target Windows 11 x64 initially.
 
-- Windows 11 x64.
-
-Produce a signed installer.
-
-Explicitly validate interaction with Windows Hello and platform authenticators so they are not accidentally exposed as manageable roaming keys unless intentionally supported.
-
-### Stage C: Linux
+### Linux
 
 Initial targets:
 
 - Ubuntu LTS;
 - current Fedora.
 
-Validate hidraw access and udev behaviour. Missing permissions must produce a useful explanation rather than a generic device-not-found error.
+Distinguish access denied from device absent. Do not solve HID access by running the application as root or making all hidraw devices world writable.
 
-## 22. CI pipeline
+Installation of system access rules is a separate administrative action.
+
+## 32. CI pipeline
 
 Every pull request should run:
 
@@ -775,141 +897,138 @@ tests
 ```text
 cargo fmt --check
 cargo clippy -- -D warnings
-cargo test
+cargo test --locked
 ```
 
-### Security and dependency checks
+### Security/build
 
-- `cargo audit`;
-- dependency policy check;
+- dependency policy/audit checks;
 - lockfile verification;
-- Tauri compile smoke test.
+- native dependency/version checks;
+- Tauri compile/package smoke tests where practical;
+- secret scanning;
+- test that production capability manifests contain only expected commands.
 
-PR builds must never receive production signing credentials or production BooGooCypher credentials.
+Pin GitHub Actions by full commit SHA for release-sensitive workflows.
 
-## 23. Release pipeline
+PR jobs never receive production signing or BooGoo credentials.
+
+Do not execute untrusted PR code in privileged release contexts.
+
+## 33. Release pipeline
 
 Use semantic versioning.
-
-Examples:
-
-```text
-0.1.0-alpha.1
-0.1.0-beta.1
-0.1.0
-1.0.0
-```
-
-Release flow:
 
 ```text
 main
   ↓
-release candidate
+approved release commit
   ↓
 tag vX.Y.Z
   ↓
-GitHub Actions native build matrix
+native OS build jobs
   ↓
-sign
+artifact digest handoff
   ↓
-notarize where applicable
+isolated signing/notarization
   ↓
-generate checksums
+final checksums + SBOM + provenance
   ↓
-generate SBOM
-  ↓
-publish GitHub Release
+GitHub Release
 ```
 
-Prefer native runners for each target OS rather than cross-compiling security-sensitive installers without a clear reason.
+Requirements:
 
-## 24. Signing
+- release tags resolve to reviewed commits;
+- protected release environments;
+- minimal job token permissions;
+- untrusted caches/artifacts are not blindly promoted into signing jobs;
+- signing is bound to expected artifact digests;
+- final checksums are generated after all artifact-changing steps.
+
+## 34. Signing and packaging
 
 ### macOS
-
-Public releases should use:
 
 - Developer ID signing;
-- hardened runtime;
-- Apple notarization.
-
-Signing credentials must be available only to protected release jobs.
-
-### Windows
-
-Production installers must be Authenticode signed with an appropriate trusted code-signing solution.
-
-Signing secrets must not be exposed to normal PR workflows.
-
-### Linux
-
-At minimum provide:
-
-- SHA-256 checksums;
-- signed release metadata where practical.
-
-## 25. Updates
-
-Do not enable silent automatic updates in the first alpha.
-
-Initial releases should require explicit user-initiated installation.
-
-When an updater is introduced:
-
-- update artifacts must be cryptographically signed;
-- updater signing keys must be backed up securely;
-- updater signing must use credentials separate from OS code-signing identities;
-- update endpoints must use HTTPS;
-- forced updates should be reserved for a separately documented emergency policy.
-
-Authenticator management must continue working if the update service is unavailable.
-
-Updater network configuration and BooGooCypher provider configuration must remain separate trust paths.
-
-## 26. Release artifacts
-
-Expected artifacts:
-
-### macOS
-
-- signed `.dmg` or equivalent package.
+- Hardened Runtime;
+- minimal entitlements;
+- no release debugger entitlement;
+- notarization and ticket stapling;
+- validate nested helpers/libraries and final distributable.
 
 ### Windows
 
-- signed `.msi` or NSIS installer.
+- Authenticode-sign binaries/helpers/installers;
+- timestamp signatures;
+- test clean install, upgrade, repair, uninstall and failure recovery;
+- audit DLL search/loading even when libfido2 is statically linked;
+- define WebView2 runtime servicing strategy.
 
 ### Linux
 
-- AppImage and/or `.deb` initially.
+- checksums plus authenticated release metadata;
+- define supported package/distro/runtime matrix;
+- package-specific dependency/update policy.
 
-Additionally:
+## 35. Updater strategy
 
-- `SHA256SUMS`;
-- SBOM;
-- release notes;
-- third-party notices.
+No silent automatic updater in initial alpha.
 
-## 27. Build provenance
+Alpha still requires:
 
-Record for each build:
+- supported-version policy;
+- authenticated download path;
+- security-advisory channel;
+- maintainer response process;
+- practical urgent-fix distribution path.
 
-- FidoManager git commit;
-- Rust toolchain version;
-- Node/pnpm version;
-- Tauri version;
-- libfido2 version;
-- target triple.
+Before an updater ships:
 
-Pin GitHub Actions dependencies used by the release pipeline.
+- trusted update public key bundled with app;
+- signatures bound to application/version/platform/architecture/channel;
+- downgrade prevention owned by Rust policy;
+- key rotation and compromise recovery;
+- atomic installation/interrupted-update recovery;
+- updater blocked during active authenticator operations;
+- no renderer-controlled URL/key/version comparator;
+- no authenticator metadata in update requests.
 
-Generate an SBOM in SPDX or CycloneDX format.
+Updater signing keys remain separate from OS code-signing identities and from BooGoo credentials.
 
-Consider provenance attestations before stable release.
+## 36. Build provenance and SBOM
 
-## 28. Branching strategy
+Record per artifact:
 
-Keep the branch model simple:
+- source commit/tag;
+- Rust toolchain;
+- Node/pnpm;
+- Tauri and plugins;
+- libfido2 and native transitive dependency versions;
+- compiler/SDK/build options;
+- target architecture.
+
+Generate an SBOM for the actual shipped artifact including bundled native libraries/helpers.
+
+Distinguish:
+
+- traceable build;
+- repeatable build;
+- bit-reproducible build.
+
+Do not claim bit reproducibility merely because versions are pinned.
+
+## 37. Security policy
+
+Before public alpha add `SECURITY.md` with:
+
+- private vulnerability reporting;
+- supported versions;
+- response targets;
+- coordinated disclosure policy;
+- advisory/urgent update communication path.
+
+## 38. Branching strategy
 
 ```text
 main       expected to build
@@ -917,165 +1036,83 @@ feature/*  normal development
 vX.Y.Z     immutable release tags
 ```
 
-Use pull requests for changes to `main`. Require CI before merge once repository bootstrap is complete.
+Use pull requests for implementation changes to `main` once bootstrap is complete. Require relevant CI before merge.
 
-## 29. Security policy
+## 39. ADRs to create early
 
-Before public alpha add `SECURITY.md` defining:
-
-- private vulnerability-reporting process;
-- supported release versions;
-- expected response times;
-- coordinated disclosure policy.
-
-Security reports must not require a public GitHub issue.
-
-## 30. Licensing
-
-Proposal: Apache-2.0.
-
-Reasons:
-
-- permissive;
-- explicit patent grant;
-- appropriate for infrastructure/security tooling.
-
-Third-party licences must be preserved in `THIRD_PARTY_NOTICES.md`.
-
-Before branding is finalized, separately verify trademark requirements around use of `FIDO` in the product name or public marketing.
-
-## 31. ADRs to create early
-
-- ADR-001: Desktop application rather than web/mobile
-- ADR-002: Tauri 2 + Rust
+- ADR-001: desktop rather than web/mobile
+- ADR-002: Tauri 2 + Rust presentation/native split
 - ADR-003: libfido2 as CTAP implementation
-- ADR-004: vendor-neutral capability-driven core
+- ADR-004: vendor-neutral capability/state model
 - ADR-005: no cloud account and no telemetry
 - ADR-006: no automatic updater during initial alpha
-- ADR-007: WebView PIN-memory limitation accepted provisionally for MVP, subject to review before 1.0
-- ADR-008: optional security-provider architecture; BooGooCypher remains outside the core FIDO trust path
+- ADR-007: native PIN/UV and native final confirmation; renderer not trusted for consent
+- ADR-008: optional security-provider architecture; BooGooCypher outside core trust path
+- ADR-009: `fido-service` owns workflows/policy independently of Tauri
+- ADR-010: per-device worker serializes complete transactions
+- ADR-011: explicit `OutcomeUnknown` mutation semantics
+- ADR-012: reset uses a dedicated reconnect state machine
+- ADR-013: Windows elevation/broker decision after feasibility spike
+- ADR-014: FFI/binding and per-platform linking policy
+- ADR-015: updater trust root and downgrade policy
 
-## 32. Milestones
+## 40. Security gates
 
-### Milestone 0 — Repository foundation
+Sensitive functionality must not wait until 1.0 for review.
 
-- licence;
-- README;
-- architecture document;
-- security model;
-- review prompt;
-- Tauri skeleton;
-- CI;
-- dependency policy.
+### Before credential inspection
 
-No device mutation.
+- native PIN/UV path;
+- secret lifecycle;
+- authorization-token scope/lifetime;
+- complete transaction serialization;
+- RP hash/API semantics verified.
 
-### Milestone 1 — Read-only device inspection
+### Before any public mutation capability
 
-- enumerate devices;
-- insertion/removal handling;
-- `GetInfo`;
-- capabilities;
-- AAGUID;
-- versions;
-- PIN capability/state.
+- native operation-specific confirmation;
+- hostile-renderer invocation tests;
+- outcome-unknown handling;
+- cancellation semantics;
+- packaged-app IPC/navigation/library-loading review;
+- at least two independent authenticator implementations tested;
+- platform privilege model settled for that OS.
 
-### Milestone 2 — Credential inspection
+### Before reset
 
-- enumerate relying parties;
-- enumerate discoverable credentials;
-- account presentation;
-- refresh behaviour.
+- reset state machine and reconnect ambiguity handling;
+- sacrificial-hardware validation;
+- warnings cover credentials not visible in enumeration.
 
-Still read-only.
+### Before BooGoo public support
 
-### Milestone 3 — PIN management
+- provider interface review;
+- exact exported fields documented;
+- OS secret-store behaviour tested;
+- TLS/endpoint/proxy/redirect policy reviewed;
+- provider secrets proven absent from renderer;
+- offline regression suite;
+- security model includes provider/network boundary.
 
-- set PIN;
-- change PIN;
-- retry/error handling;
-- secret-handling review.
+### Before updater
 
-### Milestone 4 — Credential deletion
+- trust root, downgrade policy, rotation/recovery, atomic install and active-operation exclusion reviewed.
 
-- confirmation flow;
-- backend authorization of destructive operation;
-- delete;
-- refresh;
-- hardware validation.
+## 41. Review questions for the next independent reviewers
 
-### Milestone 5 — Reset
-
-- Danger Zone;
-- deliberate confirmation;
-- physical-presence flow;
-- reconnect/recovery behaviour.
-
-### Milestone 6 — Public alpha
-
-- signed macOS build;
-- security documentation;
-- compatibility documentation;
-- release SBOM;
-- reproducible release workflow.
-
-Windows and Linux validation expand after the macOS core is stable.
-
-### Post-MVP / later milestone — Optional encrypted export
-
-Only after the core FIDO manager is stable:
-
-- define the generic `EncryptionProvider` contract;
-- implement encrypted export format independently of any one provider;
-- implement BooGooCypher provider behind that contract;
-- use OS secret storage for provider credentials;
-- test offline degradation;
-- complete provider-specific threat-model review;
-- separately evaluate any hardware-bound `hmac-secret` design.
-
-## 33. Pre-1.0 security gates
-
-Version 1.0 must not ship until these have been explicitly reviewed:
-
-1. Tauri/WebView PIN exposure.
-2. IPC attack surface.
-3. CSP and navigation policy.
-4. libfido2 library loading.
-5. DLL/dylib search paths.
-6. updater trust model.
-7. release signing.
-8. destructive-action UX and replay resistance.
-9. logging/redaction.
-10. dependency supply chain.
-11. platform-specific HID permissions.
-12. vendor-neutral behaviour on multiple authenticators.
-
-If BooGooCypher support is included before 1.0, additionally review:
-
-13. provider API credential storage.
-14. endpoint validation and TLS behaviour.
-15. export data minimization.
-16. provider isolation from CTAP mutation authority.
-17. provider-failure/offline behaviour.
-18. separation of updater and provider trust roots.
-
-## 34. Review questions
-
-External reviewers should specifically challenge:
-
-1. Is Tauri an appropriate UI boundary for a security-key manager?
-2. Should PIN entry use a native UI rather than a WebView?
-3. Is libfido2 the correct abstraction boundary?
-4. Should the project maintain direct C FFI or use an existing Rust binding?
-5. Should libfido2 be statically or dynamically linked per platform?
-6. Is the per-device serialized operation model correct?
-7. Are reset and credential deletion sufficiently isolated?
-8. Are device identity/privacy assumptions correct?
-9. Is the CI/CD model sufficient for signed binaries?
-10. Is delaying automatic updates until after alpha the correct trade-off?
-11. Which CTAP features would be expensive to add later if the abstraction is wrong?
-12. Which platform-specific behaviours are currently missing from the plan?
-13. Is the proposed optional security-provider boundary sufficient to keep BooGooCypher out of the core FIDO trust path?
-14. Should encrypted export use a generic provider-independent envelope format before handing ciphertext processing to BooGooCypher?
-15. Are OS secret stores sufficient for BooGoo API credentials, or should additional application-level protection be required?
-16. Is a future `hmac-secret`-based hardware-bound export scheme compatible with vendor neutrality and practical recovery requirements?
+1. Does the revised native PIN/native confirmation boundary adequately address a compromised renderer?
+2. Is `fido-service` the correct owner of session, authorization and operation policy?
+3. Are complete-transaction serialization and cancellation semantics sufficient?
+4. Is the four-state mutation outcome model complete enough?
+5. Is the reset reconnect state machine safe when identical keys are present?
+6. Does the RP-hash/domain model avoid premature coupling to a libfido2 API limitation?
+7. Is the proposed project-owned safe FFI adapter appropriate, or should another binding strategy be preferred?
+8. Is the preliminary linking strategy sound per platform?
+9. What must the early Windows feasibility spike prove before the process architecture is frozen?
+10. Are the Tauri command restrictions and hostile-renderer tests sufficient?
+11. Which CTAP capabilities/options still require architectural reservation before implementation?
+12. Are public-alpha gates placed early enough?
+13. Is the optional BooGooCypher boundary sufficient to preserve offline/local-first FIDO management?
+14. Should encrypted export use a provider-independent envelope before provider-specific encryption?
+15. Are provider credentials and updater trust roots sufficiently separated?
+16. Which remaining assumptions are unsafe or insufficiently justified?
