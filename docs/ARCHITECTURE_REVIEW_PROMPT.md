@@ -1,6 +1,8 @@
 # Independent Architecture and Security Review Prompt
 
-Use this prompt unchanged for independent reviewers so their conclusions can be compared without cross-contamination.
+Use this prompt for independent reviewers of FidoManager revision 3.
+
+The purpose is not to obtain agreement. Reviewers should actively attempt to invalidate the security contracts before implementation of sensitive workflows.
 
 ---
 
@@ -13,185 +15,332 @@ https://github.com/mbzbugsy/fidomanager
 Purpose:
 A vendor-neutral desktop application for inspecting and managing FIDO2 / CTAP authenticators such as Thetis, YubiKey, Feitian and similar security keys.
 
-The current proposed architecture uses:
+## Source-control requirements
 
-- Tauri 2 for desktop shell/presentation;
-- Svelte/TypeScript WebView frontend;
-- Rust native backend;
-- a Tauri-independent `fido-service` layer that owns sessions, workflow policy and operation outcomes;
-- native PIN/UV collection and native final authorization for sensitive operations;
-- one per-device worker owning the live authenticator handle and executing complete serialized transactions;
-- a narrow safe Rust adapter over libfido2;
-- an explicit `OutcomeUnknown` state for mutations whose completion cannot be established;
-- a dedicated reset reconnect state machine;
-- no backend/cloud account;
-- no telemetry;
-- capability/state-driven vendor-neutral behaviour;
-- signed native desktop releases;
-- optional future security-provider integration such as BooGooCypher, outside the core FIDO trust path.
+Prefer reviewing the current local checkout of `mbzbugsy/fidomanager` if you have access to it.
 
-Please review the current versions of:
+Before review:
+
+1. fetch the latest remote state;
+2. switch to `main`;
+3. pull `origin/main` with fast-forward only;
+4. verify the working tree is clean;
+5. record the exact commit SHA reviewed.
+
+Read these current files directly from the repository:
 
 - `docs/ARCHITECTURE_AND_RELEASE_PLAN.md`
 - `docs/SECURITY_MODEL.md`
+- `docs/ARCHITECTURE_REVIEW_PROMPT.md`
 
-Do NOT simply confirm that the design is reasonable.
+If local repository access is unavailable, fetch the exact current `main` versions and report the commit SHA used.
 
-Act as if this application will eventually be trusted to manage real security keys containing production credentials.
+Do not modify files, create branches, commits, or pull requests. This is a read-only review.
 
-The first review already identified weaknesses around renderer trust, credential-inspection authentication, uncertain mutation outcomes, reset reconnect identity, and possible Windows elevation. The documents have been revised. Your task is to determine whether those revisions are actually sufficient and to identify new or remaining weaknesses.
+## Revision-3 architecture summary
 
-Review the proposal from the following perspectives:
+The proposed architecture now uses:
 
-1. Security architecture and trust boundaries
-2. Threat model
-3. CTAP/FIDO2 correctness
-4. libfido2 API fit and known abstraction gaps
-5. Rust/FFI safety
-6. Tauri/WebView command attack surface
-7. Native PIN/UV and consent boundary
-8. PIN/UV token and secret lifetime
-9. Device identification and reconnect ambiguity
-10. Complete-transaction serialization and cancellation
-11. Mutation `OutcomeUnknown` semantics and reconciliation
-12. Credential deletion safety
-13. Reset state-machine safety
-14. Cross-platform USB/HID behaviour
-15. macOS deployment/signing/notarization
-16. Windows privilege/elevation/broker architecture
-17. Linux permissions/udev/package behaviour
-18. CI/CD and supply-chain security
-19. Dependency and native-library management
-20. Updater architecture and rollback prevention
-21. Testing strategy, especially hostile-renderer and packaged-app tests
-22. Long-term maintainability
-23. Vendor-neutral capability/state modelling
-24. Optional BooGooCypher/security-provider boundary
-25. Architectural decisions that would be expensive to change later
+- Tauri 2 for desktop shell/presentation;
+- Svelte/TypeScript WebView frontend treated as untrusted for secrets and sensitive consent;
+- Rust trusted FIDO authority;
+- Tauri-independent `fido-service` as offline policy/workflow owner;
+- native PIN/UV collection and native operation-specific authorization;
+- one canonical per-device worker owning one live native handle;
+- complete serialized transactions;
+- zero queue for authorization-gated workflows;
+- immutable backend-owned `OperationIntent` / single-use `OperationPermit`;
+- application-managed PIN/UV authorization where supported by the selected libfido2 API;
+- a formal libfido2 fit spike before credential inspection;
+- authoritative RP-hash preservation and enumeration-completeness tracking;
+- separate mutation outcome, native-call quiescence, and view-freshness state;
+- explicit `NotDispatched`, `Rejected`, `ConfirmedSuccessful`, and `OutcomeUnknown` semantics backed by adapter-level evidence;
+- a minimal crash-safe recovery journal/barrier for unresolved mutations;
+- single-instance management authority per interactive user session;
+- a reset ceremony with high-friction approval before the timed reconnect stage and a hard single-device invariant;
+- an early Windows access/elevation spike;
+- if elevation is required, authoritative FIDO policy/native approval/device execution move into the elevated broker;
+- `fido-service` remains network-free;
+- optional export/provider functionality lives outside core FIDO authority and is excluded from MVP builds;
+- BooGooCypher remains post-MVP and its plaintext/encryption/key-wrapping trust model is intentionally unresolved pending a dedicated ADR.
 
-Pay particular attention to these decisions and open questions:
+## Prior review findings already addressed or reframed
 
-A. Is keeping Tauri for presentation while moving PIN entry and final sensitive authorization to native UI a sufficiently strong boundary against a compromised renderer?
+Earlier reviews identified:
 
-B. Does the proposed Tauri command adapter expose too much authority even with opaque handles and explicit permissions?
+- renderer-controlled PIN/consent;
+- credential inspection sequenced before authentication design;
+- reset/reconnect identity ambiguity;
+- binary success/failure semantics for uncertain mutations;
+- possible Windows elevation requirements;
+- native prompt flooding;
+- session-scoped uncertainty disappearing on disconnect;
+- unclear adapter evidence for mutation outcomes;
+- network/export code sharing the FIDO policy process;
+- incomplete RP-hash/libfido2 assumptions.
 
-C. Is `fido-service` the correct owner of sessions, authorization, policy, operation reservations, reset workflow and mutation outcomes?
+Revision 3 attempts to address these structurally.
 
-D. Is serializing complete transactions through a single per-device worker correct, including cancellation and external contention?
+Do not merely repeat the earlier findings. Determine whether the new contracts actually solve them and whether the fixes introduce new failure modes.
 
-E. Is the four-state mutation model (`NotDispatched`, `Rejected`, `ConfirmedSuccessful`, `OutcomeUnknown`) sufficient? What additional recovery states or invariants are required?
+## Review perspectives
 
-F. Is the reset reconnect state machine safe when two or more identical authenticators are present and physical continuity cannot be proven cryptographically?
+Review from at least these perspectives:
 
-G. Does the domain model preserve enough RP identity information, especially RP ID hashes, to avoid libfido2 credential-management abstraction problems?
+1. security architecture and trust boundaries;
+2. threat model completeness;
+3. CTAP/FIDO2 correctness;
+4. current libfido2 API fit;
+5. Rust/FFI safety and ownership;
+6. Tauri/WebView attack surface;
+7. native UI threading/modality/input-injection risks;
+8. PIN/UV/token lifecycle;
+9. immutable operation intent/permit design;
+10. renderer prompt-flood/consent-fatigue resistance;
+11. device/session identity and reconnect safety;
+12. per-device worker and external contention;
+13. mutation evidence and `OutcomeUnknown` correctness;
+14. crash-recovery journal/barrier;
+15. PIN set/change safety and retry exhaustion;
+16. credential enumeration/RP-hash completeness;
+17. credential deletion safety;
+18. reset timing and single-device ceremony;
+19. Windows broker authority and IPC;
+20. macOS/Linux process and UI behaviour;
+21. native-call timeout/cancellation/hung-call containment;
+22. single-instance policy;
+23. parser/resource-exhaustion resistance against malicious authenticators;
+24. optional export/provider isolation;
+25. BooGooCypher trust-model questions;
+26. updater/release/supply-chain security;
+27. testing strategy and missing fault-injection scenarios;
+28. long-term maintainability for a small project;
+29. vendor-neutral extensibility;
+30. architectural choices that would be expensive to reverse later.
 
-H. Should the libfido2 boundary use generated low-level bindings / a reviewed `-sys` crate plus a project-owned safe adapter, or another design?
+## Specific contracts to challenge
 
-I. Is the preliminary linking policy sound:
-- bundled/static libfido2 on macOS/Windows where practical;
-- system shared libraries for distro Linux packages;
-- controlled bundled dependencies for portable Linux artifacts?
+### A. Renderer authority
 
-J. What exactly must the early Windows 11 feasibility spike establish before the process/elevation architecture is frozen?
+Can a compromised renderer still:
 
-K. Are capability support, current configuration, adapter support, OS availability, authorization requirements and application policy separated correctly?
+- obtain secret input;
+- trick native code into authorizing a different target;
+- flood/fatigue the user into approval;
+- abuse navigation/custom protocols/download/network paths;
+- exploit a renderer-callable DTO to smuggle sensitive material?
 
-L. Are the revised public-alpha security gates early enough, especially for credential inspection, PIN mutation, deletion and reset?
+Is the proposed no-secret-in-command-schema invariant sufficient and testable?
 
-M. Is the updater design sufficient against authentic rollback, key compromise and renderer-controlled update configuration?
+### B. Native authorization
 
-N. Is the optional security-provider boundary sufficient to ensure BooGooCypher cannot become part of the FIDO trust path or gain CTAP mutation authority?
+Is the `OperationIntent` / `OperationPermit` model sufficiently bound to:
 
-O. If BooGooCypher is later used for encrypted exports, should FidoManager define a provider-independent encrypted envelope before provider-specific encryption?
+- operation kind;
+- device generation;
+- exact credential/target;
+- RP hash;
+- enumeration epoch;
+- expiry;
+- cancellation generation;
+- worker restart/disconnect/session lock?
 
-P. Are OS secret stores sufficient for persistent provider API credentials, and what additional threat assumptions must be documented?
+Can a late native callback authorize stale/replaced state?
 
-Q. Is a future `hmac-secret`-based hardware-bound export design compatible with vendor neutrality, multi-key recovery and acceptable data-loss semantics?
+### C. Sensitive workflow concurrency
 
-R. What assumptions in the revised plan remain incorrect, incomplete or insufficiently justified?
+Is a global zero-queue/one-sensitive-prompt policy sufficient?
 
-Output your review using this structure:
+Can read-only work, cancellation, device-removal events, or external clients still produce unsafe interleavings?
 
-## Executive assessment
+### D. libfido2 fit
 
-Give a concise assessment of the revised architecture.
+The design uses libfido2 1.17.0 as the reviewed API baseline, not necessarily the final production pin.
 
-State clearly whether you think read-only discovery can proceed and which later milestones, if any, should remain blocked.
+Verify whether the selected/current release actually supports the required semantics for:
 
-## Critical issues
+- application-managed PIN/UV auth tokens;
+- credential-management permissions;
+- read-only credential-management authorization;
+- UV-only management;
+- token invalidation/expiry;
+- RP-hash enumeration;
+- reset;
+- timeout/cancellation;
+- mutation-stage evidence.
 
-Problems that should block implementation of the affected workflows until resolved.
+Identify where public high-level APIs collapse multiple protocol exchanges in ways that prevent safe classification.
+
+### E. Mutation evidence
+
+Challenge the evidence contract:
+
+- Is `NotDispatched` defined narrowly enough?
+- When can `Rejected` be asserted safely?
+- Can success be distinguished from post-refresh failure?
+- Are authentication side effects separate from mutation outcome?
+- Are there libfido2 retry/internal behaviours that could invalidate the model?
+
+### F. Native-call quiescence
+
+Can a blocked/hung native call still execute after state reconciliation or cancellation?
+
+Is in-process containment sufficient, or should mutation-capable builds require a separate worker process on all platforms?
+
+### G. Recovery journal
+
+Does the minimal crash-safe marker actually survive the dangerous windows without becoming a persistent device-tracking mechanism?
+
+Can the journal itself be corrupted, rolled back, or cleared in a way that removes a needed recovery barrier?
+
+Is a global conservative barrier preferable to weak device matching after restart?
+
+### H. Reset ceremony
+
+Verify the reset timing model against the current FIDO/CTAP specification and libfido2/reference hardware.
+
+Challenge:
+
+- confirmation before the timed reconnect stage;
+- exact-one-device invariant;
+- candidate safety snapshot;
+- handle/generation binding;
+- physical user-presence timing;
+- identical-device substitution;
+- expiry/retry behaviour;
+- reset response loss;
+- devices/versions with different reset behaviour.
+
+Do not treat AAGUID/VID/PID/path matching as cryptographic continuity.
+
+### I. Windows broker
+
+If elevation is required, does placing the authoritative service/native UI/device worker in the broker close the confused-deputy problem?
+
+Review:
+
+- active-user vs alternate-credential elevation;
+- pipe ACL/peer verification;
+- per-launch binding/replay;
+- client death;
+- broker lifetime;
+- per-machine installation;
+- DLL loading;
+- UAC vs operation-specific consent;
+- browser/Windows WebAuthn contention;
+- protocol/version skew.
+
+### J. RP hash and completeness
+
+Is the rule `SHA-256(returned exact RP text) == authoritative RP hash` sufficient to call text verified?
+
+Can current libfido2 enumerate credentials when only a hash/truncated RP text is available?
+
+Can count/completeness checks produce false confidence?
+
+### K. Optional export / BooGooCypher
+
+The core now passes only an immutable minimized snapshot to a separate post-MVP export helper, and provider code is excluded from MVP builds.
+
+Challenge whether that is sufficient isolation.
+
+Also review the still-open questions:
+
+- where encryption occurs;
+- whether a remote provider ever receives plaintext;
+- provider-independent authenticated envelope;
+- key wrapping vs data encryption;
+- recovery if provider disappears;
+- OS secret-store limitations;
+- TLS/custom-CA/pinning policy;
+- `hmac-secret` data-loss/provisioning coupling.
+
+Do not assume a separate same-user process is equivalent to a security sandbox.
+
+## Output format
+
+Use this structure:
+
+### Executive assessment
+
+State whether each implementation gate can proceed:
+
+- Milestone 1 read-only discovery
+- Milestone 1.5 feasibility spikes
+- Milestone 2 native authentication
+- Milestone 3 credential inspection
+- Milestones 4–6 mutations
+- Windows implementation
+- post-MVP export/provider work
+
+### Former blocker status
+
+For each relevant prior blocker, classify:
+
+- Resolved
+- Partially resolved
+- Unresolved
+- Regressed
+
+Explain the exact remaining gap and any new risk introduced by the fix.
+
+### New critical issues
 
 For each:
-- issue
-- why it matters
-- realistic failure/attack scenario
-- recommended change
 
-## High-priority improvements
+- issue;
+- why it matters;
+- realistic failure/attack scenario;
+- recommended architectural change.
 
-Important issues that should be addressed before public alpha.
+### High-priority improvements
 
-## Medium/low-priority improvements
+Issues to resolve before the affected feature or public alpha.
 
-Useful hardening or maintainability improvements.
+### Medium/low-priority improvements
 
-## Architecture decisions you agree with
+Hardening and maintainability improvements.
 
-Only include these when you can explain WHY they are sound.
+### Cross-document contradictions
 
-## Architecture decisions you disagree with
+Identify inconsistent requirements between the architecture plan and security model.
 
-Explain the alternative you recommend.
+### CTAP/libfido2 review
 
-## CTAP/libfido2 review
+Be specific about APIs/protocol semantics that support or contradict the design.
 
-Review protocol modelling, authorization, credential management, RP identity/hash handling, reset semantics and future extensibility.
+### Operation lifecycle review
 
-## Frontend/native trust-boundary review
+Review intent → approval → auth → dispatch → response → refresh/reconciliation → recovery.
 
-Review Tauri commands, native PIN/confirmation, hostile-renderer assumptions and IPC authority.
-
-## Operation-lifecycle review
-
-Review transaction serialization, cancellation, reconnect, uncertainty and reconciliation.
-
-## Platform-specific concerns
+### Platform-specific review
 
 Separate:
+
 - macOS
 - Windows
 - Linux
 
-## Release and supply-chain review
+### Release/supply-chain review
 
-Review signing, packaging, native dependency pinning, CI, SBOM, provenance and updater strategy.
+Review native dependencies, CI, signing, provenance, SBOM, updater, and urgent patch delivery.
 
-## Optional BooGooCypher/security-provider review
+### Optional export/BooGoo review
 
-Review:
-- isolation from CTAP/FIDO authority;
-- provider API credential handling;
-- TLS/endpoint configuration;
-- data minimization and export privacy;
-- offline degradation;
-- provider-independent envelope design;
-- future `hmac-secret` hardware-bound export risks.
+Assess whether the proposed boundary is genuinely outside core FIDO authority and list unresolved trust decisions.
 
-Do not assume BooGooCypher is required; its optionality is an architectural requirement.
+### Missing threat/acceptance scenarios
 
-## Missing threat scenarios
+List concrete tests or failure cases not yet covered.
 
-Identify realistic threats or misuse cases still not addressed by the documents.
+### Suggested revised architecture
 
-## Suggested revised architecture
+Only if material changes are still required. Do not redesign the whole project merely for stylistic preference.
 
-If you recommend architectural changes, describe the smallest viable change to component boundaries.
+### Questions for the project owner
 
-## Questions for the project owner
+Ask only questions whose answers materially affect implementation/security contracts.
 
-List questions that must be answered before implementation or public mutation-capable releases.
+Be specific, skeptical, and technically concrete.
 
-Be specific.
-Prefer concrete technical criticism over generic best practices.
-Do not redesign the entire project unless there is a material security or maintainability reason to do so.
+Treat this review as a security design gate for software that may eventually manage production authenticators.
