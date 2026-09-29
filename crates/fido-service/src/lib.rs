@@ -62,7 +62,11 @@ impl SensitiveWorkflowGate {
         }
     }
 
-    pub fn try_begin(&mut self, workflow_id: WorkflowId, now_ms: u64) -> Result<(), AdmissionError> {
+    pub fn try_begin(
+        &mut self,
+        workflow_id: WorkflowId,
+        now_ms: u64,
+    ) -> Result<(), AdmissionError> {
         self.prune_interruptions(now_ms);
 
         if self.active.is_some() {
@@ -93,7 +97,10 @@ impl SensitiveWorkflowGate {
 
         self.active = None;
 
-        if matches!(completion, WorkflowCompletion::Cancelled | WorkflowCompletion::TimedOut) {
+        if matches!(
+            completion,
+            WorkflowCompletion::Cancelled | WorkflowCompletion::TimedOut
+        ) {
             self.interruptions.push_back(now_ms);
             self.prune_interruptions(now_ms);
 
@@ -147,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_interruptions_trigger_cooldown() {
+    fn repeated_interruptions_trigger_cooldown() -> Result<(), Box<dyn std::error::Error>> {
         let mut gate = SensitiveWorkflowGate::new(AdmissionPolicy {
             interruption_budget: 2,
             interruption_window_ms: 1_000,
@@ -155,8 +162,8 @@ mod tests {
         });
 
         for (workflow, now) in [(WorkflowId::from_raw(1), 10), (WorkflowId::from_raw(2), 20)] {
-            gate.try_begin(workflow, now).unwrap();
-            gate.finish(workflow, WorkflowCompletion::Cancelled, now).unwrap();
+            gate.try_begin(workflow, now)?;
+            gate.finish(workflow, WorkflowCompletion::Cancelled, now)?;
         }
 
         assert_eq!(
@@ -164,5 +171,6 @@ mod tests {
             Err(AdmissionError::CoolingDown)
         );
         assert_eq!(gate.try_begin(WorkflowId::from_raw(3), 520), Ok(()));
+        Ok(())
     }
 }
