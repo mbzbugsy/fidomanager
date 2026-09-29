@@ -29,10 +29,13 @@ jobs:
       - name: Install frontend dependencies and generate lockfile
         run: pnpm install --no-frozen-lockfile
 
+      - name: Apply frontend formatter for bootstrap artifact
+        run: pnpm format
+
       - name: Frontend boundary check
         run: pnpm security:renderer-boundary
 
-      - name: Frontend formatting
+      - name: Frontend formatting check
         run: pnpm lint
 
       - name: Frontend typecheck
@@ -62,7 +65,13 @@ jobs:
           rustup default stable
           rustup component add clippy rustfmt
 
-      - name: Rust formatting
+      - name: Generate Cargo lockfile
+        run: cargo generate-lockfile
+
+      - name: Apply Rust formatter for bootstrap artifact
+        run: cargo fmt --all
+
+      - name: Rust formatting check
         run: cargo fmt --all --check
 
       - name: Rust clippy
@@ -71,12 +80,23 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace
 
-      - name: Upload generated lockfiles for bootstrap PR
+      - name: Upload generated bootstrap files
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: m0-generated-lockfiles
+          name: m0-bootstrap-output
           path: |
             Cargo.lock
             pnpm-lock.yaml
+            crates/
+            src-tauri/src/
+            src-tauri/build.rs
+            src/
+            scripts/
+            package.json
+            tsconfig.json
+            vite.config.ts
+            index.html
+            .prettierrc.json
           if-no-files-found: error
           retention-days: 2
