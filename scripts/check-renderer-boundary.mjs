@@ -59,7 +59,9 @@ if ('remote' in capability) {
   throw new Error('Remote capability sources are not approved in Milestone 0.');
 }
 
-const tauriConfig = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+const tauriConfig = JSON.parse(
+  readFileSync('src-tauri/tauri.conf.json', 'utf8'),
+);
 assertExactArray(
   tauriConfig?.app?.security?.capabilities,
   [EXPECTED_CAPABILITY],
@@ -85,15 +87,22 @@ const commandPattern =
 for (const file of rustFiles) {
   const source = readFileSync(file, 'utf8');
   for (const match of source.matchAll(commandPattern)) {
-    discoveredCommands.push({ name: match[1], parameters: match[2].trim(), file });
+    discoveredCommands.push({
+      name: match[1],
+      parameters: match[2].trim(),
+      file,
+    });
   }
 }
 
-if (discoveredCommands.length !== 1 || discoveredCommands[0].name !== EXPECTED_COMMAND) {
+if (
+  discoveredCommands.length !== 1 ||
+  discoveredCommands[0].name !== EXPECTED_COMMAND
+) {
   throw new Error(
-    `Milestone 0 must expose exactly one app command (${EXPECTED_COMMAND}); found: ${discoveredCommands
-      .map(({ name }) => name)
-      .join(', ') || 'none'}.`,
+    `Milestone 0 must expose exactly one app command (${EXPECTED_COMMAND}); found: ${
+      discoveredCommands.map(({ name }) => name).join(', ') || 'none'
+    }.`,
   );
 }
 if (discoveredCommands[0].parameters !== '') {
@@ -119,9 +128,9 @@ assertExactArray(
 );
 
 const cargoToml = readFileSync('src-tauri/Cargo.toml', 'utf8');
-const pluginDependencies = [...cargoToml.matchAll(/^([A-Za-z0-9_-]*tauri-plugin-[A-Za-z0-9_-]+)\s*=/gm)].map(
-  (match) => match[1],
-);
+const pluginDependencies = [
+  ...cargoToml.matchAll(/^([A-Za-z0-9_-]*tauri-plugin-[A-Za-z0-9_-]+)\s*=/gm),
+].map((match) => match[1]);
 assertExactArray(
   pluginDependencies,
   ['tauri-plugin-single-instance'],
@@ -135,13 +144,19 @@ const rendererFiles = listFiles(
 for (const file of rendererFiles) {
   const source = readFileSync(file, 'utf8');
   if (source.includes('@tauri-apps/api/event')) {
-    throw new Error(`Renderer event API is not approved in Milestone 0: ${file}`);
+    throw new Error(
+      `Renderer event API is not approved in Milestone 0: ${file}`,
+    );
   }
   if (source.includes('@tauri-apps/plugin-')) {
-    throw new Error(`Renderer plugin API is not approved in Milestone 0: ${file}`);
+    throw new Error(
+      `Renderer plugin API is not approved in Milestone 0: ${file}`,
+    );
   }
   if (source.includes('__TAURI_INTERNALS__')) {
-    throw new Error(`Direct internal Tauri IPC access is not approved in Milestone 0: ${file}`);
+    throw new Error(
+      `Direct internal Tauri IPC access is not approved in Milestone 0: ${file}`,
+    );
   }
 }
 
@@ -157,7 +172,9 @@ if (existsSync(generatedCapabilitiesPath) || existsSync(generatedAclPath)) {
   );
   const resolvedMain = generatedCapabilities[EXPECTED_CAPABILITY];
   if (!resolvedMain) {
-    throw new Error('Generated Tauri capabilities are missing the main capability.');
+    throw new Error(
+      'Generated Tauri capabilities are missing the main capability.',
+    );
   }
   assertExactArray(
     resolvedMain.permissions,
@@ -168,7 +185,9 @@ if (existsSync(generatedCapabilitiesPath) || existsSync(generatedAclPath)) {
   const generatedAcl = JSON.parse(readFileSync(generatedAclPath, 'utf8'));
   const appAcl = generatedAcl['__app-acl__'];
   if (!appAcl) {
-    throw new Error('Generated Tauri ACL is missing the application ACL manifest.');
+    throw new Error(
+      'Generated Tauri ACL is missing the application ACL manifest.',
+    );
   }
   const serializedAppAcl = JSON.stringify(appAcl);
   if (

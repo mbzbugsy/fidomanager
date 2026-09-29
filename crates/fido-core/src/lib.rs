@@ -128,7 +128,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn renderer_handles_use_fixed_lowercase_hex_strings() -> Result<(), Box<dyn std::error::Error>> {
+    fn renderer_handles_use_fixed_lowercase_hex_strings() -> Result<(), Box<dyn std::error::Error>>
+    {
         let handle = DeviceHandle::from_raw(0x1234);
         let encoded = serde_json::to_string(&handle)?;
         assert_eq!(encoded, "\"00000000000000000000000000001234\"");

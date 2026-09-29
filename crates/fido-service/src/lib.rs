@@ -298,8 +298,8 @@ mod tests {
     }
 
     #[test]
-    fn repeated_interruptions_and_rejections_trigger_cooldown(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn repeated_interruptions_and_rejections_trigger_cooldown()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut gate = SensitiveWorkflowGate::new(AdmissionPolicy {
             interruption_budget: 2,
             interruption_window_ms: 1_000,
@@ -346,8 +346,8 @@ mod tests {
     }
 
     #[test]
-    fn gate_stays_held_until_native_execution_is_quiescent(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn gate_stays_held_until_native_execution_is_quiescent()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut gate = SensitiveWorkflowGate::default();
         let admission = gate.try_begin(
             SensitiveWorkflowKind::ChangePin,
@@ -371,8 +371,8 @@ mod tests {
     }
 
     #[test]
-    fn recovery_barrier_remains_separate_after_workflow_release(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn recovery_barrier_remains_separate_after_workflow_release()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut gate = SensitiveWorkflowGate::default();
         let admission = gate.try_begin(
             SensitiveWorkflowKind::ChangePin,

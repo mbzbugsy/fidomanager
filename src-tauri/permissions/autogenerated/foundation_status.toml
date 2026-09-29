@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-foundation-status"
+description = "Enables the foundation_status command without any pre-configured scope."
+commands.allow = ["foundation_status"]
+
+[[permission]]
+identifier = "deny-foundation-status"
+description = "Denies the foundation_status command without any pre-configured scope."
+commands.deny = ["foundation_status"]

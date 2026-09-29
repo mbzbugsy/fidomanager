@@ -130,8 +130,8 @@ mod tests {
     }
 
     #[test]
-    fn response_keeps_quiescence_separate_from_mutation_outcome(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn response_keeps_quiescence_separate_from_mutation_outcome()
+    -> Result<(), Box<dyn std::error::Error>> {
         let response = WorkerResponseEnvelope {
             protocol_version: WORKER_PROTOCOL_VERSION,
             request_id: WorkerRequestId(7),

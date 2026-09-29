@@ -961,6 +961,7 @@ name = "fido-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -983,6 +984,7 @@ name = "fido-service"
 version = "0.1.0"
 dependencies = [
  "fido-core",
+ "fido-worker-protocol",
  "thiserror 2.0.21",
 ]
 
@@ -990,6 +992,7 @@ dependencies = [
 name = "fido-worker-protocol"
 version = "0.1.0"
 dependencies = [
+ "fido-core",
  "serde",
  "serde_json",
 ]
@@ -998,8 +1001,7 @@ dependencies = [
 name = "fidomanager-app"
 version = "0.1.0"
 dependencies = [
- "fido-libfido2",
- "fido-worker-protocol",
+ "fido-service",
  "serde",
  "tauri",
  "tauri-build",
