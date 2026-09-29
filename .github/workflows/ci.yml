@@ -64,5 +64,8 @@ jobs:
       - name: Rust clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      - name: Resolved renderer ACL check
+        run: pnpm security:renderer-boundary
+
       - name: Rust tests
         run: cargo test --workspace --locked

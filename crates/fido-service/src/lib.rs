@@ -2,14 +2,46 @@
 
 use std::collections::VecDeque;
 
-use fido_core::WorkflowId;
+use fido_core::{ExecutionQuiescence, RecoveryAdmission, SensitiveWorkflowKind, WorkflowId};
 use thiserror::Error;
+
+pub const REVIEWED_LIBFIDO2_BASELINE: &str = "1.17.0";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoundationInfo {
+    pub phase: &'static str,
+    pub worker_protocol_version: u16,
+    pub reviewed_libfido2_baseline: &'static str,
+}
+
+pub const fn foundation_info() -> FoundationInfo {
+    FoundationInfo {
+        phase: "milestone-0-foundation",
+        worker_protocol_version: fido_worker_protocol::WORKER_PROTOCOL_VERSION,
+        reviewed_libfido2_baseline: REVIEWED_LIBFIDO2_BASELINE,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdmissionPolicy {
     pub interruption_budget: usize,
     pub interruption_window_ms: u64,
     pub cooldown_ms: u64,
+}
+
+impl AdmissionPolicy {
+    pub fn validate(self) -> Result<Self, AdmissionPolicyError> {
+        if self.interruption_budget == 0 {
+            return Err(AdmissionPolicyError::ZeroInterruptionBudget);
+        }
+        if self.interruption_window_ms == 0 {
+            return Err(AdmissionPolicyError::ZeroInterruptionWindow);
+        }
+        if self.cooldown_ms == 0 {
+            return Err(AdmissionPolicyError::ZeroCooldown);
+        }
+        Ok(self)
+    }
 }
 
 impl Default for AdmissionPolicy {
@@ -22,12 +54,64 @@ impl Default for AdmissionPolicy {
     }
 }
 
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionPolicyError {
+    #[error("interruption budget must be greater than zero")]
+    ZeroInterruptionBudget,
+    #[error("interruption window must be greater than zero")]
+    ZeroInterruptionWindow,
+    #[error("cooldown duration must be greater than zero")]
+    ZeroCooldown,
+}
+
+/// Elapsed milliseconds from an authority-owned monotonic clock origin.
+///
+/// Wall-clock timestamps and renderer-controlled time values must not be used here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct MonotonicMillis(u64);
+
+impl MonotonicMillis {
+    pub const fn from_millis(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_millis(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowCompletion {
     Succeeded,
     Cancelled,
     TimedOut,
+    Rejected,
     Failed,
+}
+
+/// Authority-minted admission ticket for exactly one active workflow generation.
+///
+/// This type is intentionally neither `Clone` nor `Copy` and cannot be constructed by callers.
+#[derive(Debug, PartialEq, Eq)]
+pub struct WorkflowAdmission {
+    workflow_id: WorkflowId,
+    kind: SensitiveWorkflowKind,
+}
+
+impl WorkflowAdmission {
+    pub const fn workflow_id(&self) -> WorkflowId {
+        self.workflow_id
+    }
+
+    pub const fn kind(&self) -> SensitiveWorkflowKind {
+        self.kind
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkflowReleaseEvidence {
+    pub execution_quiescence: ExecutionQuiescence,
+    pub recovery_admission: RecoveryAdmission,
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -36,41 +120,57 @@ pub enum AdmissionError {
     OperationInProgress,
     #[error("sensitive workflow admission is cooling down")]
     CoolingDown,
+    #[error("recovery admission barrier blocks ordinary sensitive workflows")]
+    RecoveryBarrier,
+    #[error("workflow identity space is exhausted")]
+    WorkflowIdExhausted,
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionError {
     #[error("workflow is not the active sensitive workflow")]
     NotActiveWorkflow,
+    #[error("native execution is not proven quiescent")]
+    ExecutionNotQuiescent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ActiveWorkflow {
+    workflow_id: WorkflowId,
+    kind: SensitiveWorkflowKind,
 }
 
 #[derive(Debug)]
 pub struct SensitiveWorkflowGate {
     policy: AdmissionPolicy,
-    active: Option<WorkflowId>,
+    active: Option<ActiveWorkflow>,
+    recovery_admission: RecoveryAdmission,
+    next_workflow_raw: u128,
     interruptions: VecDeque<u64>,
     cooldown_until_ms: Option<u64>,
 }
 
 impl SensitiveWorkflowGate {
-    pub fn new(policy: AdmissionPolicy) -> Self {
-        Self {
-            policy,
-            active: None,
-            interruptions: VecDeque::new(),
-            cooldown_until_ms: None,
-        }
+    pub fn new(policy: AdmissionPolicy) -> Result<Self, AdmissionPolicyError> {
+        Ok(Self::from_valid_policy(policy.validate()?))
     }
 
     pub fn try_begin(
         &mut self,
-        workflow_id: WorkflowId,
-        now_ms: u64,
-    ) -> Result<(), AdmissionError> {
+        kind: SensitiveWorkflowKind,
+        now: MonotonicMillis,
+    ) -> Result<WorkflowAdmission, AdmissionError> {
+        let now_ms = now.as_millis();
         self.prune_interruptions(now_ms);
 
         if self.active.is_some() {
             return Err(AdmissionError::OperationInProgress);
+        }
+
+        if self.recovery_admission == RecoveryAdmission::Barrier
+            && kind != SensitiveWorkflowKind::Recovery
+        {
+            return Err(AdmissionError::RecoveryBarrier);
         }
 
         if self
@@ -80,33 +180,52 @@ impl SensitiveWorkflowGate {
             return Err(AdmissionError::CoolingDown);
         }
 
+        let workflow_id = WorkflowId::from_raw(self.next_workflow_raw);
+        self.next_workflow_raw = self
+            .next_workflow_raw
+            .checked_add(1)
+            .ok_or(AdmissionError::WorkflowIdExhausted)?;
+
         self.cooldown_until_ms = None;
-        self.active = Some(workflow_id);
-        Ok(())
+        self.active = Some(ActiveWorkflow { workflow_id, kind });
+
+        Ok(WorkflowAdmission { workflow_id, kind })
     }
 
     pub fn finish(
         &mut self,
-        workflow_id: WorkflowId,
+        admission: &WorkflowAdmission,
         completion: WorkflowCompletion,
-        now_ms: u64,
+        release_evidence: WorkflowReleaseEvidence,
+        now: MonotonicMillis,
     ) -> Result<(), CompletionError> {
-        if self.active != Some(workflow_id) {
+        let expected = ActiveWorkflow {
+            workflow_id: admission.workflow_id,
+            kind: admission.kind,
+        };
+        if self.active != Some(expected) {
             return Err(CompletionError::NotActiveWorkflow);
         }
+        if release_evidence.execution_quiescence != ExecutionQuiescence::Quiescent {
+            return Err(CompletionError::ExecutionNotQuiescent);
+        }
 
+        // Quiescence permits the exclusion lock to release. Recovery admission remains a
+        // separate authority state and may continue to block ordinary workflows afterwards.
         self.active = None;
+        self.recovery_admission = release_evidence.recovery_admission;
 
         if matches!(
             completion,
-            WorkflowCompletion::Cancelled | WorkflowCompletion::TimedOut
+            WorkflowCompletion::Cancelled
+                | WorkflowCompletion::TimedOut
+                | WorkflowCompletion::Rejected
         ) {
+            let now_ms = now.as_millis();
             self.interruptions.push_back(now_ms);
             self.prune_interruptions(now_ms);
 
-            if self.policy.interruption_budget > 0
-                && self.interruptions.len() >= self.policy.interruption_budget
-            {
+            if self.interruptions.len() >= self.policy.interruption_budget {
                 self.cooldown_until_ms = Some(now_ms.saturating_add(self.policy.cooldown_ms));
             }
         }
@@ -116,6 +235,21 @@ impl SensitiveWorkflowGate {
 
     pub fn is_active(&self) -> bool {
         self.active.is_some()
+    }
+
+    pub const fn recovery_admission(&self) -> RecoveryAdmission {
+        self.recovery_admission
+    }
+
+    fn from_valid_policy(policy: AdmissionPolicy) -> Self {
+        Self {
+            policy,
+            active: None,
+            recovery_admission: RecoveryAdmission::Open,
+            next_workflow_raw: 1,
+            interruptions: VecDeque::new(),
+            cooldown_until_ms: None,
+        }
     }
 
     fn prune_interruptions(&mut self, now_ms: u64) {
@@ -132,7 +266,7 @@ impl SensitiveWorkflowGate {
 
 impl Default for SensitiveWorkflowGate {
     fn default() -> Self {
-        Self::new(AdmissionPolicy::default())
+        Self::from_valid_policy(AdmissionPolicy::default())
     }
 }
 
@@ -140,37 +274,194 @@ impl Default for SensitiveWorkflowGate {
 mod tests {
     use super::*;
 
-    #[test]
-    fn sensitive_workflows_are_never_queued() {
-        let mut gate = SensitiveWorkflowGate::default();
-        let first = WorkflowId::from_raw(1);
-        let second = WorkflowId::from_raw(2);
+    const RELEASE_OK: WorkflowReleaseEvidence = WorkflowReleaseEvidence {
+        execution_quiescence: ExecutionQuiescence::Quiescent,
+        recovery_admission: RecoveryAdmission::Open,
+    };
 
-        assert_eq!(gate.try_begin(first, 0), Ok(()));
+    #[test]
+    fn sensitive_workflows_are_never_queued() -> Result<(), Box<dyn std::error::Error>> {
+        let mut gate = SensitiveWorkflowGate::default();
+        let _first = gate.try_begin(
+            SensitiveWorkflowKind::CredentialInspection,
+            MonotonicMillis::from_millis(0),
+        )?;
+
         assert_eq!(
-            gate.try_begin(second, 1),
+            gate.try_begin(
+                SensitiveWorkflowKind::ChangePin,
+                MonotonicMillis::from_millis(1),
+            ),
             Err(AdmissionError::OperationInProgress)
         );
+        Ok(())
     }
 
     #[test]
-    fn repeated_interruptions_trigger_cooldown() -> Result<(), Box<dyn std::error::Error>> {
+    fn repeated_interruptions_and_rejections_trigger_cooldown(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut gate = SensitiveWorkflowGate::new(AdmissionPolicy {
             interruption_budget: 2,
             interruption_window_ms: 1_000,
             cooldown_ms: 500,
-        });
+        })?;
 
-        for (workflow, now) in [(WorkflowId::from_raw(1), 10), (WorkflowId::from_raw(2), 20)] {
-            gate.try_begin(workflow, now)?;
-            gate.finish(workflow, WorkflowCompletion::Cancelled, now)?;
-        }
+        let first = gate.try_begin(
+            SensitiveWorkflowKind::CredentialInspection,
+            MonotonicMillis::from_millis(10),
+        )?;
+        gate.finish(
+            &first,
+            WorkflowCompletion::Cancelled,
+            RELEASE_OK,
+            MonotonicMillis::from_millis(10),
+        )?;
+
+        let second = gate.try_begin(
+            SensitiveWorkflowKind::ChangePin,
+            MonotonicMillis::from_millis(20),
+        )?;
+        gate.finish(
+            &second,
+            WorkflowCompletion::Rejected,
+            RELEASE_OK,
+            MonotonicMillis::from_millis(20),
+        )?;
 
         assert_eq!(
-            gate.try_begin(WorkflowId::from_raw(3), 21),
+            gate.try_begin(
+                SensitiveWorkflowKind::SetPin,
+                MonotonicMillis::from_millis(21),
+            ),
             Err(AdmissionError::CoolingDown)
         );
-        assert_eq!(gate.try_begin(WorkflowId::from_raw(3), 520), Ok(()));
+        assert!(
+            gate.try_begin(
+                SensitiveWorkflowKind::SetPin,
+                MonotonicMillis::from_millis(520),
+            )
+            .is_ok()
+        );
         Ok(())
+    }
+
+    #[test]
+    fn gate_stays_held_until_native_execution_is_quiescent(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut gate = SensitiveWorkflowGate::default();
+        let admission = gate.try_begin(
+            SensitiveWorkflowKind::ChangePin,
+            MonotonicMillis::from_millis(0),
+        )?;
+
+        assert_eq!(
+            gate.finish(
+                &admission,
+                WorkflowCompletion::TimedOut,
+                WorkflowReleaseEvidence {
+                    execution_quiescence: ExecutionQuiescence::Active,
+                    recovery_admission: RecoveryAdmission::Open,
+                },
+                MonotonicMillis::from_millis(1),
+            ),
+            Err(CompletionError::ExecutionNotQuiescent)
+        );
+        assert!(gate.is_active());
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_barrier_remains_separate_after_workflow_release(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut gate = SensitiveWorkflowGate::default();
+        let admission = gate.try_begin(
+            SensitiveWorkflowKind::ChangePin,
+            MonotonicMillis::from_millis(0),
+        )?;
+
+        gate.finish(
+            &admission,
+            WorkflowCompletion::TimedOut,
+            WorkflowReleaseEvidence {
+                execution_quiescence: ExecutionQuiescence::Quiescent,
+                recovery_admission: RecoveryAdmission::Barrier,
+            },
+            MonotonicMillis::from_millis(1),
+        )?;
+
+        assert!(!gate.is_active());
+        assert_eq!(gate.recovery_admission(), RecoveryAdmission::Barrier);
+        assert_eq!(
+            gate.try_begin(
+                SensitiveWorkflowKind::CredentialInspection,
+                MonotonicMillis::from_millis(2),
+            ),
+            Err(AdmissionError::RecoveryBarrier)
+        );
+
+        let recovery = gate.try_begin(
+            SensitiveWorkflowKind::Recovery,
+            MonotonicMillis::from_millis(2),
+        )?;
+        gate.finish(
+            &recovery,
+            WorkflowCompletion::Succeeded,
+            RELEASE_OK,
+            MonotonicMillis::from_millis(3),
+        )?;
+        assert_eq!(gate.recovery_admission(), RecoveryAdmission::Open);
+        Ok(())
+    }
+
+    #[test]
+    fn stale_admission_cannot_release_a_new_workflow() -> Result<(), Box<dyn std::error::Error>> {
+        let mut gate = SensitiveWorkflowGate::default();
+        let first = gate.try_begin(
+            SensitiveWorkflowKind::CredentialInspection,
+            MonotonicMillis::from_millis(0),
+        )?;
+        gate.finish(
+            &first,
+            WorkflowCompletion::Succeeded,
+            RELEASE_OK,
+            MonotonicMillis::from_millis(1),
+        )?;
+
+        let second = gate.try_begin(
+            SensitiveWorkflowKind::CredentialInspection,
+            MonotonicMillis::from_millis(2),
+        )?;
+        assert_eq!(
+            gate.finish(
+                &first,
+                WorkflowCompletion::Succeeded,
+                RELEASE_OK,
+                MonotonicMillis::from_millis(3),
+            ),
+            Err(CompletionError::NotActiveWorkflow)
+        );
+        assert_eq!(
+            gate.finish(
+                &second,
+                WorkflowCompletion::Succeeded,
+                RELEASE_OK,
+                MonotonicMillis::from_millis(4),
+            ),
+            Ok(())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_policy_is_rejected() {
+        let result = SensitiveWorkflowGate::new(AdmissionPolicy {
+            interruption_budget: 0,
+            interruption_window_ms: 1_000,
+            cooldown_ms: 500,
+        });
+        assert!(matches!(
+            result,
+            Err(AdmissionPolicyError::ZeroInterruptionBudget)
+        ));
     }
 }

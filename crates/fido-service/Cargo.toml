@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 fido-core = { path = "../fido-core" }
+fido-worker-protocol = { path = "../fido-worker-protocol" }
 thiserror.workspace = true
 
 [lints]

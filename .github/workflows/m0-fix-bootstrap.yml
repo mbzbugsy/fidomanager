@@ -1,0 +1,103 @@
+name: M0 Review Fix Bootstrap
+
+on:
+  push:
+    branches: [feature/m0-foundation]
+
+permissions:
+  contents: write
+
+jobs:
+  normalize-and-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+
+      - name: Install pnpm
+        run: npm install --global pnpm@10.17.1
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Format checked text sources
+        run: pnpm format
+
+      - name: Install Linux Tauri build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev
+
+      - name: Setup pinned Rust
+        run: rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
+
+      - name: Refresh lockfile for workspace dependency changes
+        run: cargo generate-lockfile
+
+      - name: Format Rust sources
+        run: cargo fmt --all
+
+      - name: Renderer boundary check
+        run: pnpm security:renderer-boundary
+
+      - name: Frontend formatting
+        run: pnpm lint
+
+      - name: Frontend typecheck
+        run: pnpm typecheck
+
+      - name: Frontend tests
+        run: pnpm test
+
+      - name: Frontend build
+        run: pnpm build
+
+      - name: Rust formatting
+        run: cargo fmt --all --check
+
+      - name: Rust clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Resolved renderer ACL check
+        run: pnpm security:renderer-boundary
+
+      - name: Rust tests
+        run: cargo test --workspace --locked
+
+      - name: Remove bootstrap workflow and commit normalized state
+        run: |
+          rm .github/workflows/m0-fix-bootstrap.yml
+          git add -- \
+            .github/workflows/m0-fix-bootstrap.yml \
+            .github/workflows/ci.yml \
+            .gitignore \
+            Cargo.lock \
+            crates \
+            scripts \
+            src-tauri \
+            src \
+            package.json tsconfig.json vite.config.ts index.html \
+            .prettierrc.json .prettierignore rust-toolchain.toml .node-version
+          if git diff --cached --quiet; then
+            echo "No normalization changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: normalize milestone 0 review fixes [skip ci]"
+          git push origin HEAD:feature/m0-foundation

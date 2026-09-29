@@ -10,9 +10,10 @@ pub struct FoundationStatus {
 
 #[tauri::command]
 pub fn foundation_status() -> FoundationStatus {
+    let info = fido_service::foundation_info();
     FoundationStatus {
-        phase: "milestone-0-foundation",
-        worker_protocol_version: fido_worker_protocol::WORKER_PROTOCOL_VERSION,
-        reviewed_libfido2_baseline: fido_libfido2::REVIEWED_LIBFIDO2_BASELINE,
+        phase: info.phase,
+        worker_protocol_version: info.worker_protocol_version,
+        reviewed_libfido2_baseline: info.reviewed_libfido2_baseline,
     }
 }
