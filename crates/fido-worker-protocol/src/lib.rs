@@ -58,7 +58,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_round_trips_without_process_local_state() {
+    fn request_round_trips_without_process_local_state() -> Result<(), Box<dyn std::error::Error>> {
         let request = WorkerRequestEnvelope {
             protocol_version: WORKER_PROTOCOL_VERSION,
             request_id: WorkerRequestId(7),
@@ -66,9 +66,10 @@ mod tests {
             request: WorkerRequest::HealthCheck,
         };
 
-        let encoded = serde_json::to_vec(&request).unwrap();
-        let decoded: WorkerRequestEnvelope = serde_json::from_slice(&encoded).unwrap();
+        let encoded = serde_json::to_vec(&request)?;
+        let decoded: WorkerRequestEnvelope = serde_json::from_slice(&encoded)?;
 
         assert_eq!(decoded, request);
+        Ok(())
     }
 }
