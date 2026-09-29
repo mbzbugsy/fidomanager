@@ -9,10 +9,10 @@ use fido_core::{
     EnumerationEpoch, ExecutionQuiescence, ViewFreshness,
 };
 use fido_worker_protocol::{
-    CancellationId, MAX_DISCOVERED_DEVICES, MAX_DEVICE_STRING_ITEMS, MAX_DEVICE_TEXT_BYTES,
-    RequestBudgetMs, WorkerDeviceId, WorkerDeviceInfo, WorkerDiscoveredDevice, WorkerErrorCode,
-    WorkerGeneration, WorkerRequest, WorkerRequestEnvelope, WorkerRequestId, WorkerResponse,
-    WorkerResponseEnvelope, WORKER_PROTOCOL_VERSION,
+    CancellationId, MAX_DEVICE_STRING_ITEMS, MAX_DEVICE_TEXT_BYTES, MAX_DISCOVERED_DEVICES,
+    RequestBudgetMs, WORKER_PROTOCOL_VERSION, WorkerDeviceId, WorkerDeviceInfo,
+    WorkerDiscoveredDevice, WorkerErrorCode, WorkerGeneration, WorkerRequest,
+    WorkerRequestEnvelope, WorkerRequestId, WorkerResponse, WorkerResponseEnvelope,
 };
 use thiserror::Error;
 
@@ -467,7 +467,9 @@ fn read_status_for_error(code: WorkerErrorCode) -> Result<DeviceReadStatus, Disc
         WorkerErrorCode::DeadlineExpired => Ok(DeviceReadStatus::TimedOut),
         WorkerErrorCode::UnsupportedDevice => Ok(DeviceReadStatus::Unsupported),
         WorkerErrorCode::MalformedDeviceData => Ok(DeviceReadStatus::Malformed),
-        WorkerErrorCode::Cancelled | WorkerErrorCode::InternalFailure => Ok(DeviceReadStatus::Error),
+        WorkerErrorCode::Cancelled | WorkerErrorCode::InternalFailure => {
+            Ok(DeviceReadStatus::Error)
+        }
         WorkerErrorCode::ProtocolMismatch | WorkerErrorCode::WorkerUnavailable => {
             Err(DiscoveryError::Worker(code))
         }
@@ -478,9 +480,7 @@ fn read_status_for_error(code: WorkerErrorCode) -> Result<DeviceReadStatus, Disc
 mod tests {
     use super::*;
     use fido_core::{Aaguid, DeviceGeneration, MutationOutcome};
-    use fido_worker_protocol::{
-        WorkerDeviceOption, WorkerResponseEvidence, MAX_DEVICE_TEXT_BYTES,
-    };
+    use fido_worker_protocol::{MAX_DEVICE_TEXT_BYTES, WorkerDeviceOption, WorkerResponseEvidence};
 
     #[derive(Debug, Clone)]
     struct FakeDevice {
