@@ -347,10 +347,18 @@ fn validate_response(
 
     let response_matches = matches!(
         (&request.request, &response.response),
-        (WorkerRequest::ListDevices, WorkerResponse::DevicesListed { .. })
-            | (WorkerRequest::ListDevices, WorkerResponse::Error { .. })
-            | (WorkerRequest::GetDeviceInfo { .. }, WorkerResponse::DeviceInfo { .. })
-            | (WorkerRequest::GetDeviceInfo { .. }, WorkerResponse::Error { .. })
+        (
+            WorkerRequest::ListDevices,
+            WorkerResponse::DevicesListed { .. }
+        ) | (WorkerRequest::ListDevices, WorkerResponse::Error { .. })
+            | (
+                WorkerRequest::GetDeviceInfo { .. },
+                WorkerResponse::DeviceInfo { .. }
+            )
+            | (
+                WorkerRequest::GetDeviceInfo { .. },
+                WorkerResponse::Error { .. }
+            )
     );
 
     if !response_matches {
