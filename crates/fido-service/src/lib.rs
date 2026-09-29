@@ -1,5 +1,12 @@
 //! Offline FIDO policy and workflow coordination.
 
+mod discovery;
+
+pub use discovery::{
+    DiscoveryCoordinator, DiscoveryError, DiscoveryPolicy, DiscoveryPolicyError,
+    RegisteredDeviceTarget, WorkerEndpoint, WorkerEndpointError,
+};
+
 use std::collections::VecDeque;
 
 use fido_core::{ExecutionQuiescence, RecoveryAdmission, SensitiveWorkflowKind, WorkflowId};
@@ -16,7 +23,7 @@ pub struct FoundationInfo {
 
 pub const fn foundation_info() -> FoundationInfo {
     FoundationInfo {
-        phase: "milestone-0-foundation",
+        phase: "milestone-1-read-only-discovery",
         worker_protocol_version: fido_worker_protocol::WORKER_PROTOCOL_VERSION,
         reviewed_libfido2_baseline: REVIEWED_LIBFIDO2_BASELINE,
     }

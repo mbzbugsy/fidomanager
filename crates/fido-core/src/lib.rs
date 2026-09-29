@@ -214,6 +214,14 @@ pub struct DeviceSnapshot {
     pub freshness: ViewFreshness,
 }
 
+/// One coherent read-only device enumeration published to the renderer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceListSnapshot {
+    pub enumeration_epoch: EnumerationEpoch,
+    pub devices: Vec<DeviceSnapshot>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
