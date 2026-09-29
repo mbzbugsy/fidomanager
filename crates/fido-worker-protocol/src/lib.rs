@@ -85,9 +85,9 @@ impl WorkerRequestEnvelope {
 
         let generation_is_valid = match &self.request {
             WorkerRequest::GetDeviceInfo { .. } => self.device_generation.is_some(),
-            WorkerRequest::HealthCheck | WorkerRequest::Cancel { .. } | WorkerRequest::ListDevices => {
-                self.device_generation.is_none()
-            }
+            WorkerRequest::HealthCheck
+            | WorkerRequest::Cancel { .. }
+            | WorkerRequest::ListDevices => self.device_generation.is_none(),
         };
         if !generation_is_valid {
             return Err(WorkerRequestValidationError::InvalidDeviceGeneration);
