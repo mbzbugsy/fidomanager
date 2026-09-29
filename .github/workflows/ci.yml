@@ -1,20 +1,21 @@
-name: M0 Bootstrap
+name: CI
 
 on:
+  pull_request:
   push:
-    branches: [feature/m0-foundation]
+    branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  bootstrap-and-validate:
+  validation:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout branch
+      - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -25,16 +26,13 @@ jobs:
       - name: Install pnpm
         run: npm install --global pnpm@10.17.1
 
-      - name: Generate frontend lockfile
-        run: pnpm install --no-frozen-lockfile
-
-      - name: Format frontend and checked text sources
-        run: pnpm format
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Renderer boundary check
         run: pnpm security:renderer-boundary
 
-      - name: Frontend formatting check
+      - name: Frontend formatting
         run: pnpm lint
 
       - name: Frontend typecheck
@@ -58,37 +56,13 @@ jobs:
             libxdo-dev
 
       - name: Setup pinned Rust
-        run: |
-          rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
-          rustup default 1.98.1
+        run: rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
 
-      - name: Generate Cargo lockfile
-        run: cargo generate-lockfile
-
-      - name: Format Rust sources
-        run: cargo fmt --all
-
-      - name: Rust formatting check
+      - name: Rust formatting
         run: cargo fmt --all --check
 
       - name: Rust clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Rust tests
-        run: cargo test --workspace
-
-      - name: Commit generated lockfiles and formatter output
-        run: |
-          git add -- \
-            Cargo.lock pnpm-lock.yaml \
-            crates src-tauri/src src-tauri/build.rs src scripts \
-            package.json tsconfig.json vite.config.ts index.html \
-            .prettierrc.json .prettierignore rust-toolchain.toml .node-version
-          if git diff --cached --quiet; then
-            echo "No bootstrap changes to commit."
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "chore: lock milestone 0 dependencies [skip ci]"
-          git push origin HEAD:feature/m0-foundation
+        run: cargo test --workspace --locked
