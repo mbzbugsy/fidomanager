@@ -25,8 +25,8 @@
     <p class="eyebrow">Milestone 0</p>
     <h1 id="title">FidoManager</h1>
     <p class="lede">
-      Vendor-neutral FIDO2 / CTAP authenticator management. Device access is intentionally disabled in
-      this foundation build.
+      Vendor-neutral FIDO2 / CTAP authenticator management. Device access is
+      intentionally disabled in this foundation build.
     </p>
 
     {#if status}
