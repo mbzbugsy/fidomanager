@@ -1,0 +1,6 @@
+docs/
+Cargo.lock
+pnpm-lock.yaml
+target/
+node_modules/
+dist/

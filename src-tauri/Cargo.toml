@@ -1,0 +1,23 @@
+[package]
+name = "fidomanager-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "fidomanager_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = "=2.7.0"
+
+[dependencies]
+fido-service = { path = "../crates/fido-service" }
+serde.workspace = true
+tauri = { version = "=2.12.0", features = [] }
+tauri-plugin-single-instance = "=2.4.5"
+
+[lints]
+workspace = true

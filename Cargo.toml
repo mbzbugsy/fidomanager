@@ -1,0 +1,30 @@
+[workspace]
+members = [
+    "crates/fido-core",
+    "crates/fido-libfido2",
+    "crates/fido-native-ui",
+    "crates/fido-platform",
+    "crates/fido-service",
+    "crates/fido-worker-protocol",
+    "src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/mbzbugsy/fidomanager"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

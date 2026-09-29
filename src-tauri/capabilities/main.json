@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Milestone 0 renderer capability: only the explicit foundation status app command is granted.",
+  "windows": ["main"],
+  "permissions": ["allow-foundation-status"]
+}
