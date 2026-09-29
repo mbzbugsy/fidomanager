@@ -1,38 +1,37 @@
-name: CI
+name: M0 Bootstrap
 
 on:
-  pull_request:
   push:
-    branches: [main]
+    branches: [feature/m0-foundation]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  bootstrap-validation:
+  bootstrap-and-validate:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
+          persist-credentials: true
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: '24'
+          node-version: '24.21.0'
           package-manager-cache: false
 
       - name: Install pnpm
         run: npm install --global pnpm@10.17.1
 
-      - name: Install frontend dependencies and generate lockfile
+      - name: Generate frontend lockfile
         run: pnpm install --no-frozen-lockfile
 
-      - name: Apply frontend formatter for bootstrap artifact
+      - name: Format frontend and checked text sources
         run: pnpm format
 
-      - name: Frontend boundary check
+      - name: Renderer boundary check
         run: pnpm security:renderer-boundary
 
       - name: Frontend formatting check
@@ -58,17 +57,15 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libxdo-dev
 
-      - name: Setup Rust
+      - name: Setup pinned Rust
         run: |
-          rustup set profile minimal
-          rustup update stable
-          rustup default stable
-          rustup component add clippy rustfmt
+          rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
+          rustup default 1.98.1
 
       - name: Generate Cargo lockfile
         run: cargo generate-lockfile
 
-      - name: Apply Rust formatter for bootstrap artifact
+      - name: Format Rust sources
         run: cargo fmt --all
 
       - name: Rust formatting check
@@ -80,23 +77,18 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace
 
-      - name: Upload generated bootstrap files
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: m0-bootstrap-output
-          path: |
-            Cargo.lock
-            pnpm-lock.yaml
-            crates/
-            src-tauri/src/
-            src-tauri/build.rs
-            src/
-            scripts/
-            package.json
-            tsconfig.json
-            vite.config.ts
-            index.html
-            .prettierrc.json
-          if-no-files-found: error
-          retention-days: 2
+      - name: Commit generated lockfiles and formatter output
+        run: |
+          git add -- \
+            Cargo.lock pnpm-lock.yaml \
+            crates src-tauri/src src-tauri/build.rs src scripts \
+            package.json tsconfig.json vite.config.ts index.html \
+            .prettierrc.json .prettierignore rust-toolchain.toml .node-version
+          if git diff --cached --quiet; then
+            echo "No bootstrap changes to commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: lock milestone 0 dependencies [skip ci]"
+          git push origin HEAD:feature/m0-foundation
