@@ -1,0 +1,25 @@
+# Frontend
+node_modules/
+dist/
+.pnpm-store/
+pnpm-debug.log*
+
+# Rust
+/target/
+**/*.rs.bk
+
+# Tauri / OS
+src-tauri/target/
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local environment
+.env
+.env.*
+!.env.example
