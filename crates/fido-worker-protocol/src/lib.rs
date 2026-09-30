@@ -68,6 +68,7 @@ pub enum WorkerRequestValidationError {
     ProtocolMismatch,
     OperationClassMismatch,
     InvalidDeviceGeneration,
+    InvalidCancellationTarget,
     ZeroExecutionBudget,
 }
 
@@ -91,6 +92,20 @@ impl WorkerRequestEnvelope {
         };
         if !generation_is_valid {
             return Err(WorkerRequestValidationError::InvalidDeviceGeneration);
+        }
+
+        if let WorkerRequest::Cancel {
+            target_request_id,
+            target_cancellation_id,
+        } = &self.request
+        {
+            if target_request_id.0 == 0
+                || target_cancellation_id.0 == 0
+                || *target_request_id == self.request_id
+                || *target_cancellation_id == self.cancellation_id
+            {
+                return Err(WorkerRequestValidationError::InvalidCancellationTarget);
+            }
         }
 
         Ok(())
@@ -121,6 +136,11 @@ impl WorkerRequest {
 }
 
 /// Minimal discovery record returned before a device is opened for GetInfo.
+///
+/// Within one `WorkerGeneration`, the worker MUST strictly increase `device_generation` whenever a
+/// `WorkerDeviceId` is rebound/reopened after observed absence or represents a different device
+/// incarnation. The service deliberately treats regression or reuse-after-absence as a protocol
+/// violation and quarantines that worker generation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerDiscoveredDevice {
@@ -255,6 +275,33 @@ mod tests {
         assert_eq!(
             envelope.validate(),
             Err(WorkerRequestValidationError::OperationClassMismatch)
+        );
+    }
+
+    #[test]
+    fn cancel_cannot_target_itself_or_zero_identifiers() {
+        let self_target = request_envelope(
+            WorkerRequest::Cancel {
+                target_request_id: WorkerRequestId(7),
+                target_cancellation_id: CancellationId(11),
+            },
+            None,
+        );
+        assert_eq!(
+            self_target.validate(),
+            Err(WorkerRequestValidationError::InvalidCancellationTarget)
+        );
+
+        let zero_target = request_envelope(
+            WorkerRequest::Cancel {
+                target_request_id: WorkerRequestId(0),
+                target_cancellation_id: CancellationId(9),
+            },
+            None,
+        );
+        assert_eq!(
+            zero_target.validate(),
+            Err(WorkerRequestValidationError::InvalidCancellationTarget)
         );
     }
 
