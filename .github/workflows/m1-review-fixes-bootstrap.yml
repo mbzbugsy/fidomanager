@@ -18,7 +18,15 @@ jobs:
           fetch-depth: 0
 
       - name: Apply focused discovery review fixes
-        run: python3 .github/scripts/apply-m1-review-fixes.py
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('.github/scripts/apply-m1-review-fixes.py')
+          data = path.read_bytes()
+          data = data.replace(bytes([92]) + b'u{', bytes([92, 92]) + b'u{')
+          path.write_bytes(data)
+          PY
+          python3 .github/scripts/apply-m1-review-fixes.py
 
       - name: Setup pinned Rust
         run: |
