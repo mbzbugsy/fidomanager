@@ -15,10 +15,7 @@ pub struct NativeDeviceKey(Vec<u8>);
 
 impl NativeDeviceKey {
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, NativeError> {
-        if bytes.is_empty()
-            || bytes.len() > MAX_NATIVE_PATH_BYTES
-            || bytes.contains(&0)
-        {
+        if bytes.is_empty() || bytes.len() > MAX_NATIVE_PATH_BYTES || bytes.contains(&0) {
             return Err(NativeError::new(NativeErrorKind::Malformed, None));
         }
         Ok(Self(bytes))
@@ -191,7 +188,10 @@ mod native {
     }
 
     impl NativeDiscoveryBackend for LibFido2Adapter {
-        fn manifest(&mut self, _budget_ms: u64) -> Result<Vec<NativeDiscoveredDevice>, NativeError> {
+        fn manifest(
+            &mut self,
+            _budget_ms: u64,
+        ) -> Result<Vec<NativeDiscoveredDevice>, NativeError> {
             let mut list = DevInfoList::new(MAX_NATIVE_DISCOVERED_DEVICES)?;
             let mut found = 0usize;
 
@@ -574,7 +574,9 @@ mod native {
         };
         let timed_out_by_budget = budget_ms != 0 && elapsed >= Duration::from_millis(budget_ms);
         let kind = match name.as_str() {
-            "FIDO_ERR_CHANNEL_BUSY" | "FIDO_ERR_PROCESSING" | "FIDO_ERR_OPERATION_PENDING"
+            "FIDO_ERR_CHANNEL_BUSY"
+            | "FIDO_ERR_PROCESSING"
+            | "FIDO_ERR_OPERATION_PENDING"
             | "FIDO_ERR_USER_ACTION_PENDING" => NativeErrorKind::Busy,
             "FIDO_ERR_OPERATION_DENIED" | "FIDO_ERR_NOT_ALLOWED" | "FIDO_ERR_UNAUTHORIZED_PERM" => {
                 NativeErrorKind::AccessDenied
@@ -582,12 +584,14 @@ mod native {
             "FIDO_ERR_TIMEOUT" | "FIDO_ERR_USER_ACTION_TIMEOUT" | "FIDO_ERR_ACTION_TIMEOUT" => {
                 NativeErrorKind::TimedOut
             }
-            "FIDO_ERR_INVALID_COMMAND" | "FIDO_ERR_UNSUPPORTED_EXTENSION"
-            | "FIDO_ERR_UNSUPPORTED_ALGORITHM" | "FIDO_ERR_UNSUPPORTED_OPTION" => {
-                NativeErrorKind::Unsupported
-            }
+            "FIDO_ERR_INVALID_COMMAND"
+            | "FIDO_ERR_UNSUPPORTED_EXTENSION"
+            | "FIDO_ERR_UNSUPPORTED_ALGORITHM"
+            | "FIDO_ERR_UNSUPPORTED_OPTION" => NativeErrorKind::Unsupported,
             "FIDO_ERR_NOTFOUND" => NativeErrorKind::Absent,
-            "FIDO_ERR_INVALID_CBOR" | "FIDO_ERR_RX_NOT_CBOR" | "FIDO_ERR_RX_INVALID_CBOR"
+            "FIDO_ERR_INVALID_CBOR"
+            | "FIDO_ERR_RX_NOT_CBOR"
+            | "FIDO_ERR_RX_INVALID_CBOR"
             | "FIDO_ERR_CBOR_UNEXPECTED_TYPE" => NativeErrorKind::Malformed,
             "FIDO_ERR_RX" | "FIDO_ERR_TX" if timed_out_by_budget => NativeErrorKind::TimedOut,
             "FIDO_ERR_RX" | "FIDO_ERR_TX" => NativeErrorKind::Unavailable,

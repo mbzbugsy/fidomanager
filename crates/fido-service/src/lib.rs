@@ -1,11 +1,16 @@
 //! Offline FIDO policy and workflow coordination.
 
 mod discovery;
+mod in_process_worker;
 
 pub use discovery::{
     DiscoveryCoordinator, DiscoveryError, DiscoveryPolicy, DiscoveryPolicyError,
     RegisteredDeviceTarget, WorkerEndpoint, WorkerEndpointError,
 };
+
+pub use in_process_worker::InProcessWorkerEndpoint;
+#[cfg(feature = "native-libfido2")]
+pub use in_process_worker::spawn_libfido2_worker;
 
 use std::collections::VecDeque;
 

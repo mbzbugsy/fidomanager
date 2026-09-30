@@ -8,7 +8,10 @@ fn main() {
     }
 
     if let Some(directory) = env::var_os("LIBFIDO2_LIB_DIR") {
-        println!("cargo:rustc-link-search=native={}", Path::new(&directory).display());
+        println!(
+            "cargo:rustc-link-search=native={}",
+            Path::new(&directory).display()
+        );
         return;
     }
 

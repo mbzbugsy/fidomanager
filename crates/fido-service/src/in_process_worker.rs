@@ -227,8 +227,8 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
             if let Some(index) = previous.iter().position(|slot| slot.key == device.key) {
                 let prior = &previous[index];
                 let slot = &mut next[index];
-                let identity_changed = prior.vendor_id != device.vendor_id
-                    || prior.product_id != device.product_id;
+                let identity_changed =
+                    prior.vendor_id != device.vendor_id || prior.product_id != device.product_id;
                 if !prior.present || identity_changed {
                     slot.generation = DeviceGeneration(
                         slot.generation
@@ -270,7 +270,11 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
         device_generation: DeviceGeneration,
         budget_ms: u64,
     ) -> Result<WorkerDeviceInfo, WorkerErrorCode> {
-        let Some(index) = self.slots.iter().position(|slot| slot.device_id == device_id) else {
+        let Some(index) = self
+            .slots
+            .iter()
+            .position(|slot| slot.device_id == device_id)
+        else {
             return Err(WorkerErrorCode::DeviceAbsent);
         };
         if !self.slots[index].present || self.slots[index].generation != device_generation {
@@ -355,8 +359,7 @@ mod tests {
 
     use fido_libfido2::{NativeDeviceOption, NativeError};
     use fido_worker_protocol::{
-        CancellationId, RequestBudgetMs, WORKER_PROTOCOL_VERSION, WorkerOperationClass,
-        WorkerRequestId,
+        CancellationId, RequestBudgetMs, WORKER_PROTOCOL_VERSION, WorkerRequestId,
     };
 
     use super::*;
@@ -371,9 +374,7 @@ mod tests {
             &mut self,
             _budget_ms: u64,
         ) -> Result<Vec<NativeDiscoveredDevice>, NativeError> {
-            self.manifests
-                .pop_front()
-                .unwrap_or_else(|| Ok(Vec::new()))
+            self.manifests.pop_front().unwrap_or_else(|| Ok(Vec::new()))
         }
 
         fn get_info(
@@ -447,38 +448,21 @@ mod tests {
         let generation = WorkerGeneration(7);
         let device = native_device(1)?;
         let backend = ScriptedBackend {
-            manifests: VecDeque::from([
-                Ok(vec![device.clone()]),
-                Ok(Vec::new()),
-                Ok(vec![device]),
-            ]),
+            manifests: VecDeque::from([Ok(vec![device.clone()]), Ok(Vec::new()), Ok(vec![device])]),
             infos: VecDeque::new(),
         };
         let mut engine = WorkerEngine::new(backend, generation);
 
-        let first = listed_device(engine.handle(request(
-            generation,
-            1,
-            WorkerRequest::ListDevices,
-            None,
-        )))
-        .ok_or_else(|| std::io::Error::other("first device missing"))?;
+        let first =
+            listed_device(engine.handle(request(generation, 1, WorkerRequest::ListDevices, None)))
+                .ok_or_else(|| std::io::Error::other("first device missing"))?;
         assert!(
-            listed_device(engine.handle(request(
-                generation,
-                2,
-                WorkerRequest::ListDevices,
-                None,
-            )))
-            .is_none()
+            listed_device(engine.handle(request(generation, 2, WorkerRequest::ListDevices, None,)))
+                .is_none()
         );
-        let replugged = listed_device(engine.handle(request(
-            generation,
-            3,
-            WorkerRequest::ListDevices,
-            None,
-        )))
-        .ok_or_else(|| std::io::Error::other("replugged device missing"))?;
+        let replugged =
+            listed_device(engine.handle(request(generation, 3, WorkerRequest::ListDevices, None)))
+                .ok_or_else(|| std::io::Error::other("replugged device missing"))?;
 
         assert_eq!(first.device_id, replugged.device_id);
         assert_eq!(first.device_generation, DeviceGeneration(1));
@@ -496,13 +480,9 @@ mod tests {
             infos: VecDeque::from([Err(NativeError::new(NativeErrorKind::Absent, None))]),
         };
         let mut engine = WorkerEngine::new(backend, generation);
-        let first = listed_device(engine.handle(request(
-            generation,
-            1,
-            WorkerRequest::ListDevices,
-            None,
-        )))
-        .ok_or_else(|| std::io::Error::other("first device missing"))?;
+        let first =
+            listed_device(engine.handle(request(generation, 1, WorkerRequest::ListDevices, None)))
+                .ok_or_else(|| std::io::Error::other("first device missing"))?;
 
         let info_response = engine.handle(request(
             generation,
@@ -519,13 +499,9 @@ mod tests {
             }
         ));
 
-        let second = listed_device(engine.handle(request(
-            generation,
-            3,
-            WorkerRequest::ListDevices,
-            None,
-        )))
-        .ok_or_else(|| std::io::Error::other("second device missing"))?;
+        let second =
+            listed_device(engine.handle(request(generation, 3, WorkerRequest::ListDevices, None)))
+                .ok_or_else(|| std::io::Error::other("second device missing"))?;
         assert_eq!(second.device_id, first.device_id);
         assert_eq!(second.device_generation, DeviceGeneration(2));
         Ok(())
@@ -543,20 +519,12 @@ mod tests {
             infos: VecDeque::new(),
         };
         let mut engine = WorkerEngine::new(backend, generation);
-        let first = listed_device(engine.handle(request(
-            generation,
-            1,
-            WorkerRequest::ListDevices,
-            None,
-        )))
-        .ok_or_else(|| std::io::Error::other("first device missing"))?;
-        let second = listed_device(engine.handle(request(
-            generation,
-            2,
-            WorkerRequest::ListDevices,
-            None,
-        )))
-        .ok_or_else(|| std::io::Error::other("second device missing"))?;
+        let first =
+            listed_device(engine.handle(request(generation, 1, WorkerRequest::ListDevices, None)))
+                .ok_or_else(|| std::io::Error::other("first device missing"))?;
+        let second =
+            listed_device(engine.handle(request(generation, 2, WorkerRequest::ListDevices, None)))
+                .ok_or_else(|| std::io::Error::other("second device missing"))?;
         assert_eq!(first.device_id, second.device_id);
         assert_eq!(second.device_generation, DeviceGeneration(2));
         Ok(())
@@ -571,13 +539,9 @@ mod tests {
             infos: VecDeque::new(),
         };
         let mut engine = WorkerEngine::new(backend, generation);
-        let listed = listed_device(engine.handle(request(
-            generation,
-            1,
-            WorkerRequest::ListDevices,
-            None,
-        )))
-        .ok_or_else(|| std::io::Error::other("device missing"))?;
+        let listed =
+            listed_device(engine.handle(request(generation, 1, WorkerRequest::ListDevices, None)))
+                .ok_or_else(|| std::io::Error::other("device missing"))?;
         let response = engine.handle(request(
             generation,
             2,
@@ -596,20 +560,16 @@ mod tests {
     }
 
     #[test]
-    fn dedicated_endpoint_round_trips_read_only_discovery()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn dedicated_endpoint_round_trips_read_only_discovery() -> Result<(), Box<dyn std::error::Error>>
+    {
         let generation = WorkerGeneration(9);
         let backend = ScriptedBackend {
             manifests: VecDeque::from([Ok(vec![native_device(5)?])]),
             infos: VecDeque::new(),
         };
         let mut endpoint = InProcessWorkerEndpoint::spawn(backend, generation)?;
-        let response = endpoint.exchange(request(
-            generation,
-            1,
-            WorkerRequest::ListDevices,
-            None,
-        ))?;
+        let response =
+            endpoint.exchange(request(generation, 1, WorkerRequest::ListDevices, None))?;
         assert!(matches!(
             response.response,
             WorkerResponse::DevicesListed { ref devices } if devices.len() == 1
