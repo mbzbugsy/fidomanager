@@ -4,8 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 
-type DiscoveryAuthority =
-    fido_service::DiscoveryCoordinator<fido_service::InProcessWorkerEndpoint>;
+type DiscoveryAuthority = fido_service::DiscoveryCoordinator<fido_service::InProcessWorkerEndpoint>;
 
 pub(crate) struct AppState {
     discovery: Arc<Mutex<DiscoveryAuthority>>,

@@ -72,7 +72,9 @@ const manifestMatch = buildSource.match(
   /AppManifest::new\(\)[\s\S]*?\.commands\(&\[([^\]]*)\]\)/,
 );
 if (!manifestMatch) {
-  throw new Error('Tauri app ACL manifest must explicitly register app commands.');
+  throw new Error(
+    'Tauri app ACL manifest must explicitly register app commands.',
+  );
 }
 const manifestCommands = [
   ...manifestMatch[1].matchAll(/"([A-Za-z_][A-Za-z0-9_]*)"/g),
@@ -106,12 +108,17 @@ const foundation = discoveredCommands.find(
   ({ name }) => name === 'foundation_status',
 );
 if (!foundation || foundation.parameters !== '') {
-  throw new Error('foundation_status must not accept renderer-controlled parameters.');
+  throw new Error(
+    'foundation_status must not accept renderer-controlled parameters.',
+  );
 }
 const discovery = discoveredCommands.find(
   ({ name }) => name === 'list_authenticators',
 );
-if (!discovery || !discovery.parameters.includes("tauri::State<'_, AppState>")) {
+if (
+  !discovery ||
+  !discovery.parameters.includes("tauri::State<'_, AppState>")
+) {
   throw new Error(
     'list_authenticators may accept only authority-owned Tauri State.',
   );
@@ -156,13 +163,19 @@ const invokedCommands = new Set();
 for (const file of rendererFiles) {
   const source = readFileSync(file, 'utf8');
   if (source.includes('@tauri-apps/api/event')) {
-    throw new Error(`Renderer event API is not approved in Milestone 1: ${file}`);
+    throw new Error(
+      `Renderer event API is not approved in Milestone 1: ${file}`,
+    );
   }
   if (source.includes('@tauri-apps/plugin-')) {
-    throw new Error(`Renderer plugin API is not approved in Milestone 1: ${file}`);
+    throw new Error(
+      `Renderer plugin API is not approved in Milestone 1: ${file}`,
+    );
   }
   if (source.includes('__TAURI_INTERNALS__')) {
-    throw new Error(`Direct internal Tauri IPC access is not approved: ${file}`);
+    throw new Error(
+      `Direct internal Tauri IPC access is not approved: ${file}`,
+    );
   }
   for (const match of source.matchAll(
     /invoke(?:<[^>]+>)?\(\s*['"]([^'"]+)['"]/g,
@@ -187,7 +200,9 @@ if (existsSync(generatedCapabilitiesPath) || existsSync(generatedAclPath)) {
   );
   const resolvedMain = generatedCapabilities[EXPECTED_CAPABILITY];
   if (!resolvedMain) {
-    throw new Error('Generated Tauri capabilities are missing the main capability.');
+    throw new Error(
+      'Generated Tauri capabilities are missing the main capability.',
+    );
   }
   assertExactArray(
     resolvedMain.permissions,

@@ -108,7 +108,9 @@
 <div class="app-frame">
   <header class="topbar">
     <div class="brand" aria-label="FidoManager">
-      <div class="brand-mark" aria-hidden="true"><span></span><span></span></div>
+      <div class="brand-mark" aria-hidden="true">
+        <span></span><span></span>
+      </div>
       <div>
         <strong>FidoManager</strong>
         <small>Authenticator control</small>
@@ -125,10 +127,12 @@
     <section class="intro" aria-labelledby="page-title">
       <div>
         <p class="eyebrow">FIDO2 / CTAP DEVICE MANAGER</p>
-        <h1 id="page-title">Your security keys.<br />Visible and under control.</h1>
+        <h1 id="page-title">
+          Your security keys.<br />Visible and under control.
+        </h1>
         <p class="lede">
-          FidoManager talks directly to authenticators on this Mac. No account, no cloud,
-          no telemetry.
+          FidoManager talks directly to authenticators on this Mac. No account,
+          no cloud, no telemetry.
         </p>
       </div>
 
@@ -149,7 +153,9 @@
     <section class="system-strip" aria-label="Discovery status">
       <div class="system-item">
         <span class="system-label">Native service</span>
-        <strong class:warning={Boolean(discoveryError)}>{discoveryError ? 'Attention' : 'Online'}</strong>
+        <strong class:warning={Boolean(discoveryError)}
+          >{discoveryError ? 'Attention' : 'Online'}</strong
+        >
       </div>
       <div class="system-item">
         <span class="system-label">Discovery epoch</span>
@@ -178,7 +184,9 @@
           <p class="section-kicker">CONNECTED HARDWARE</p>
           <h2 id="devices-title">Authenticators</h2>
         </div>
-        <span class="device-count">{snapshot?.devices.length ?? 0} detected</span>
+        <span class="device-count"
+          >{snapshot?.devices.length ?? 0} detected</span
+        >
       </div>
 
       {#if snapshot && snapshot.devices.length > 0}
@@ -188,12 +196,17 @@
               <div class="device-card-head">
                 <div class="key-icon" aria-hidden="true">
                   <div class="key-contact"></div>
-                  <div class="key-body"><span></span><span></span><span></span></div>
+                  <div class="key-body">
+                    <span></span><span></span><span></span>
+                  </div>
                 </div>
 
                 <div class="device-title">
                   <div class="status-line">
-                    <span class:ready={device.readStatus === 'Ready'} class="status-dot"></span>
+                    <span
+                      class:ready={device.readStatus === 'Ready'}
+                      class="status-dot"
+                    ></span>
                     <span>{friendlyStatus(device.readStatus)}</span>
                   </div>
                   <h3>{device.product ?? 'FIDO authenticator'}</h3>
@@ -202,11 +215,15 @@
 
                 <div class="vidpid">
                   <span>VID:PID</span>
-                  <code>{hex16(device.vendorId)}:{hex16(device.productId)}</code>
+                  <code>{hex16(device.vendorId)}:{hex16(device.productId)}</code
+                  >
                 </div>
               </div>
 
-              <div class="chip-row" aria-label="Supported versions and transports">
+              <div
+                class="chip-row"
+                aria-label="Supported versions and transports"
+              >
                 {#each device.versions as version}
                   <span class="chip accent">{version}</span>
                 {/each}
@@ -254,7 +271,9 @@
 
               <footer class="device-footer">
                 <span>Handle</span>
-                <code>{device.handle.slice(0, 8)}…{device.handle.slice(-8)}</code>
+                <code
+                  >{device.handle.slice(0, 8)}…{device.handle.slice(-8)}</code
+                >
               </footer>
             </article>
           {/each}
@@ -263,7 +282,10 @@
         <div class="empty-state">
           <div class="empty-key" aria-hidden="true"></div>
           <h3>No authenticator connected</h3>
-          <p>Insert a USB FIDO2 security key. FidoManager will detect it automatically.</p>
+          <p>
+            Insert a USB FIDO2 security key. FidoManager will detect it
+            automatically.
+          </p>
           <span>Scanning every second while this alpha is open.</span>
         </div>
       {:else}
