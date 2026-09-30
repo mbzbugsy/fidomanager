@@ -8,6 +8,7 @@ pub use discovery::{
     RegisteredDeviceTarget, WorkerEndpoint, WorkerEndpointError,
 };
 
+pub use fido_worker_protocol::WorkerGeneration;
 pub use in_process_worker::InProcessWorkerEndpoint;
 #[cfg(feature = "native-libfido2")]
 pub use in_process_worker::spawn_libfido2_worker;
