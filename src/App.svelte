@@ -40,6 +40,7 @@
   let snapshot: AuthenticatorList | null = null;
   let discoveryError: string | null = null;
   let refreshing = false;
+  let manualScanning = false;
   let lastScan: string | null = null;
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -62,9 +63,13 @@
     }
   }
 
-  async function refreshDevices(scheduleNext = true) {
+  async function refreshDevices(scheduleNext = true, manual = false) {
     if (refreshing || stopped) return;
     refreshing = true;
+    if (manual) {
+      manualScanning = true;
+    }
+
     try {
       snapshot = await invoke<AuthenticatorList>('list_authenticators');
       discoveryError = null;
@@ -78,6 +83,9 @@
         typeof error === 'string' ? error : 'Native discovery is unavailable.';
     } finally {
       refreshing = false;
+      if (manual) {
+        manualScanning = false;
+      }
       if (scheduleNext && !stopped) {
         timer = setTimeout(() => void refreshDevices(), pollDelayMs);
       }
@@ -87,7 +95,7 @@
   function refreshNow() {
     if (timer) clearTimeout(timer);
     timer = null;
-    void refreshDevices();
+    void refreshDevices(true, true);
   }
 
   onMount(() => {
@@ -140,13 +148,13 @@
         class="refresh-button"
         type="button"
         onclick={() => refreshNow()}
-        disabled={refreshing}
+        disabled={manualScanning}
       >
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M20 7v5h-5M4 17v-5h5" />
           <path d="M6.1 8.2A7 7 0 0 1 18.8 7M17.9 15.8A7 7 0 0 1 5.2 17" />
         </svg>
-        {refreshing ? 'Scanning…' : 'Scan now'}
+        {manualScanning ? 'Scanning…' : 'Scan now'}
       </button>
     </section>
 
