@@ -1,0 +1,42 @@
+name: M1 app bootstrap fix
+
+on:
+  push:
+    branches:
+      - feature/m1-read-only-discovery
+
+permissions:
+  contents: write
+
+jobs:
+  fix-bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Fix Svelte click handler in bootstrap source
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          path = Path('.github/workflows/m1-app-bootstrap.yml')
+          text = path.read_text()
+          old = 'onclick={refreshNow}'
+          new = 'onclick={() => refreshNow()}'
+          if old not in text:
+              raise SystemExit('click handler marker not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+
+      - name: Commit bootstrap fix
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/m1-app-bootstrap-fix.yml
+          git add .github/workflows/m1-app-bootstrap.yml
+          git commit -m "ci: fix alpha bootstrap Svelte handler"
+          git push origin HEAD:feature/m1-read-only-discovery
