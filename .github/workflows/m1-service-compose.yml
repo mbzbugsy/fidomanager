@@ -1,0 +1,55 @@
+name: M1 service compose
+
+on:
+  push:
+    branches:
+      - feature/m1-read-only-discovery
+
+permissions:
+  contents: write
+
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Export worker generation and enable native service feature
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          service = Path('crates/fido-service/src/lib.rs')
+          text = service.read_text()
+          marker = '#[cfg(feature = "native-libfido2")]\npub use in_process_worker::spawn_libfido2_worker;\n'
+          addition = marker + 'pub use fido_worker_protocol::WorkerGeneration;\n'
+          if 'pub use fido_worker_protocol::WorkerGeneration;' not in text:
+              if marker not in text:
+                  raise SystemExit('service export marker not found')
+              text = text.replace(marker, addition, 1)
+          service.write_text(text)
+
+          cargo = Path('src-tauri/Cargo.toml')
+          text = cargo.read_text()
+          old = 'fido-service = { path = "../crates/fido-service" }'
+          new = 'fido-service = { path = "../crates/fido-service", features = ["native-libfido2"] }'
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif new not in text:
+              raise SystemExit('Tauri service dependency marker not found')
+          cargo.write_text(text)
+          PY
+          cargo fmt --all
+
+      - name: Commit source composition
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/fido-service/src/lib.rs src-tauri/Cargo.toml
+          git commit -m "feat: compose native discovery for desktop app"
+          git push origin HEAD:feature/m1-read-only-discovery
