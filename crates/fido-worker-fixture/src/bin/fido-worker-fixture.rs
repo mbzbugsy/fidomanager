@@ -7,7 +7,7 @@
 //! * `--script=STEPS[;--info=STEPS]`-style scripted native backend, run through the production
 //!   runtime. `--script=` drives `manifest()` and `--info=` drives `get_info()`; each is a comma
 //!   list consumed one entry per call (then `ok` forever): `ok`, `hang` (block forever, ignoring
-//!   the deadline), `crash` (abort), `slow<ms>` (sleep ignoring the deadline, then succeed).
+//!   the deadline), `crash` (die abruptly mid-call), `slow<ms>` (sleep ignoring the deadline, then succeed).
 //! * `--raw=MODE` speaks the wire protocol by hand to misbehave on purpose; see `raw`.
 //!
 //! `--tag=NAME` is ignored by the fixture. Tests put a unique tag on the command line so they can
@@ -72,7 +72,11 @@ fn apply(step: Step) {
         Step::Hang => loop {
             thread::park();
         },
-        Step::Crash => std::process::abort(),
+        // Dies abruptly in the middle of a native call, exactly like a crash from the service's
+        // point of view (the pipe closes with a request in flight). It deliberately avoids
+        // `abort()` and real signals: those make macOS write a crash report, or Linux a core dump,
+        // on every test run. Signal deaths are covered by the `kill -9` tests instead.
+        Step::Crash => exit_immediately(134),
         Step::Slow(millis) => thread::sleep(Duration::from_millis(millis)),
     }
 }

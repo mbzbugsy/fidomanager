@@ -114,7 +114,7 @@ pub fn pid_running(pid: u32) -> bool {
 pub fn fixture_processes(needle: &str) -> Vec<String> {
     let fixture = fixture_path().to_string_lossy().into_owned();
     let output = Command::new("ps")
-        .args(["-axwwo", "pid=,command="])
+        .args(["-e", "-ww", "-o", "pid=,command="])
         .stderr(Stdio::null())
         .output();
     let Ok(output) = output else {
