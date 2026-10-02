@@ -222,12 +222,12 @@ The **Trusted FIDO authority** is a logical boundary.
 
 Initial process placement:
 
-- macOS/Linux: the authority may live in the application's native Rust process; the worker endpoint may initially be thread-backed, but its protocol must remain process-transparent;
+- macOS/Linux: the authority lives in the application's native Rust process; native FIDO work runs in a killable child worker process (`fido-worker`, decided by the M1.5 containment work, ADR-009), and the authority itself does not link libfido2;
 - Windows: if direct management requires elevation, the trusted authority moves into the elevated broker rather than leaving policy/consent in the unelevated Tauri process.
 
 Optional export/provider code sits outside this authority.
 
-The M1.5 hung-call/containment spike decides whether macOS/Linux workers remain in-process for later milestones or become killable child processes. This deployment decision must not change the service-visible protocol.
+The M1.5 hung-call/containment work decided that macOS/Linux workers are killable child processes, including for read-only discovery (ADR-009). This deployment decision did not change the service-visible protocol.
 
 ## 6. Domain model: `fido-core`
 
@@ -521,7 +521,7 @@ Protocol rules:
 - explicit evidence fields needed by mutation-outcome classification;
 - no assumption that service and worker share an address space.
 
-The initial endpoint may be an in-process thread implementation. The same service-facing protocol must be usable by a child-process worker without semantic changes.
+The production endpoint is a child-process worker. The M1 in-process thread endpoint proved the protocol was process-transparent (the child endpoint reused it without semantic change) and was then removed from the production path because it cannot prove quiescence (ADR-009).
 
 Example:
 
@@ -549,7 +549,15 @@ Rules:
 - interrupted enumeration is marked incomplete rather than silently reused;
 - device-provided counts/lengths are validated/capped before Rust allocation where possible; native-library allocation behavior is part of containment testing.
 
-The M1.5 hung-call/containment spike is the single decision point for deployment containment before sensitive public functionality. If in-process behavior cannot safely bound hangs/native allocations, later milestones use a killable worker process behind the same protocol.
+The M1.5 hung-call/containment spike was the single decision point for deployment containment before sensitive public functionality, and it found that in-process behavior cannot stop, join, or prove quiescence of a hung native call. Therefore macOS/Linux use a killable worker process behind the same protocol. Containment rules that now hold in code:
+
+- the endpoint terminates and **reaps** a worker before it reports any timeout, crash, or protocol violation, and only a successful reap is reported as `Quiescent`;
+- `contain()` is idempotent and reports `Active` when quiescence cannot be proven; a worker is never replaced while its predecessor is `Active`;
+- every worker start is a handshake (protocol version, worker generation, worker pid) followed by a health check; replacement workers receive a strictly higher `WorkerGeneration`;
+- deadlines nest strictly (transaction, then exchange, then native); later exchanges receive the *remaining* transaction time and each native sub-call the remaining request time;
+- frames are bounded before allocation in both directions, and malformed, truncated, empty, oversized, or unsolicited frames are protocol violations that terminate the worker;
+- restarts back off exponentially and a sliding-window circuit breaker pauses respawning of a crash-looping worker;
+- a worker cannot outlive its service: it exits on stdin EOF, on parent-pid change, and on any panic.
 
 ## 16. Sensitive workflow concurrency and admission: zero queue
 
@@ -934,7 +942,7 @@ Initial development target:
 
 - Apple Silicon macOS;
 - roaming USB FIDO authenticator;
-- trusted Rust authority in the native app process unless worker-containment testing requires a child process.
+- trusted Rust authority in the native app process; native FIDO work in the killable `fido-worker` child process (M1.5).
 
 Native sensitive UI must use AppKit main-thread dispatch and window-modal asynchronous presentation. Blocking modal-loop designs are not the default production pattern.
 
@@ -1062,9 +1070,8 @@ Test:
 
 Test the same service-facing request/response contract against:
 
-- in-process/thread endpoint;
-- fake/fault-injecting endpoint;
-- child-process endpoint prototype where used by the M1.5 containment spike.
+- fake/fault-injecting endpoint (deterministic coordinator and supervisor policy tests);
+- the production child-process endpoint against real worker processes, including hang, crash, orphan, framing, handshake, and descriptor-hygiene fault injection (`crates/fido-worker-fixture`).
 
 No service test may depend on borrowed/native pointers crossing the worker boundary.
 

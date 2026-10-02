@@ -1,19 +1,28 @@
 //! Offline FIDO policy and workflow coordination.
 
 mod discovery;
-mod in_process_worker;
+mod process_worker;
+mod supervisor;
+#[cfg(test)]
+mod test_support;
 
 pub use discovery::{
     DiscoveryCoordinator, DiscoveryError, DiscoveryPolicy, DiscoveryPolicyError,
     RegisteredDeviceTarget, WorkerEndpoint, WorkerEndpointError,
 };
+pub use process_worker::{
+    LaunchError, ProcessWorkerConfig, ProcessWorkerConfigError, ProcessWorkerEndpoint,
+    ProcessWorkerLauncher, ResolvedWorkerExecutable,
+};
+pub use supervisor::{
+    DiscoverySupervisor, RestartPolicy, RestartPolicyError, SupervisorConfigError, SupervisorError,
+    SupervisorState, SupervisorStatus, WorkerLauncher,
+};
 
 pub use fido_worker_protocol::WorkerGeneration;
-pub use in_process_worker::InProcessWorkerEndpoint;
-#[cfg(feature = "native-libfido2")]
-pub use in_process_worker::spawn_libfido2_worker;
 
 use std::collections::VecDeque;
+use std::time::Instant;
 
 use fido_core::{ExecutionQuiescence, RecoveryAdmission, SensitiveWorkflowKind, WorkflowId};
 use thiserror::Error;
@@ -90,6 +99,41 @@ impl MonotonicMillis {
 
     pub const fn as_millis(self) -> u64 {
         self.0
+    }
+}
+
+/// Source of authority-owned monotonic time.
+///
+/// Policy code (transaction deadlines, restart backoff) reads time only through this trait so it
+/// can be tested deterministically. It is never fed by renderer-supplied or wall-clock values.
+pub trait MonotonicClock {
+    fn now(&self) -> MonotonicMillis;
+}
+
+/// Real monotonic clock, measured from the moment it was created.
+#[derive(Debug, Clone, Copy)]
+pub struct SystemMonotonicClock {
+    origin: Instant,
+}
+
+impl SystemMonotonicClock {
+    pub fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+        }
+    }
+}
+
+impl Default for SystemMonotonicClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MonotonicClock for SystemMonotonicClock {
+    fn now(&self) -> MonotonicMillis {
+        let elapsed = self.origin.elapsed().as_millis();
+        MonotonicMillis::from_millis(u64::try_from(elapsed).unwrap_or(u64::MAX))
     }
 }
 
