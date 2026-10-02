@@ -436,10 +436,7 @@ impl<E: WorkerEndpoint> DiscoveryCoordinator<E> {
         })
     }
 
-    fn cached_device_info(
-        &self,
-        device: &WorkerDiscoveredDevice,
-    ) -> Option<WorkerDeviceInfo> {
+    fn cached_device_info(&self, device: &WorkerDiscoveredDevice) -> Option<WorkerDeviceInfo> {
         self.info_cache
             .iter()
             .find(|cached| {
