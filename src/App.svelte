@@ -156,7 +156,7 @@
 
       <div class="status-line-inline" aria-label="System status">
         <span class="status-item">
-          <i class:warning={Boolean(discoveryError)}></i>
+          <i aria-hidden="true" class:warning={Boolean(discoveryError)}></i>
           Native service
           <strong>{discoveryError ? 'attention' : 'online'}</strong>
         </span>
