@@ -31,8 +31,8 @@ use fido_worker::runtime::{RuntimeConfig, run};
 use fido_worker::{exit, harden_process};
 use fido_worker_protocol::{
     ChildHello, MAX_WORKER_FRAME_BYTES, MAX_WORKER_HANDSHAKE_FRAME_BYTES,
-    MAX_WORKER_REQUEST_FRAME_BYTES, ParentHello, WorkerRequestEnvelope, read_message, write_frame,
-    write_message,
+    MAX_WORKER_REQUEST_FRAME_BYTES, ParentHello, WorkerRequestEnvelope, WorkerResponse,
+    read_message, write_frame, write_message,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -175,6 +175,11 @@ fn park_forever() -> ! {
 /// that misbehave on the second request (after a normal handshake and health check) fail an
 /// *exchange*.
 fn raw(mode: &str) -> ! {
+    if mode == "exit-at-start" {
+        // A worker that dies before it ever reads the handshake (for example a loader failure).
+        exit_immediately(exit::ORDERLY);
+    }
+
     let mut input = stdin().lock();
     let mut output = stdout().lock();
 
@@ -270,6 +275,37 @@ fn raw(mode: &str) -> ! {
             "double-response" => {
                 // One honest response plus an unsolicited second frame.
                 let _ = write_message(&mut output, &response, MAX_WORKER_FRAME_BYTES);
+                let _ = write_message(&mut output, &response, MAX_WORKER_FRAME_BYTES);
+                park_forever()
+            }
+            "truncated-header" => {
+                // Two bytes of a four-byte length header, then death.
+                let _ = output.write_all(&[0, 0]);
+                let _ = output.flush();
+                exit_immediately(exit::ORDERLY)
+            }
+            "wrong-request-id" => {
+                let mut response = response;
+                response.request_id.0 = response.request_id.0.wrapping_add(1_000);
+                let _ = write_message(&mut output, &response, MAX_WORKER_FRAME_BYTES);
+                park_forever()
+            }
+            "wrong-generation-response" => {
+                let mut response = response;
+                response.worker_generation.0 = response.worker_generation.0.wrapping_add(1);
+                let _ = write_message(&mut output, &response, MAX_WORKER_FRAME_BYTES);
+                park_forever()
+            }
+            "bad-protocol-response" => {
+                let mut response = response;
+                response.protocol_version = response.protocol_version.wrapping_add(1);
+                let _ = write_message(&mut output, &response, MAX_WORKER_FRAME_BYTES);
+                park_forever()
+            }
+            "wrong-variant" => {
+                // Correctly correlated, but not the kind of answer the request asked for.
+                let mut response = response;
+                response.response = WorkerResponse::Healthy;
                 let _ = write_message(&mut output, &response, MAX_WORKER_FRAME_BYTES);
                 park_forever()
             }

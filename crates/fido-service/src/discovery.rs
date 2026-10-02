@@ -845,7 +845,9 @@ mod tests {
     use super::*;
     use crate::test_support::FakeClock;
     use fido_core::{Aaguid, DeviceGeneration, MutationOutcome};
-    use fido_worker_protocol::{MAX_DEVICE_TEXT_BYTES, WorkerDeviceOption, WorkerResponseEvidence};
+    use fido_worker_protocol::{
+        MAX_DEVICE_TEXT_BYTES, WorkerDeviceOption, WorkerRequestId, WorkerResponseEvidence,
+    };
 
     #[derive(Debug, Clone)]
     struct FakeDevice {
@@ -866,6 +868,8 @@ mod tests {
         budgets_seen: Vec<u64>,
         clock: Option<FakeClock>,
         exchange_cost_ms: std::collections::VecDeque<u64>,
+        /// Rewrites every response, to model a worker that violates the protocol.
+        tamper: Option<fn(&mut WorkerResponseEnvelope)>,
     }
 
     impl FakeEndpoint {
@@ -882,6 +886,7 @@ mod tests {
                 budgets_seen: Vec::new(),
                 clock: None,
                 exchange_cost_ms: std::collections::VecDeque::new(),
+                tamper: None,
             }
         }
 
@@ -890,7 +895,7 @@ mod tests {
             request: &WorkerRequestEnvelope,
             response: WorkerResponse,
         ) -> WorkerResponseEnvelope {
-            WorkerResponseEnvelope {
+            let mut envelope = WorkerResponseEnvelope {
                 protocol_version: WORKER_PROTOCOL_VERSION,
                 request_id: request.request_id,
                 worker_generation: self.generation,
@@ -904,7 +909,11 @@ mod tests {
                     mutation_outcome: None,
                 },
                 response,
+            };
+            if let Some(tamper) = self.tamper {
+                tamper(&mut envelope);
             }
+            envelope
         }
     }
 
@@ -1423,6 +1432,137 @@ mod tests {
         assert_eq!(
             coordinator.refresh(),
             Err(DiscoveryError::WorkerQuarantined)
+        );
+        Ok(())
+    }
+
+    /// Every protocol violation below must take the worker out of service *and* stop it.
+    fn assert_violation_quarantines_and_contains(
+        tamper: fn(&mut WorkerResponseEnvelope),
+        expected: DiscoveryError,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut coordinator = coordinator(vec![fake_device(1)])?;
+        coordinator.endpoint.tamper = Some(tamper);
+
+        assert_eq!(coordinator.refresh().err(), Some(expected));
+        assert!(coordinator.is_quarantined());
+        assert_eq!(
+            coordinator.endpoint.contain_count, 1,
+            "a violating worker must be stopped, not merely ignored"
+        );
+        assert_eq!(
+            coordinator.refresh().err(),
+            Some(DiscoveryError::WorkerQuarantined)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn response_from_another_worker_generation_is_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_violation_quarantines_and_contains(
+            |response| response.worker_generation = WorkerGeneration(99),
+            DiscoveryError::ResponseCorrelation,
+        )
+    }
+
+    #[test]
+    fn late_response_to_another_request_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        assert_violation_quarantines_and_contains(
+            |response| response.request_id = WorkerRequestId(response.request_id.0 + 41),
+            DiscoveryError::ResponseCorrelation,
+        )
+    }
+
+    #[test]
+    fn response_with_another_protocol_version_is_rejected() -> Result<(), Box<dyn std::error::Error>>
+    {
+        assert_violation_quarantines_and_contains(
+            |response| response.protocol_version += 1,
+            DiscoveryError::ResponseCorrelation,
+        )
+    }
+
+    #[test]
+    fn response_for_another_device_generation_is_rejected() -> Result<(), Box<dyn std::error::Error>>
+    {
+        assert_violation_quarantines_and_contains(
+            |response| response.device_generation = Some(DeviceGeneration(77)),
+            DiscoveryError::ResponseCorrelation,
+        )
+    }
+
+    #[test]
+    fn response_variant_that_does_not_match_the_request_is_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_violation_quarantines_and_contains(
+            |response| response.response = WorkerResponse::Healthy,
+            DiscoveryError::UnexpectedResponse,
+        )
+    }
+
+    #[test]
+    fn old_worker_generation_cannot_regain_authority_after_replacement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut coordinator = coordinator(vec![fake_device(1)])?;
+        coordinator.endpoint.force_transport_failure = true;
+        assert!(coordinator.refresh().is_err());
+
+        // The replacement is generation 4, but whatever answers still speaks as generation 3.
+        coordinator.replace_worker(
+            FakeEndpoint::new(WorkerGeneration(3), vec![fake_device(1)]),
+            WorkerGeneration(4),
+        )?;
+        assert_eq!(
+            coordinator.refresh().err(),
+            Some(DiscoveryError::ResponseCorrelation)
+        );
+        assert!(coordinator.is_quarantined());
+        Ok(())
+    }
+
+    #[test]
+    fn many_devices_cannot_stretch_the_transaction_beyond_its_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let devices = (1..=10).map(|id| fake_device_with_id(id, 1)).collect();
+        // Every exchange takes a full second; the transaction allows five.
+        let (mut coordinator, clock) = timed_coordinator(
+            devices,
+            policy_with(2_000, 2_000, 5_000),
+            0,
+            vec![1_000; 40],
+        )?;
+
+        assert_eq!(
+            coordinator.refresh().err(),
+            Some(DiscoveryError::TransactionDeadlineExceeded)
+        );
+        assert_eq!(
+            coordinator.endpoint.exchange_count, 5,
+            "list plus four GetInfo"
+        );
+        assert!(
+            clock.now().as_millis() <= 5_000,
+            "the transaction must stop at its budget, took {} ms",
+            clock.now().as_millis()
+        );
+        assert!(!coordinator.is_quarantined());
+
+        // Progress is kept (completed GetInfo results are cached), so repeated transactions
+        // converge instead of restarting from scratch.
+        let mut attempts = 1;
+        let snapshot = loop {
+            attempts += 1;
+            match coordinator.refresh() {
+                Ok(snapshot) => break snapshot,
+                Err(DiscoveryError::TransactionDeadlineExceeded) if attempts < 6 => {}
+                Err(other) => return Err(format!("unexpected: {other:?}").into()),
+            }
+        };
+        assert_eq!(snapshot.devices.len(), 10);
+        assert_eq!(
+            attempts, 3,
+            "40 devices-worth of work finishes in bounded transactions"
         );
         Ok(())
     }

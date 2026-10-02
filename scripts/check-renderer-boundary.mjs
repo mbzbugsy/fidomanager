@@ -149,7 +149,11 @@ assertExactArray(
   ['tauri-plugin-single-instance'],
   'Milestone 1 permits only tauri-plugin-single-instance.',
 );
-if (/fido-(?:core|worker-protocol|libfido2)\s*=/.test(cargoToml)) {
+if (
+  /fido-(?:core|worker-protocol|worker|worker-fixture|libfido2|platform|native-ui)\s*=/.test(
+    cargoToml,
+  )
+) {
   throw new Error(
     'The Tauri adapter must depend on fido-service only among project trust crates.',
   );

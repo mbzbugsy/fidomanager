@@ -6,10 +6,13 @@ use std::time::Duration;
 
 use common::{
     TestResult, count_processes, describe_processes, launch, launch_error, list_request,
-    pid_exists, wait_until,
+    pid_exists, policy, wait_until,
 };
 use fido_core::ExecutionQuiescence;
-use fido_service::{LaunchError, ProcessWorkerConfig, WorkerEndpoint, WorkerEndpointError};
+use fido_service::{
+    DiscoveryCoordinator, DiscoveryError, LaunchError, ProcessWorkerConfig, WorkerEndpoint,
+    WorkerEndpointError, WorkerGeneration,
+};
 
 /// Generous on purpose: the first launch of a freshly linked binary can be slow on macOS
 /// (Gatekeeper/XProtect), and a short timeout would turn that into a spurious failure. Only the
@@ -50,6 +53,12 @@ launch_failure_case!(
     "hs-silent",
     LaunchError::HandshakeTimeout,
     Duration::from_millis(600)
+);
+launch_failure_case!(
+    worker_that_dies_before_the_handshake_is_a_startup_failure,
+    "exit-at-start",
+    "hs-start",
+    LaunchError::SpawnFailed
 );
 launch_failure_case!(
     handshake_with_another_protocol_version_is_rejected,
@@ -124,6 +133,69 @@ fn response_frame_over_the_bound_is_rejected_before_allocation_and_kills_the_wor
         Some(WorkerEndpointError::FrameTooLarge)
     );
     assert_contained(pid, &mut endpoint);
+    Ok(())
+}
+
+#[test]
+fn response_truncated_inside_the_length_header_is_a_protocol_violation() -> TestResult {
+    let mut endpoint = launch(&["--raw=truncated-header", "--tag=fr-header"], 1)?;
+    let pid = endpoint.worker_pid();
+    assert_eq!(
+        endpoint.exchange(list_request(1, 1, 500)).err(),
+        Some(WorkerEndpointError::MalformedFrame)
+    );
+    assert_contained(pid, &mut endpoint);
+    Ok(())
+}
+
+macro_rules! correlation_violation_case {
+    ($name:ident, $raw:literal, $tag:literal) => {
+        #[test]
+        fn $name() -> TestResult {
+            let mut endpoint = launch(&[concat!("--raw=", $raw), concat!("--tag=", $tag)], 1)?;
+            let pid = endpoint.worker_pid();
+            assert_eq!(
+                endpoint.exchange(list_request(1, 1, 500)).err(),
+                Some(WorkerEndpointError::MalformedFrame)
+            );
+            assert_contained(pid, &mut endpoint);
+            Ok(())
+        }
+    };
+}
+
+correlation_violation_case!(
+    response_with_the_wrong_request_id_is_a_protocol_violation,
+    "wrong-request-id",
+    "fr-reqid"
+);
+correlation_violation_case!(
+    response_with_the_wrong_worker_generation_is_a_protocol_violation,
+    "wrong-generation-response",
+    "fr-gen"
+);
+correlation_violation_case!(
+    response_with_another_protocol_version_is_a_protocol_violation,
+    "bad-protocol-response",
+    "fr-proto"
+);
+
+#[test]
+fn well_correlated_response_of_the_wrong_kind_quarantines_and_kills_the_worker() -> TestResult {
+    let endpoint = launch(&["--raw=wrong-variant", "--tag=fr-variant"], 1)?;
+    let pid = endpoint.worker_pid();
+    let mut coordinator = DiscoveryCoordinator::new(endpoint, WorkerGeneration(1), policy(500))?;
+
+    // The endpoint cannot tell a Healthy answer to ListDevices is wrong; the coordinator can.
+    assert_eq!(
+        coordinator.refresh().err(),
+        Some(DiscoveryError::UnexpectedResponse)
+    );
+    assert!(coordinator.is_quarantined());
+    assert!(
+        !pid_exists(pid),
+        "quarantine must stop the worker, not just stop listening to it"
+    );
     Ok(())
 }
 

@@ -28,9 +28,9 @@
 //! cleared.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -268,8 +268,29 @@ enum ReaderEvent {
     Failed(StreamFailure),
 }
 
+/// The part of an OS process the endpoint needs. A trait so the kill/reap contract can be tested
+/// against a process that refuses to die, which no real child can be made to do portably.
+trait WorkerProcess: Send {
+    /// Sends SIGKILL (or the platform equivalent). Failure is not authoritative: reaping is.
+    fn kill(&mut self) -> io::Result<()>;
+
+    /// `Ok(true)` only once the exit status has been *collected* (the process is reaped). A
+    /// process that was signalled but has not been reaped yet answers `Ok(false)`.
+    fn try_reap(&mut self) -> io::Result<bool>;
+}
+
+impl WorkerProcess for Child {
+    fn kill(&mut self) -> io::Result<()> {
+        Child::kill(self)
+    }
+
+    fn try_reap(&mut self) -> io::Result<bool> {
+        self.try_wait().map(|status| status.is_some())
+    }
+}
+
 enum ProcessState {
-    Running(Child),
+    Running(Box<dyn WorkerProcess>),
     /// Exit status collected: the process no longer exists, so no native call can be running.
     Reaped,
 }
@@ -277,7 +298,7 @@ enum ProcessState {
 /// One child worker process behind the unchanged [`WorkerEndpoint`] contract.
 pub struct ProcessWorkerEndpoint {
     process: ProcessState,
-    stdin: Option<ChildStdin>,
+    stdin: Option<Box<dyn Write + Send>>,
     events: mpsc::Receiver<ReaderEvent>,
     generation: WorkerGeneration,
     pid: u32,
@@ -315,8 +336,8 @@ impl ProcessWorkerEndpoint {
 
         let (events_tx, events) = mpsc::sync_channel(READER_QUEUE_FRAMES);
         let mut endpoint = Self {
-            process: ProcessState::Running(child),
-            stdin: Some(stdin),
+            process: ProcessState::Running(Box::new(child)),
+            stdin: Some(Box::new(stdin)),
             events,
             generation,
             pid,
@@ -424,10 +445,10 @@ impl ProcessWorkerEndpoint {
 
         let give_up_at = Instant::now() + self.config.reap_timeout;
         loop {
-            match child.try_wait() {
-                Ok(Some(_exit_status)) => return ExecutionQuiescence::Quiescent,
-                Ok(None) if Instant::now() < give_up_at => thread::sleep(REAP_POLL_INTERVAL),
-                Ok(None) | Err(_) => {
+            match child.try_reap() {
+                Ok(true) => return ExecutionQuiescence::Quiescent,
+                Ok(false) if Instant::now() < give_up_at => thread::sleep(REAP_POLL_INTERVAL),
+                Ok(false) | Err(_) => {
                     // Not proven stopped. Keep the handle so containment can be retried.
                     self.process = ProcessState::Running(child);
                     return ExecutionQuiescence::Active;
@@ -441,13 +462,31 @@ impl ProcessWorkerEndpoint {
         let ProcessState::Running(child) = &mut self.process else {
             return true;
         };
-        match child.try_wait() {
-            Ok(Some(_)) => {
+        match child.try_reap() {
+            Ok(true) => {
                 self.process = ProcessState::Reaped;
                 self.stdin = None;
                 true
             }
-            Ok(None) | Err(_) => false,
+            Ok(false) | Err(_) => false,
+        }
+    }
+
+    #[cfg(test)]
+    fn from_parts(
+        process: Box<dyn WorkerProcess>,
+        stdin: Box<dyn Write + Send>,
+        events: mpsc::Receiver<ReaderEvent>,
+        generation: WorkerGeneration,
+        config: ProcessWorkerConfig,
+    ) -> Self {
+        Self {
+            process: ProcessState::Running(process),
+            stdin: Some(stdin),
+            events,
+            generation,
+            pid: 0,
+            config,
         }
     }
 
@@ -521,10 +560,11 @@ impl WorkerEndpoint for ProcessWorkerEndpoint {
                 let response = decode_message::<WorkerResponseEnvelope>(&bytes)
                     .map_err(|_| self.abandon(WorkerEndpointError::MalformedFrame))?;
                 // Strictly one request is in flight, so the only acceptable frame is the answer
-                // to *this* request from *this* worker generation. Anything else is a stale or
+                // to *this* request, speaking *this* protocol, from *this* worker generation. Anything else is a stale or
                 // unsolicited frame that raced past the pre-flight check above: a protocol
                 // violation, never an answer. (The coordinator validates the remaining fields.)
-                if response.request_id != request.request_id
+                if response.protocol_version != WORKER_PROTOCOL_VERSION
+                    || response.request_id != request.request_id
                     || response.worker_generation != request.worker_generation
                 {
                     return Err(self.abandon(WorkerEndpointError::MalformedFrame));
@@ -570,4 +610,463 @@ fn spawn_reader(mut stdout: ChildStdout, events: mpsc::SyncSender<ReaderEvent>) 
             }
         })
         .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    use fido_worker_protocol::{
+        WorkerRequestId, WorkerResponse, WorkerResponseEnvelope, WorkerResponseEvidence,
+    };
+
+    use super::*;
+    use crate::{DiscoveryCoordinator, DiscoveryError, DiscoveryPolicy};
+
+    /// Shared handle on a fake OS process: counts kills and lets a test decide when (and
+    /// whether) the OS reports it as reaped.
+    #[derive(Clone, Default)]
+    struct ProcessControl {
+        kills: Arc<AtomicU32>,
+        reaped: Arc<AtomicBool>,
+    }
+
+    struct FakeProcess(ProcessControl);
+
+    impl WorkerProcess for FakeProcess {
+        fn kill(&mut self) -> io::Result<()> {
+            self.0.kills.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn try_reap(&mut self) -> io::Result<bool> {
+            Ok(self.0.reaped.load(Ordering::SeqCst))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedSink(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedSink {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if let Ok(mut sink) = self.0.lock() {
+                sink.extend_from_slice(buffer);
+            }
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn quick_config() -> ProcessWorkerConfig {
+        ProcessWorkerConfig {
+            handshake_timeout: Duration::from_millis(200),
+            health_check_budget: Duration::from_millis(200),
+            transport_margin: Duration::from_millis(20),
+            reap_timeout: Duration::from_millis(30),
+        }
+    }
+
+    struct Fixture {
+        endpoint: ProcessWorkerEndpoint,
+        control: ProcessControl,
+        worker_events: mpsc::SyncSender<ReaderEvent>,
+    }
+
+    fn fixture(generation: u64) -> Fixture {
+        let control = ProcessControl::default();
+        let (worker_events, events) = mpsc::sync_channel(READER_QUEUE_FRAMES);
+        let endpoint = ProcessWorkerEndpoint::from_parts(
+            Box::new(FakeProcess(control.clone())),
+            Box::new(SharedSink::default()),
+            events,
+            WorkerGeneration(generation),
+            quick_config(),
+        );
+        Fixture {
+            endpoint,
+            control,
+            worker_events,
+        }
+    }
+
+    fn list_request(generation: u64, request_id: u64) -> WorkerRequestEnvelope {
+        WorkerRequestEnvelope {
+            protocol_version: WORKER_PROTOCOL_VERSION,
+            request_id: WorkerRequestId(request_id),
+            cancellation_id: CancellationId(request_id),
+            operation_class: WorkerOperationClass::ReadOnly,
+            worker_generation: WorkerGeneration(generation),
+            device_generation: None,
+            budget_ms: RequestBudgetMs(10),
+            request: WorkerRequest::ListDevices,
+        }
+    }
+
+    fn empty_list_response(generation: u64, request_id: u64) -> WorkerResponseEnvelope {
+        WorkerResponseEnvelope {
+            protocol_version: WORKER_PROTOCOL_VERSION,
+            request_id: WorkerRequestId(request_id),
+            worker_generation: WorkerGeneration(generation),
+            device_generation: None,
+            evidence: WorkerResponseEvidence {
+                execution_quiescence: ExecutionQuiescence::Quiescent,
+                mutation_outcome: None,
+            },
+            response: WorkerResponse::DevicesListed {
+                devices: Vec::new(),
+            },
+        }
+    }
+
+    fn frame_of(response: &WorkerResponseEnvelope) -> Result<ReaderEvent, FrameError> {
+        Ok(ReaderEvent::Frame(encode_message(response)?))
+    }
+
+    /// Runs one exchange while a "worker" thread delivers `reply` shortly *after* the request was
+    /// written, which is the only moment a frame counts as an answer (a frame queued earlier is
+    /// unsolicited by definition).
+    fn exchange_answered_with(
+        fixture: &mut Fixture,
+        mut request: WorkerRequestEnvelope,
+        reply: ReaderEvent,
+    ) -> Result<WorkerResponseEnvelope, WorkerEndpointError> {
+        request.budget_ms = RequestBudgetMs(500);
+        let sender = fixture.worker_events.clone();
+        let worker = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(10));
+            let _ = sender.send(reply);
+        });
+        let result = fixture.endpoint.exchange(request);
+        let _ = worker.join();
+        result
+    }
+
+    fn coordinator_policy() -> DiscoveryPolicy {
+        DiscoveryPolicy {
+            list_devices_budget_ms: 10,
+            get_device_info_budget_ms: 10,
+            transaction_budget_ms: 100,
+        }
+    }
+
+    #[test]
+    fn timeout_alone_is_not_quiescence() {
+        let mut fixture = fixture(1);
+
+        // The worker never answers: the exchange deadline fires and the endpoint kills it, but
+        // the (fake) OS never reports the process reaped.
+        assert_eq!(
+            fixture.endpoint.exchange(list_request(1, 1)).err(),
+            Some(WorkerEndpointError::ExchangeDeadlineExceeded)
+        );
+        assert!(fixture.control.kills.load(Ordering::SeqCst) >= 1);
+        assert_eq!(fixture.endpoint.contain(), ExecutionQuiescence::Active);
+    }
+
+    #[test]
+    fn kill_without_reap_never_proves_quiescence_and_every_retry_kills_again() {
+        let mut fixture = fixture(1);
+
+        for attempt in 1..=3u32 {
+            assert_eq!(fixture.endpoint.contain(), ExecutionQuiescence::Active);
+            assert_eq!(fixture.control.kills.load(Ordering::SeqCst), attempt);
+        }
+
+        // A worker that is only signalled, never reaped, must not be usable either.
+        assert_eq!(
+            fixture.endpoint.exchange(list_request(1, 1)).err(),
+            Some(WorkerEndpointError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn kill_plus_reap_proves_quiescence_and_a_reaped_process_is_never_signalled_again() {
+        let mut fixture = fixture(1);
+        assert_eq!(fixture.endpoint.contain(), ExecutionQuiescence::Active);
+
+        fixture.control.reaped.store(true, Ordering::SeqCst);
+        assert_eq!(fixture.endpoint.contain(), ExecutionQuiescence::Quiescent);
+        let kills_when_reaped = fixture.control.kills.load(Ordering::SeqCst);
+
+        // Once reaped the pid may be recycled by the OS: no further signal may ever be sent.
+        assert_eq!(fixture.endpoint.contain(), ExecutionQuiescence::Quiescent);
+        drop(fixture.endpoint);
+        assert_eq!(
+            fixture.control.kills.load(Ordering::SeqCst),
+            kills_when_reaped
+        );
+    }
+
+    #[test]
+    fn replacement_requires_the_old_process_to_be_reaped() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let old = fixture(1);
+        let old_control = old.control.clone();
+        let mut coordinator =
+            DiscoveryCoordinator::new(old.endpoint, WorkerGeneration(1), coordinator_policy())?;
+
+        // 1. Timeout alone: the worker was killed but the OS never reports it reaped.
+        assert_eq!(
+            coordinator.refresh().err(),
+            Some(DiscoveryError::Endpoint(
+                WorkerEndpointError::ExchangeDeadlineExceeded
+            ))
+        );
+        assert!(old_control.kills.load(Ordering::SeqCst) >= 1);
+
+        // 2. Kill without reap does not permit replacement, and nothing about the coordinator
+        //    changes: same generation, still quarantined.
+        let refused = fixture(2);
+        refused.control.reaped.store(true, Ordering::SeqCst);
+        assert_eq!(
+            coordinator
+                .replace_worker(refused.endpoint, WorkerGeneration(2))
+                .err(),
+            Some(DiscoveryError::PreviousWorkerNotContained)
+        );
+        assert_eq!(coordinator.worker_generation(), WorkerGeneration(1));
+        assert!(coordinator.is_quarantined());
+
+        // 3. Kill plus reap permits replacement.
+        old_control.reaped.store(true, Ordering::SeqCst);
+        let accepted = fixture(2);
+        accepted.control.reaped.store(true, Ordering::SeqCst);
+        coordinator.replace_worker(accepted.endpoint, WorkerGeneration(2))?;
+        assert_eq!(coordinator.worker_generation(), WorkerGeneration(2));
+        assert!(!coordinator.is_quarantined());
+        Ok(())
+    }
+
+    #[test]
+    fn late_response_after_a_timeout_cannot_regain_authority()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = fixture(1);
+
+        assert_eq!(
+            fixture.endpoint.exchange(list_request(1, 1)).err(),
+            Some(WorkerEndpointError::ExchangeDeadlineExceeded)
+        );
+
+        // The (not yet reaped) worker finally answers request 1. That frame is a late response to
+        // an abandoned exchange: it must be treated as a violation, never delivered as an answer
+        // to a later request, even a request with the same id.
+        fixture
+            .worker_events
+            .try_send(frame_of(&empty_list_response(1, 1))?)
+            .map_err(|_| "event queue full")?;
+        assert_eq!(
+            fixture.endpoint.exchange(list_request(1, 1)).err(),
+            Some(WorkerEndpointError::MalformedFrame)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn late_response_cannot_reactivate_a_quarantined_coordinator()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let Fixture {
+            endpoint,
+            control,
+            worker_events,
+        } = fixture(1);
+        let mut coordinator =
+            DiscoveryCoordinator::new(endpoint, WorkerGeneration(1), coordinator_policy())?;
+        assert!(coordinator.refresh().is_err());
+
+        worker_events
+            .try_send(frame_of(&empty_list_response(1, 1))?)
+            .map_err(|_| "event queue full")?;
+        assert_eq!(
+            coordinator.refresh().err(),
+            Some(DiscoveryError::WorkerQuarantined),
+            "a quarantined worker is not consulted again, whatever it sends"
+        );
+
+        // Replacement drops the old endpoint and the late frame with it.
+        control.reaped.store(true, Ordering::SeqCst);
+        let replacement = fixture(2);
+        replacement.control.reaped.store(true, Ordering::SeqCst);
+        replacement
+            .worker_events
+            .try_send(frame_of(&empty_list_response(2, 1))?)
+            .map_err(|_| "event queue full")?;
+        coordinator.replace_worker(replacement.endpoint, WorkerGeneration(2))?;
+        assert_eq!(coordinator.worker_generation(), WorkerGeneration(2));
+        Ok(())
+    }
+
+    type Tamper = fn(&mut WorkerResponseEnvelope);
+
+    #[test]
+    fn response_with_another_request_id_generation_or_protocol_is_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tampers: [(&str, Tamper); 3] = [
+            ("request id", |response| {
+                response.request_id = WorkerRequestId(99);
+            }),
+            ("worker generation", |response| {
+                response.worker_generation = WorkerGeneration(2);
+            }),
+            ("protocol version", |response| {
+                response.protocol_version += 1
+            }),
+        ];
+
+        for (what, tamper) in tampers {
+            let mut fixture = fixture(1);
+            let mut response = empty_list_response(1, 1);
+            tamper(&mut response);
+
+            assert_eq!(
+                exchange_answered_with(&mut fixture, list_request(1, 1), frame_of(&response)?)
+                    .err(),
+                Some(WorkerEndpointError::MalformedFrame),
+                "a response with the wrong {what} must be a protocol violation"
+            );
+            assert!(
+                fixture.control.kills.load(Ordering::SeqCst) >= 1,
+                "the violating worker must be killed ({what})"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn late_response_to_an_earlier_request_is_not_the_answer_to_the_next_one()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = fixture(1);
+        // Request 2 is in flight; the worker answers the *abandoned* request 1 instead.
+        assert_eq!(
+            exchange_answered_with(
+                &mut fixture,
+                list_request(1, 2),
+                frame_of(&empty_list_response(1, 1))?
+            )
+            .err(),
+            Some(WorkerEndpointError::MalformedFrame)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn frame_queued_before_the_request_is_unsolicited_even_if_it_looks_valid()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = fixture(1);
+        fixture
+            .worker_events
+            .try_send(frame_of(&empty_list_response(1, 5))?)
+            .map_err(|_| "event queue full")?;
+        assert_eq!(
+            fixture.endpoint.exchange(list_request(1, 5)).err(),
+            Some(WorkerEndpointError::MalformedFrame)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exact_correlation_is_accepted() -> Result<(), Box<dyn std::error::Error>> {
+        let mut fixture = fixture(1);
+        let response = exchange_answered_with(
+            &mut fixture,
+            list_request(1, 7),
+            frame_of(&empty_list_response(1, 7))?,
+        )?;
+        assert_eq!(response.request_id, WorkerRequestId(7));
+        assert_eq!(fixture.control.kills.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    mod executable_resolution {
+        use std::os::unix::fs::PermissionsExt;
+
+        use super::*;
+
+        struct TempFile {
+            directory: PathBuf,
+            file: PathBuf,
+        }
+
+        impl TempFile {
+            fn new(name: &str, mode: u32) -> Result<Self, Box<dyn std::error::Error>> {
+                let directory = std::env::temp_dir()
+                    .join(format!("fido-service-exe-{}-{name}", std::process::id()));
+                fs::create_dir_all(&directory)?;
+                let file = directory.join("worker");
+                fs::write(&file, b"not a real worker")?;
+                fs::set_permissions(&file, fs::Permissions::from_mode(mode))?;
+                Ok(Self { directory, file })
+            }
+        }
+
+        impl Drop for TempFile {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.directory);
+            }
+        }
+
+        #[test]
+        fn regular_executable_that_is_not_world_writable_is_accepted()
+        -> Result<(), Box<dyn std::error::Error>> {
+            let temp = TempFile::new("ok", 0o755)?;
+            let resolved = ResolvedWorkerExecutable::from_absolute_path(temp.file.clone())?;
+            assert!(resolved.path().ends_with("worker"));
+            // Group-writable is tolerated (user-private groups make 0775 common).
+            let group = TempFile::new("group", 0o775)?;
+            assert!(ResolvedWorkerExecutable::from_absolute_path(group.file.clone()).is_ok());
+            Ok(())
+        }
+
+        #[test]
+        fn relative_missing_directory_non_executable_and_world_writable_are_rejected()
+        -> Result<(), Box<dyn std::error::Error>> {
+            assert_eq!(
+                ResolvedWorkerExecutable::from_absolute_path(PathBuf::from("fido-worker")).err(),
+                Some(LaunchError::ExecutableRejected),
+                "a bare name would be resolved through PATH"
+            );
+            assert_eq!(
+                ResolvedWorkerExecutable::from_absolute_path(PathBuf::from(
+                    "/definitely/not/here/fido-worker"
+                ))
+                .err(),
+                Some(LaunchError::ExecutableRejected)
+            );
+
+            let temp = TempFile::new("dir", 0o755)?;
+            assert_eq!(
+                ResolvedWorkerExecutable::from_absolute_path(temp.directory.clone()).err(),
+                Some(LaunchError::ExecutableRejected)
+            );
+
+            let not_executable = TempFile::new("noexec", 0o644)?;
+            assert_eq!(
+                ResolvedWorkerExecutable::from_absolute_path(not_executable.file.clone()).err(),
+                Some(LaunchError::ExecutableRejected)
+            );
+
+            let world_writable = TempFile::new("worldw", 0o757)?;
+            assert_eq!(
+                ResolvedWorkerExecutable::from_absolute_path(world_writable.file.clone()).err(),
+                Some(LaunchError::ExecutableRejected)
+            );
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn file_names_that_could_escape_the_executable_directory_are_rejected() {
+        for name in ["", ".", "..", "../fido-worker", "sub/fido-worker", "a\\b"] {
+            assert_eq!(
+                ResolvedWorkerExecutable::beside_current_exe(name).err(),
+                Some(LaunchError::ExecutableRejected),
+                "{name:?}"
+            );
+        }
+    }
 }
