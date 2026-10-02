@@ -465,6 +465,17 @@ For each required behaviour, record one of:
 
 Do not silently replace scoped authorization with a broader long-lived PIN buffer.
 
+The M1.5 fit spike (`docs/spikes/M1.5-libfido2-puat-fit.md`) confirmed from 1.17.0 source, and adds as adapter requirements:
+
+- `fido_dev_get_puat()` silently falls back to unscoped CTAP 2.0 `getPinToken` and returns `FIDO_OK` when `pinUvAuthToken` is not advertised, so the adapter decides scoped versus legacy from GetInfo before calling it; read-only additionally requires `perCredMgmtRO`;
+- token-aware calls are never made with a PIN argument (the per-call path always requests full `cm`) or without an attached token (on a UV-capable authenticator that starts built-in UV);
+- `fido_dev_close()` does not clear an attached token; only `fido_dev_set_puat(dev, NULL, 0)`, a new acquisition, or `fido_dev_free()` does;
+- `fido_init()` enables libfido2 protocol logging whenever the `FIDO_DEBUG` environment variable is present, whatever flags are passed, so a native process that handles a PIN or token must refuse to start (before `fido_init` and before spawning threads) if it is set;
+- a token cleanup that cannot be proven (clear error, or token still attached) makes the native object unusable: it is discarded, or contained and replaced per ADR-009, never reused for another transaction;
+- the PUAT APIs first appear in 1.17.0, so every build that links the token path, including Linux CI and distro packages, needs at least that version.
+
+Thetis hardware validation (firmware 0x100, which does not advertise `perCredMgmtRO` or `uv`) confirmed that closing and reopening an object keeps its token, that a newer or power-cycled-out token fails with `PIN_AUTH_INVALID` without consuming a PIN retry, and that a fresh object starts without a token. On such a key credential inspection needs ordinary `cm` authorization with read-only behaviour enforced by FidoManager policy, not by the authenticator. These results are single-device evidence, recorded in the same report.
+
 ## 13. Secret handling
 
 Protected material includes more than PIN text:
