@@ -11,7 +11,7 @@ name = "fidomanager_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]
-tauri-build = "=2.7.0"
+tauri-build = { version = "=2.7.0", features = [] }
 
 [dependencies]
 fido-service = { path = "../crates/fido-service" }
