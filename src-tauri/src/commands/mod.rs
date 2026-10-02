@@ -94,8 +94,8 @@ pub async fn list_authenticators(
                     .collect(),
                 max_message_size: device.max_message_size.map(|value| value.to_string()),
                 firmware_version: device.firmware_version.map(|value| value.to_string()),
-                read_status: format!("{:?}", device.read_status),
-                freshness: format!("{:?}", device.freshness),
+                read_status: device.read_status.as_wire_name().to_owned(),
+                freshness: device.freshness.as_wire_name().to_owned(),
             })
             .collect();
 
