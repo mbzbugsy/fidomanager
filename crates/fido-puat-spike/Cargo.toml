@@ -28,5 +28,11 @@ name = "fido-puat-spike"
 path = "src/bin/fido-puat-spike.rs"
 required-features = ["native-puat"]
 
+# Runs the built harness binary; needs no device because it must exit before any native call.
+[[test]]
+name = "debug_environment"
+path = "tests/debug_environment.rs"
+required-features = ["native-puat"]
+
 [lints]
 workspace = true

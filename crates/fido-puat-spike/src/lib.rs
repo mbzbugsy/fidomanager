@@ -5,6 +5,7 @@
 //!   asked.
 //! - [`guard`]: explicit acquisition, generation binding, and cleanup of the token libfido2 keeps on
 //!   the `fido_dev_t`, on every exit path.
+//! - [`environment`]: refuses to start the harness if `FIDO_DEBUG` would enable libfido2 logging.
 //! - [`retry`]: what retry state can be known before a PIN is submitted and conservative
 //!   interpretation of failures after.
 //! - [`secret`]: zeroizing, non-printable PIN storage with NUL rejection before the C boundary.
@@ -14,6 +15,7 @@
 //! Findings and the proposed M2 contract are in `docs/spikes/M1.5-libfido2-puat-fit.md`.
 
 pub mod contract;
+pub mod environment;
 pub mod guard;
 pub mod retry;
 pub mod secret;

@@ -82,7 +82,9 @@ pub fn pre_submission(query: Result<i32, i32>) -> PreSubmission {
 /// What a failed acquisition did to the PIN/UV retry counter, as far as the evidence shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryEffect {
-    /// libfido2 returned before transmitting anything that carries the PIN (source-backed).
+    /// libfido2 returned before sending any request that carries the PIN (source-backed). This is
+    /// a statement about the PIN only: preparatory exchanges such as the ECDH key agreement may
+    /// already have happened, so it does not mean the device saw no traffic.
     NotSubmitted,
     /// The authenticator definitively rejected the PIN/UV and decremented the counter.
     Consumed,
@@ -93,8 +95,11 @@ pub enum RetryEffect {
 /// Conservative classification of a non-`FIDO_OK` return from `fido_dev_get_puat()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcquisitionFailure {
-    /// `FIDO_ERR_INVALID_ARGUMENT`: rejected inside libfido2 before any transmission (non-FIDO2
-    /// device, Windows Hello pseudo-device, or argument copy failure).
+    /// `FIDO_ERR_INVALID_ARGUMENT`: libfido2 rejected the call before building or sending a
+    /// PIN-bearing request. The source returns it for a non-FIDO2 device or the Windows Hello
+    /// pseudo-device (before any device traffic) and for a failed copy of the PIN into libfido2's
+    /// own blob (after the ECDH exchange, before the PIN request). Only "the PIN was not
+    /// submitted" is claimed, never "nothing was sent".
     NotSubmitted,
     WrongPin,
     /// Too many consecutive wrong PINs in this power cycle: unplug/replug required.
@@ -169,7 +174,8 @@ pub enum TokenUseResult {
     TokenRejected,
     /// The token was accepted for authentication but lacks the permission for this command.
     PermissionRejected,
-    /// libfido2 refused before sending: there was no token and no PIN/UV to fall back on.
+    /// libfido2 refused before sending the credential-management command: there was no token and no
+    /// PIN/UV to fall back on (the ECDH key agreement may already have happened).
     NoAuthorizationAvailable,
     Uncertain,
     Other,

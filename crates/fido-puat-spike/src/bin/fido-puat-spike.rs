@@ -46,8 +46,13 @@ const WATCHDOG_EXIT: i32 = 70;
 type HarnessResult = Result<(), String>;
 
 fn main() {
+    // Before the watchdog thread exists and before any libfido2 call: a FIDO_DEBUG in the
+    // environment would turn on libfido2 protocol logging inside fido_init().
+    if let Err(refusal) = native::init() {
+        eprintln!("{refusal}");
+        std::process::exit(2);
+    }
     let watch = NativeCallWatch::start();
-    native::init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let outcome = match args.first().map(String::as_str) {
         Some("info") => info(&watch),
@@ -618,10 +623,10 @@ fn acquire(watch: &NativeCallWatch, args: &[String]) -> HarnessResult {
             })
             .map(|outcome| outcome.err().unwrap_or(0));
         match code {
-            Some(code) => result("metadata_without_token", code),
-            None => println!(
-                "RESULT step=metadata_without_token skipped=true reason=token_still_attached"
-            ),
+            Ok(code) => result("metadata_without_token", code),
+            Err(refused) => {
+                println!("RESULT step=metadata_without_token skipped=true reason={refused:?}")
+            }
         }
     }
     Ok(())
@@ -701,8 +706,7 @@ fn acquire_transaction(
         }
     }
 
-    release(guard);
-    Ok(())
+    release(guard)
 }
 
 fn stale_token(watch: &NativeCallWatch, args: &[String]) -> HarnessResult {
@@ -787,9 +791,7 @@ fn stale_continue(
                     Ok(_) => result("second_token_metadata", 0),
                     Err(code) => result("second_token_metadata", code),
                 }
-                if let Err(error) = guard.release() {
-                    println!("RESULT step=second_release error={error:?}");
-                }
+                release(guard)?; // poisoned => stop; `second` is dropped (object freed) on return
                 None
             }
             Err(error) => Some(error),
@@ -819,14 +821,22 @@ fn stale_continue(
         }
         let _ = query_pin_retries(watch, device, "pin_retries_after_stale_use");
     }
-    release(first_guard);
-    Ok(())
+    release(first_guard)
 }
 
-fn release(guard: PuatGuard<'_, LibFido2Device>) {
+/// Releases the guard. A cleanup that cannot be proven poisons the session; the harness then
+/// stops (the caller returns the error, which drops and frees the native object) and never reuses
+/// the object or continues the experiment.
+fn release(guard: PuatGuard<'_, LibFido2Device>) -> HarnessResult {
     match guard.release() {
-        Ok(()) => println!("RESULT step=release cleared=true"),
-        Err(error) => println!("RESULT step=release cleared=false error={error:?}"),
+        Ok(()) => {
+            println!("RESULT step=release cleared=true");
+            Ok(())
+        }
+        Err(error) => {
+            println!("RESULT step=release cleared=false error={error:?} session=poisoned");
+            Err("PUAT cleanup could not be proven; the native object is being discarded".to_owned())
+        }
     }
 }
 
@@ -938,8 +948,7 @@ fn replug_continue(
         }
         let _ = query_pin_retries(watch, device, "pin_retries_after_replug");
     }
-    release(guard);
-    Ok(())
+    release(guard)
 }
 
 fn probe_ro_enforcement(watch: &NativeCallWatch) -> HarnessResult {
@@ -1001,8 +1010,7 @@ fn probe_ro_enforcement(watch: &NativeCallWatch) -> HarnessResult {
                 native::error_name(code),
                 classify_acquisition_error(code)
             );
-            release(guard);
-            return Ok(());
+            return release(guard);
         }
         Err(error) => error,
     };

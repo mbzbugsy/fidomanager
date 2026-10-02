@@ -116,10 +116,15 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
-pub fn init() {
-    // SAFETY: documented process initialization; takes no pointers. FIDO_DEBUG is never enabled
-    // here: libfido2's debug log can include protocol payloads.
+/// Process initialization. Refuses (before calling `fido_init`) if `FIDO_DEBUG` is present in the
+/// environment, because libfido2 1.17.0 then enables protocol logging regardless of the flags
+/// passed. Must run before this process starts any other thread; the harness's `main` does so.
+pub fn init() -> Result<(), crate::environment::LibFido2DebugRequested> {
+    crate::environment::require_no_libfido2_debug()?;
+    // SAFETY: documented process initialization; takes no pointers. With FIDO_DEBUG absent (just
+    // checked) and flags 0, libfido2's logging stays off.
     unsafe { fido_init(0) };
+    Ok(())
 }
 
 /// `fido_strerr` name for a code, for evidence tables.
