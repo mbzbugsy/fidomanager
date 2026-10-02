@@ -1,0 +1,32 @@
+[package]
+name = "fido-puat-spike"
+description = "M1.5 spike only, never shipped: libfido2 PUAT / credential-management fit evidence and a prototype authorization contract."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+build = "build.rs"
+
+# No production crate depends on this one. The contract types are deliberately not public
+# production API until hardware evidence and review promote (or replace) them in M2.
+[features]
+default = []
+# Links libfido2 >= 1.17.0 (the first release exporting fido_dev_get_puat / fido_dev_set_puat /
+# fido_dev_get_uv_retry_count). Off by default so CI, which installs the distribution libfido2,
+# never needs those symbols.
+native-puat = ["dep:libc"]
+
+[dependencies]
+fido-core = { path = "../fido-core" }
+fido-platform = { path = "../fido-platform" }
+libc = { version = "0.2", optional = true }
+
+[[bin]]
+name = "fido-puat-spike"
+path = "src/bin/fido-puat-spike.rs"
+required-features = ["native-puat"]
+
+[lints]
+workspace = true

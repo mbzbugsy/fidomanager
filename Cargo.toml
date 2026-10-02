@@ -4,6 +4,7 @@ members = [
     "crates/fido-libfido2",
     "crates/fido-native-ui",
     "crates/fido-platform",
+    "crates/fido-puat-spike",
     "crates/fido-service",
     "crates/fido-worker",
     "crates/fido-worker-fixture",

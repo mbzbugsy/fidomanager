@@ -980,6 +980,15 @@ name = "fido-platform"
 version = "0.1.0"
 
 [[package]]
+name = "fido-puat-spike"
+version = "0.1.0"
+dependencies = [
+ "fido-core",
+ "fido-platform",
+ "libc",
+]
+
+[[package]]
 name = "fido-service"
 version = "0.1.0"
 dependencies = [
