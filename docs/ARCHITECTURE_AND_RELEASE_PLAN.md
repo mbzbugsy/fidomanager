@@ -472,7 +472,7 @@ The M1.5 fit spike (`docs/spikes/M1.5-libfido2-puat-fit.md`) confirmed from 1.17
 - `fido_dev_close()` does not clear an attached token; only `fido_dev_set_puat(dev, NULL, 0)`, a new acquisition, or `fido_dev_free()` does;
 - the PUAT APIs first appear in 1.17.0, so every build that links the token path, including Linux CI and distro packages, needs at least that version.
 
-Hardware validation of these behaviours on reference authenticators is tracked in the same report.
+Thetis hardware validation (firmware 0x100, which does not advertise `perCredMgmtRO` or `uv`) confirmed that closing and reopening an object keeps its token, that a newer or power-cycled-out token fails with `PIN_AUTH_INVALID` without consuming a PIN retry, and that a fresh object starts without a token. On such a key credential inspection needs ordinary `cm` authorization with read-only behaviour enforced by FidoManager policy, not by the authenticator. These results are single-device evidence, recorded in the same report.
 
 ## 13. Secret handling
 
