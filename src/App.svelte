@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
+  import logoUrl from './assets/fidomanager-logo.png';
 
   type FoundationStatus = {
     phase: string;
@@ -114,42 +115,23 @@
 </script>
 
 <svelte:head>
-  <title>FidoManager</title>
+  <title>Fido Manager</title>
 </svelte:head>
 
 <div class="app-frame">
   <header class="topbar">
-    <div class="brand" aria-label="FidoManager">
-      <div class="brand-mark" aria-hidden="true">
-        <img src="/fidomanager-logo.png" alt="" />
-      </div>
-      <div>
-        <strong>FidoManager</strong>
-        <small>Authenticator control</small>
-      </div>
+    <div class="brand" aria-label="Fido Manager">
+      <img class="brand-logo" src={logoUrl} alt="" />
+      <strong>Fido Manager</strong>
     </div>
 
-    <div class="topbar-meta">
-      <span class="privacy-pill"><i></i> Local only</span>
-      <span class="mode-pill">Read-only alpha</span>
-    </div>
-  </header>
-
-  <main class="workspace">
-    <section class="intro" aria-labelledby="page-title">
-      <div>
-        <p class="eyebrow">FIDO2 / CTAP DEVICE MANAGER</p>
-        <h1 id="page-title">
-          Your security keys.<br />Visible and under control.
-        </h1>
-        <p class="lede">
-          FidoManager talks directly to authenticators on this Mac. No account,
-          no cloud, no telemetry.
-        </p>
-      </div>
-
+    <div class="toolbar" role="toolbar" aria-label="Actions">
+      <span class="mode-pill" title="No changes can be made to authenticators">
+        <i></i> Read-only
+      </span>
+      <span class="toolbar-divider" aria-hidden="true"></span>
       <button
-        class="refresh-button"
+        class="tool-button"
         type="button"
         onclick={() => refreshNow()}
         disabled={manualScanning}
@@ -160,26 +142,28 @@
         </svg>
         {manualScanning ? 'Scanning…' : 'Scan now'}
       </button>
-    </section>
+    </div>
+  </header>
 
-    <section class="system-strip" aria-label="Discovery status">
-      <div class="system-item">
-        <span class="system-label">Native service</span>
-        <strong class:warning={Boolean(discoveryError)}
-          >{discoveryError ? 'Attention' : 'Online'}</strong
+  <main class="workspace">
+    <section class="page-head" aria-labelledby="page-title">
+      <div class="page-title">
+        <h1 id="page-title">Authenticators</h1>
+        <span class="device-count"
+          >{snapshot?.devices.length ?? 0} connected</span
         >
       </div>
-      <div class="system-item">
-        <span class="system-label">Discovery epoch</span>
-        <strong>{snapshot?.enumerationEpoch ?? '—'}</strong>
-      </div>
-      <div class="system-item">
-        <span class="system-label">Last scan</span>
-        <strong>{lastScan ?? 'Starting…'}</strong>
-      </div>
-      <div class="system-item">
-        <span class="system-label">libfido2</span>
-        <strong>{foundation?.reviewedLibfido2Baseline ?? '—'}</strong>
+
+      <div class="status-line-inline" aria-label="System status">
+        <span class="status-item">
+          <i aria-hidden="true" class:warning={Boolean(discoveryError)}></i>
+          Native service
+          <strong>{discoveryError ? 'attention' : 'online'}</strong>
+        </span>
+        <span class="status-item">
+          libfido2 <strong>{foundation?.reviewedLibfido2Baseline ?? '—'}</strong
+          >
+        </span>
       </div>
     </section>
 
@@ -187,27 +171,18 @@
       <div class="error-banner" role="alert">
         <strong>Discovery paused</strong>
         <span>{discoveryError}</span>
+        {#if lastScan}<span>Last successful scan {lastScan}.</span>{/if}
       </div>
     {/if}
 
-    <section class="devices" aria-labelledby="devices-title">
-      <div class="section-heading">
-        <div>
-          <p class="section-kicker">CONNECTED HARDWARE</p>
-          <h2 id="devices-title">Authenticators</h2>
-        </div>
-        <span class="device-count"
-          >{snapshot?.devices.length ?? 0} detected</span
-        >
-      </div>
-
+    <section class="devices" aria-label="Connected authenticators">
       {#if discoveryError}
         <div class="empty-state">
           <div class="empty-key" aria-hidden="true"></div>
           <h3>Discovery unavailable</h3>
           <p>
             The latest authenticator scan did not produce a trustworthy device
-            snapshot. FidoManager cleared the previous view until discovery
+            snapshot. Fido Manager cleared the previous view until discovery
             succeeds again.
           </p>
           <span>Use Scan now to retry.</span>
@@ -306,7 +281,7 @@
           <div class="empty-key" aria-hidden="true"></div>
           <h3>No authenticator connected</h3>
           <p>
-            Insert a USB FIDO2 security key. FidoManager will detect it
+            Insert a USB FIDO2 security key. Fido Manager will detect it
             automatically.
           </p>
           <span>Scanning every second while this alpha is open.</span>
@@ -322,30 +297,10 @@
   </main>
 
   <footer class="app-footer">
-    <span>FidoManager 0.1 alpha</span>
+    <span>Fido Manager 0.1 alpha</span>
     <span class="footer-separator"></span>
     <span>{foundation?.phase ?? 'Milestone 1'}</span>
     <span class="footer-spacer"></span>
     <span>No secrets leave this device</span>
   </footer>
 </div>
-
-<style>
-  .brand-mark {
-    overflow: hidden;
-    border: 0;
-    background: transparent;
-  }
-
-  .brand-mark::before,
-  .brand-mark::after {
-    display: none;
-  }
-
-  .brand-mark img {
-    display: block;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-  }
-</style>
