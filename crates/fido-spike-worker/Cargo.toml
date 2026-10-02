@@ -1,0 +1,19 @@
+[package]
+name = "fido-spike-worker"
+description = "M1.5 spike only: worker containment experiments. Not shipped; delete or promote after the M1.5 decision."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+fido-core = { path = "../fido-core" }
+fido-libfido2 = { path = "../fido-libfido2" }
+fido-service = { path = "../fido-service" }
+fido-worker-protocol = { path = "../fido-worker-protocol" }
+serde_json.workspace = true
+
+[lints]
+workspace = true

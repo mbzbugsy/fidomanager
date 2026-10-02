@@ -990,6 +990,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fido-spike-worker"
+version = "0.1.0"
+dependencies = [
+ "fido-core",
+ "fido-libfido2",
+ "fido-service",
+ "fido-worker-protocol",
+ "serde_json",
+]
+
+[[package]]
 name = "fido-worker-protocol"
 version = "0.1.0"
 dependencies = [
