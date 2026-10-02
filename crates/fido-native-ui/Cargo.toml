@@ -6,8 +6,19 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+modality-spike = ["dep:block2", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
+
 [dependencies]
 fido-core = { path = "../fido-core" }
+thiserror.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = { version = "=0.6.2", optional = true }
+objc2 = { version = "=0.6.4", optional = true }
+objc2-app-kit = { version = "=0.3.2", optional = true, default-features = false, features = ["std", "NSActionCell", "NSAlert", "NSApplication", "NSButton", "NSButtonCell", "NSCell", "NSControl", "NSResponder", "NSView", "NSWindow", "block2"] }
+objc2-foundation = { version = "=0.3.2", optional = true, default-features = false, features = ["std", "NSDate", "NSNotification", "NSOperation", "NSRunLoop", "NSString", "NSTimer", "block2"] }
 
 [lints]
 workspace = true

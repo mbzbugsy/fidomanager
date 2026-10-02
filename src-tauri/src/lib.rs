@@ -1,4 +1,6 @@
 mod commands;
+#[cfg(all(feature = "native-ui-spike", target_os = "macos"))]
+mod native_ui_spike;
 
 use std::sync::{Arc, Mutex};
 
@@ -68,6 +70,14 @@ pub fn run() {
     };
 
     app.run(move |_app_handle, event| {
+        #[cfg(all(feature = "native-ui-spike", target_os = "macos"))]
+        match &event {
+            tauri::RunEvent::Ready => native_ui_spike::start(_app_handle),
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit => {
+                fido_service::native_ui_spike::shutdown()
+            }
+            _ => {}
+        }
         if let tauri::RunEvent::Exit = event {
             // Deterministic cleanup: kill and reap the worker before the process ends. If a
             // discovery transaction currently holds the lock we do not wait for it; the worker's

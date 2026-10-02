@@ -8,7 +8,12 @@ repository.workspace = true
 
 # Deliberately no dependency on fido-libfido2: native code runs only in the fido-worker child
 # process, so the trusted authority never links libfido2.
+[features]
+default = []
+native-ui-spike = ["dep:fido-native-ui", "fido-native-ui/modality-spike"]
+
 [dependencies]
+fido-native-ui = { path = "../fido-native-ui", optional = true }
 fido-core = { path = "../fido-core" }
 fido-worker-protocol = { path = "../fido-worker-protocol" }
 thiserror.workspace = true

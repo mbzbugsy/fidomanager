@@ -972,7 +972,12 @@ version = "0.1.0"
 name = "fido-native-ui"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "fido-core",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -994,6 +999,7 @@ name = "fido-service"
 version = "0.1.0"
 dependencies = [
  "fido-core",
+ "fido-native-ui",
  "fido-worker-protocol",
  "thiserror 2.0.21",
 ]
