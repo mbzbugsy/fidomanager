@@ -32,8 +32,8 @@ use fido_puat_spike::retry::{
     PreSubmission, classify_acquisition_error, classify_token_use, pre_submission,
 };
 use fido_puat_spike::rp_identity::{
-    Completeness, Continuation, CredentialEnumeration, CredentialTotal, MalformedHash, RawRp,
-    RpEntry, RpList, RpTextState, assess,
+    Continuation, CredentialEnumeration, CredentialTotal, MalformedHash, RawRp, RpEntry, RpList,
+    RpTextState, assess,
 };
 use fido_puat_spike::secret::{PinInputError, PinSecret};
 
@@ -918,9 +918,8 @@ fn inventory_transaction(
     }
 
     let assessment = assess(&list, &credentials, reported_existing);
-    let enumerated = match assessment.credentials {
-        CredentialTotal::Exact(total) | CredentialTotal::AtLeast(total) => total,
-    };
+    // Diagnostic sum only; what may be claimed is `assessment.credentials`.
+    let enumerated = assessment.observed_enumerated;
     println!(
         "RESULT step=reconcile metadata_existing={reported_existing:?} credential_count={enumerated} \
          counts_reconcile={} completeness={:?} credentials={:?} incomplete={:?} inconsistent={:?}",
@@ -930,8 +929,18 @@ fn inventory_transaction(
         assessment.incomplete,
         assessment.inconsistent,
     );
-    if assessment.completeness != Completeness::Complete {
-        println!("NOTE: inspection is NOT complete; the total above is a lower bound only.");
+    match assessment.credentials {
+        CredentialTotal::Exact(_) => {}
+        CredentialTotal::AtLeast(_) => {
+            println!(
+                "NOTE: inspection is NOT complete; credentials=AtLeast(n) is a lower bound only."
+            );
+        }
+        CredentialTotal::Unknown => {
+            println!(
+                "NOTE: inspection is INCONSISTENT; no trustworthy total (credential_count above is a diagnostic sum, not a bound)."
+            );
+        }
     }
 
     release(guard)

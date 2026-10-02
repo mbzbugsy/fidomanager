@@ -16,10 +16,12 @@
 //!   offers a continuation only for verified text; every other RP is an explicit blocker, not an
 //!   RP with zero credentials.
 //! - Duplicate authoritative hashes are kept, flagged, and never merged.
-//! - [`assess`] reconciles what was enumerated with the authenticator's own credential count and
-//!   can report `Exact` only when everything reconciles; an unreadable, partial or contradictory
-//!   enumeration is `Incomplete` / `Inconsistent` with a lower bound, never an apparently empty
-//!   list.
+//! - [`assess`] reconciles what was enumerated with the authenticator's own credential count.
+//!   `Complete` yields an `Exact` total. `Incomplete` (nothing contradictory, some credentials
+//!   unread) yields an `AtLeast` lower bound, which is sound because the enumerated RPs have
+//!   distinct hashes and so disjoint credential sets. `Inconsistent` (the observations contradict
+//!   each other or the authenticator, so they may double-count) yields `Unknown`: no numeric
+//!   claim at all. Nothing ever presents an apparently empty list.
 
 use std::fmt;
 
@@ -333,18 +335,30 @@ pub enum Completeness {
     Inconsistent,
 }
 
-/// The credential total, never presented as exact unless the inspection is complete.
+/// What may be claimed about the number of credentials on the authenticator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialTotal {
+    /// The inspection is `Complete` and reconciled with the authenticator's own count.
     Exact(u64),
-    /// At least this many credentials exist; the true number is unknown.
+    /// The inspection is `Incomplete` with no contradictory evidence: at least this many
+    /// credentials exist, the true number is unknown. Only the successfully enumerated, distinct
+    /// RPs contribute, so this is a genuine lower bound.
     AtLeast(u64),
+    /// The inspection is `Inconsistent`: the observations contradict each other or the
+    /// authenticator (duplicate RP hashes may double-count, a surplus contradicts the reported
+    /// count, a sum may have overflowed). No numeric bound is trustworthy.
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assessment {
     pub completeness: Completeness,
+    /// The only credential count that may be shown or reasoned about.
     pub credentials: CredentialTotal,
+    /// Sum of the per-RP counts as observed, **for diagnostics only**. It is not a bound of any
+    /// kind: for an `Inconsistent` inspection it may double-count, and after an overflow it is
+    /// the sum up to the overflow.
+    pub observed_enumerated: u64,
     pub incomplete: Vec<IncompleteReason>,
     pub inconsistent: Vec<InconsistentReason>,
 }
@@ -444,14 +458,15 @@ pub fn assess(
     } else {
         Completeness::Complete
     };
-    let credentials = if completeness == Completeness::Complete {
-        CredentialTotal::Exact(enumerated)
-    } else {
-        CredentialTotal::AtLeast(enumerated)
+    let credentials = match completeness {
+        Completeness::Complete => CredentialTotal::Exact(enumerated),
+        Completeness::Incomplete => CredentialTotal::AtLeast(enumerated),
+        Completeness::Inconsistent => CredentialTotal::Unknown,
     };
     Assessment {
         completeness,
         credentials,
+        observed_enumerated: enumerated,
         incomplete,
         inconsistent,
     }
@@ -685,6 +700,9 @@ mod tests {
             }]
         );
         assert_eq!(assessment.complete_total(), None);
+        // The same credentials may have been counted twice: no numeric bound at all.
+        assert_eq!(assessment.credentials, CredentialTotal::Unknown);
+        assert_eq!(assessment.observed_enumerated, 2, "diagnostic only");
     }
 
     #[test]
@@ -772,6 +790,9 @@ mod tests {
                 reported: 1
             }]
         );
+        // AtLeast(2) would contradict the authenticator's own count of 1.
+        assert_eq!(surplus.credentials, CredentialTotal::Unknown);
+        assert_eq!(surplus.complete_total(), None);
 
         let unknown = assess(&list, &counted, None);
         assert_eq!(unknown.completeness, Completeness::Incomplete);
@@ -816,6 +837,7 @@ mod tests {
             vec![InconsistentReason::ListedRpWithoutCredentials { index: 0 }]
         );
         assert_eq!(assessment.complete_total(), None);
+        assert_eq!(assessment.credentials, CredentialTotal::Unknown);
     }
 
     #[test]
@@ -896,6 +918,61 @@ mod tests {
                 .inconsistent
                 .contains(&InconsistentReason::TotalOverflow)
         );
+        assert_eq!(assessment.credentials, CredentialTotal::Unknown);
+        assert_eq!(assessment.complete_total(), None);
+    }
+
+    #[test]
+    fn total_claims_follow_completeness_and_inconsistency_wins_over_incomplete() {
+        let a = hash_of("a.example");
+        let hidden = hash_of("hidden.example");
+        let a_rp = RawRp {
+            hash: Some(&a),
+            text: Some(b"a.example"),
+        };
+        let hidden_rp = RawRp {
+            hash: Some(&hidden),
+            text: None,
+        };
+
+        // Complete -> Exact.
+        let complete = assess(
+            &RpList::from_raw(&[a_rp]),
+            &[CredentialEnumeration::Counted(3)],
+            Some(3),
+        );
+        assert_eq!(complete.credentials, CredentialTotal::Exact(3));
+
+        // Incomplete with nothing contradictory -> a genuine lower bound.
+        let incomplete = assess(
+            &RpList::from_raw(&[a_rp, hidden_rp]),
+            &[
+                CredentialEnumeration::Counted(3),
+                CredentialEnumeration::NotAttempted,
+            ],
+            Some(5),
+        );
+        assert_eq!(incomplete.completeness, Completeness::Incomplete);
+        assert_eq!(incomplete.credentials, CredentialTotal::AtLeast(3));
+
+        // The same incomplete inspection plus a duplicate hash: the lower bound is no longer
+        // defensible, so no number is claimed.
+        let contradicted = assess(
+            &RpList::from_raw(&[a_rp, a_rp, hidden_rp]),
+            &[
+                CredentialEnumeration::Counted(3),
+                CredentialEnumeration::Counted(3),
+                CredentialEnumeration::NotAttempted,
+            ],
+            Some(9),
+        );
+        assert_eq!(contradicted.completeness, Completeness::Inconsistent);
+        assert!(
+            !contradicted.incomplete.is_empty(),
+            "both kinds are reported"
+        );
+        assert_eq!(contradicted.credentials, CredentialTotal::Unknown);
+        assert_eq!(contradicted.complete_total(), None);
     }
 
     #[test]
