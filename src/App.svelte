@@ -227,7 +227,7 @@
                 <div class="device-title">
                   <div class="status-line">
                     <span
-                      class:ready={device.readStatus === 'Ready'}
+                      class:ready={device.readStatus === 'ready'}
                       class="status-dot"
                     ></span>
                     <span>{friendlyStatus(device.readStatus)}</span>
