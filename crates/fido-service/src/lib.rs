@@ -1,5 +1,8 @@
 //! Offline FIDO policy and workflow coordination.
 
+#[cfg(all(feature = "native-ui-spike", target_os = "macos"))]
+pub mod native_ui_spike;
+
 mod discovery;
 mod process_worker;
 mod supervisor;

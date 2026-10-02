@@ -13,6 +13,10 @@ crate-type = ["lib", "cdylib", "staticlib"]
 [build-dependencies]
 tauri-build = "=2.7.0"
 
+[features]
+default = []
+native-ui-spike = ["fido-service/native-ui-spike"]
+
 [dependencies]
 fido-service = { path = "../crates/fido-service" }
 serde.workspace = true

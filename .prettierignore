@@ -4,3 +4,7 @@ pnpm-lock.yaml
 target/
 node_modules/
 dist/
+
+# Generated schemas and unrelated local checkouts
+src-tauri/gen/
+.claude/

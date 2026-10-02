@@ -117,7 +117,8 @@ const discovery = discoveredCommands.find(
 );
 if (
   !discovery ||
-  !discovery.parameters.includes("tauri::State<'_, AppState>")
+  discovery.parameters.replace(/\s+/g, '').replace(/,$/, '') !==
+    "state:tauri::State<'_,AppState>"
 ) {
   throw new Error(
     'list_authenticators may accept only authority-owned Tauri State.',

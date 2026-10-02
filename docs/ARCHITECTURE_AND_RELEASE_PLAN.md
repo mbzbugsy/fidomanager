@@ -1438,7 +1438,7 @@ Windows M1 waits for the access feasibility spike if required by platform access
 ### Milestone 1.5 — native/platform feasibility spikes
 
 - libfido2 fit spike, including PUAT cleanup/scoping/legacy fallback;
-- native UI threading/modality spike on each platform;
+- native UI threading/modality spike on each platform; macOS development-window sheet/teardown feasibility is established in [`docs/spikes/M1.5-native-ui-modality.md`](spikes/M1.5-native-ui-modality.md), with Linux runtime validation and Windows broker association still gated;
 - Windows direct-access/broker identity/lifecycle spike;
 - worker timeout/cancellation/hung-call/native-allocation containment spike;
 - RP-hash enumeration spike, with product limitation as MVP default if upstream cannot safely support hash-only enumeration.
