@@ -14,7 +14,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build = "=2.7.0"
 
 [dependencies]
-fido-service = { path = "../crates/fido-service" }
+fido-service = { path = "../crates/fido-service", features = ["native-libfido2"] }
 serde.workspace = true
 tauri = { version = "=2.12.0", features = [] }
 tauri-plugin-single-instance = "=2.4.5"

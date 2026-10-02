@@ -4,12 +4,15 @@
 //! transported to an in-process worker thread or a future child/elevated worker without changing
 //! service semantics.
 
-use fido_core::{DeviceGeneration, ExecutionQuiescence, MutationOutcome};
+use fido_core::{Aaguid, DeviceGeneration, ExecutionQuiescence, MutationOutcome};
 use serde::{Deserialize, Serialize};
 
 pub const WORKER_PROTOCOL_VERSION: u16 = 1;
 /// Transport implementations must reject frames larger than this before deserialization.
 pub const MAX_WORKER_FRAME_BYTES: usize = 1_048_576;
+pub const MAX_DISCOVERED_DEVICES: usize = 64;
+pub const MAX_DEVICE_TEXT_BYTES: usize = 256;
+pub const MAX_DEVICE_STRING_ITEMS: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -22,6 +25,14 @@ pub struct CancellationId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct WorkerGeneration(pub u64);
+
+/// Worker-local identifier for a currently discovered authenticator.
+///
+/// This identifier is never exposed to the renderer and is meaningful only within one
+/// `WorkerGeneration`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WorkerDeviceId(pub u64);
 
 /// Relative execution budget measured from service dispatch, never a wall-clock timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +63,55 @@ pub struct WorkerRequestEnvelope {
     pub request: WorkerRequest,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerRequestValidationError {
+    ProtocolMismatch,
+    OperationClassMismatch,
+    InvalidDeviceGeneration,
+    InvalidCancellationTarget,
+    ZeroExecutionBudget,
+}
+
+impl WorkerRequestEnvelope {
+    pub fn validate(&self) -> Result<(), WorkerRequestValidationError> {
+        if self.protocol_version != WORKER_PROTOCOL_VERSION {
+            return Err(WorkerRequestValidationError::ProtocolMismatch);
+        }
+        if self.operation_class != self.request.operation_class() {
+            return Err(WorkerRequestValidationError::OperationClassMismatch);
+        }
+        if self.budget_ms.0 == 0 {
+            return Err(WorkerRequestValidationError::ZeroExecutionBudget);
+        }
+
+        let generation_is_valid = match &self.request {
+            WorkerRequest::GetDeviceInfo { .. } => self.device_generation.is_some(),
+            WorkerRequest::HealthCheck
+            | WorkerRequest::Cancel { .. }
+            | WorkerRequest::ListDevices => self.device_generation.is_none(),
+        };
+        if !generation_is_valid {
+            return Err(WorkerRequestValidationError::InvalidDeviceGeneration);
+        }
+
+        if let WorkerRequest::Cancel {
+            target_request_id,
+            target_cancellation_id,
+        } = &self.request
+        {
+            if target_request_id.0 == 0
+                || target_cancellation_id.0 == 0
+                || *target_request_id == self.request_id
+                || *target_cancellation_id == self.cancellation_id
+            {
+                return Err(WorkerRequestValidationError::InvalidCancellationTarget);
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkerRequest {
@@ -60,12 +120,57 @@ pub enum WorkerRequest {
         target_request_id: WorkerRequestId,
         target_cancellation_id: CancellationId,
     },
+    ListDevices,
+    GetDeviceInfo {
+        device_id: WorkerDeviceId,
+    },
 }
 
 impl WorkerRequest {
     pub const fn operation_class(&self) -> WorkerOperationClass {
-        WorkerOperationClass::Control
+        match self {
+            Self::HealthCheck | Self::Cancel { .. } => WorkerOperationClass::Control,
+            Self::ListDevices | Self::GetDeviceInfo { .. } => WorkerOperationClass::ReadOnly,
+        }
     }
+}
+
+/// Minimal discovery record returned before a device is opened for GetInfo.
+///
+/// Within one `WorkerGeneration`, the worker MUST strictly increase `device_generation` whenever a
+/// `WorkerDeviceId` is rebound/reopened after observed absence or represents a different device
+/// incarnation. The service deliberately treats regression or reuse-after-absence as a protocol
+/// violation and quarantines that worker generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerDiscoveredDevice {
+    pub device_id: WorkerDeviceId,
+    pub device_generation: DeviceGeneration,
+    pub vendor_id: u16,
+    pub product_id: u16,
+    pub manufacturer: Option<String>,
+    pub product: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerDeviceOption {
+    pub name: String,
+    pub enabled: bool,
+}
+
+/// Bounded, validated GetInfo output. Raw native paths and native handles never cross this boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerDeviceInfo {
+    pub device_id: WorkerDeviceId,
+    pub aaguid: Option<Aaguid>,
+    pub versions: Vec<String>,
+    pub extensions: Vec<String>,
+    pub transports: Vec<String>,
+    pub options: Vec<WorkerDeviceOption>,
+    pub max_message_size: Option<u64>,
+    pub firmware_version: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,7 +196,15 @@ pub struct WorkerResponseEvidence {
 pub enum WorkerResponse {
     Healthy,
     CancellationAccepted,
-    Error { code: WorkerErrorCode },
+    DevicesListed {
+        devices: Vec<WorkerDiscoveredDevice>,
+    },
+    DeviceInfo {
+        info: WorkerDeviceInfo,
+    },
+    Error {
+        code: WorkerErrorCode,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +214,11 @@ pub enum WorkerErrorCode {
     DeadlineExpired,
     Cancelled,
     WorkerUnavailable,
+    DeviceAbsent,
+    DeviceBusy,
+    AccessDenied,
+    UnsupportedDevice,
+    MalformedDeviceData,
     InternalFailure,
 }
 
@@ -108,25 +226,83 @@ pub enum WorkerErrorCode {
 mod tests {
     use super::*;
 
-    #[test]
-    fn request_round_trips_without_process_local_state() -> Result<(), Box<dyn std::error::Error>> {
-        let request = WorkerRequest::HealthCheck;
-        let envelope = WorkerRequestEnvelope {
+    fn request_envelope(
+        request: WorkerRequest,
+        device_generation: Option<DeviceGeneration>,
+    ) -> WorkerRequestEnvelope {
+        WorkerRequestEnvelope {
             protocol_version: WORKER_PROTOCOL_VERSION,
             request_id: WorkerRequestId(7),
             cancellation_id: CancellationId(11),
             operation_class: request.operation_class(),
             worker_generation: WorkerGeneration(3),
-            device_generation: None,
+            device_generation,
             budget_ms: RequestBudgetMs(2_000),
             request,
-        };
+        }
+    }
+
+    #[test]
+    fn request_round_trips_without_process_local_state() -> Result<(), Box<dyn std::error::Error>> {
+        let envelope = request_envelope(WorkerRequest::ListDevices, None);
 
         let encoded = serde_json::to_vec(&envelope)?;
         let decoded: WorkerRequestEnvelope = serde_json::from_slice(&encoded)?;
 
         assert_eq!(decoded, envelope);
+        assert_eq!(decoded.validate(), Ok(()));
         Ok(())
+    }
+
+    #[test]
+    fn get_info_requires_device_generation() {
+        let without_generation = request_envelope(
+            WorkerRequest::GetDeviceInfo {
+                device_id: WorkerDeviceId(4),
+            },
+            None,
+        );
+        assert_eq!(
+            without_generation.validate(),
+            Err(WorkerRequestValidationError::InvalidDeviceGeneration)
+        );
+    }
+
+    #[test]
+    fn operation_class_is_derived_from_request() {
+        let mut envelope = request_envelope(WorkerRequest::ListDevices, None);
+        envelope.operation_class = WorkerOperationClass::Mutation;
+        assert_eq!(
+            envelope.validate(),
+            Err(WorkerRequestValidationError::OperationClassMismatch)
+        );
+    }
+
+    #[test]
+    fn cancel_cannot_target_itself_or_zero_identifiers() {
+        let self_target = request_envelope(
+            WorkerRequest::Cancel {
+                target_request_id: WorkerRequestId(7),
+                target_cancellation_id: CancellationId(11),
+            },
+            None,
+        );
+        assert_eq!(
+            self_target.validate(),
+            Err(WorkerRequestValidationError::InvalidCancellationTarget)
+        );
+
+        let zero_target = request_envelope(
+            WorkerRequest::Cancel {
+                target_request_id: WorkerRequestId(0),
+                target_cancellation_id: CancellationId(9),
+            },
+            None,
+        );
+        assert_eq!(
+            zero_target.validate(),
+            Err(WorkerRequestValidationError::InvalidCancellationTarget)
+        );
     }
 
     #[test]
@@ -168,5 +344,20 @@ mod tests {
         }"#;
 
         assert!(serde_json::from_str::<WorkerRequestEnvelope>(encoded).is_err());
+    }
+
+    #[test]
+    fn response_envelope_rejects_unknown_fields() {
+        let encoded = r#"{
+            "protocol_version":1,
+            "request_id":7,
+            "worker_generation":3,
+            "device_generation":null,
+            "evidence":{"execution_quiescence":"quiescent","mutation_outcome":null},
+            "response":{"kind":"healthy"},
+            "unexpected":true
+        }"#;
+
+        assert!(serde_json::from_str::<WorkerResponseEnvelope>(encoded).is_err());
     }
 }
