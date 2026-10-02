@@ -4,34 +4,43 @@ use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 
-type DiscoveryAuthority = fido_service::DiscoveryCoordinator<fido_service::InProcessWorkerEndpoint>;
+/// Discovery authority. It supervises a killable child worker process: the application process
+/// itself never links libfido2 or runs native FIDO code.
+type DiscoveryAuthority = fido_service::DiscoverySupervisor<fido_service::ProcessWorkerLauncher>;
 
 pub(crate) struct AppState {
     discovery: Arc<Mutex<DiscoveryAuthority>>,
 }
 
 pub fn run() {
-    let worker_generation = fido_service::WorkerGeneration(1);
-    let endpoint = match fido_service::spawn_libfido2_worker(worker_generation) {
-        Ok(endpoint) => endpoint,
+    // The worker executable is resolved from the directory of this executable (the place a Tauri
+    // sidecar is bundled, and where Cargo puts the sibling binary in development). It is never
+    // read from PATH, the environment, or any value the renderer can influence, and it is started
+    // lazily on the first discovery request so a second instance that exits immediately never
+    // spawns one.
+    let launcher = match fido_service::ProcessWorkerLauncher::beside_current_exe() {
+        Ok(launcher) => launcher,
         Err(error) => {
-            eprintln!("failed to start native FIDO worker: {error}");
+            eprintln!(
+                "native FIDO worker executable is unavailable: {error} \
+                 (build it with `cargo build -p fido-worker`)"
+            );
             std::process::exit(1);
         }
     };
-    let discovery = match fido_service::DiscoveryCoordinator::new(
-        endpoint,
-        worker_generation,
+    let discovery = match fido_service::DiscoverySupervisor::new(
+        launcher,
         fido_service::DiscoveryPolicy::default(),
+        fido_service::RestartPolicy::default(),
     ) {
-        Ok(coordinator) => Arc::new(Mutex::new(coordinator)),
+        Ok(supervisor) => Arc::new(Mutex::new(supervisor)),
         Err(error) => {
             eprintln!("failed to initialize native discovery: {error}");
             std::process::exit(1);
         }
     };
 
-    let result = tauri::Builder::default()
+    let built = tauri::Builder::default()
         // Security invariant: single-instance is registered before any future plugin.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Second-launch arguments are intentionally ignored: they are untrusted input.
@@ -41,15 +50,31 @@ pub fn run() {
                 let _ = window.set_focus();
             }
         }))
-        .manage(AppState { discovery })
+        .manage(AppState {
+            discovery: Arc::clone(&discovery),
+        })
         .invoke_handler(tauri::generate_handler![
             commands::foundation_status,
             commands::list_authenticators,
         ])
-        .run(tauri::generate_context!());
+        .build(tauri::generate_context!());
 
-    if let Err(error) = result {
-        eprintln!("failed to run FidoManager: {error}");
-        std::process::exit(1);
-    }
+    let app = match built {
+        Ok(app) => app,
+        Err(error) => {
+            eprintln!("failed to build FidoManager: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    app.run(move |_app_handle, event| {
+        if let tauri::RunEvent::Exit = event {
+            // Deterministic cleanup: kill and reap the worker before the process ends. If a
+            // discovery transaction currently holds the lock we do not wait for it; the worker's
+            // own parent-death watchdog and stdin-EOF handling then end it.
+            if let Ok(mut supervisor) = discovery.try_lock() {
+                let _ = supervisor.shutdown();
+            }
+        }
+    });
 }

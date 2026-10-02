@@ -6,19 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[features]
-default = []
-native-libfido2 = ["fido-libfido2/native-libfido2"]
-
+# Deliberately no dependency on fido-libfido2: native code runs only in the fido-worker child
+# process, so the trusted authority never links libfido2.
 [dependencies]
 fido-core = { path = "../fido-core" }
-fido-libfido2 = { path = "../fido-libfido2" }
 fido-worker-protocol = { path = "../fido-worker-protocol" }
 thiserror.workspace = true
-
-[[example]]
-name = "discover"
-required-features = ["native-libfido2"]
 
 [lints]
 workspace = true

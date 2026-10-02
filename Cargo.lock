@@ -984,20 +984,31 @@ name = "fido-service"
 version = "0.1.0"
 dependencies = [
  "fido-core",
- "fido-libfido2",
  "fido-worker-protocol",
  "thiserror 2.0.21",
 ]
 
 [[package]]
-name = "fido-spike-worker"
+name = "fido-worker"
 version = "0.1.0"
 dependencies = [
  "fido-core",
  "fido-libfido2",
+ "fido-platform",
  "fido-service",
  "fido-worker-protocol",
- "serde_json",
+]
+
+[[package]]
+name = "fido-worker-fixture"
+version = "0.1.0"
+dependencies = [
+ "fido-core",
+ "fido-libfido2",
+ "fido-platform",
+ "fido-service",
+ "fido-worker",
+ "fido-worker-protocol",
 ]
 
 [[package]]

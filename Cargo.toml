@@ -5,7 +5,8 @@ members = [
     "crates/fido-native-ui",
     "crates/fido-platform",
     "crates/fido-service",
-    "crates/fido-spike-worker",
+    "crates/fido-worker",
+    "crates/fido-worker-fixture",
     "crates/fido-worker-protocol",
     "src-tauri",
 ]

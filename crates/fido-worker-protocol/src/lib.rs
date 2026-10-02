@@ -1,15 +1,35 @@
 //! Process-transparent service-to-worker messages.
 //!
-//! The protocol intentionally uses owned, serializable values only. The same contract can be
-//! transported to an in-process worker thread or a future child/elevated worker without changing
-//! service semantics.
+//! The protocol intentionally uses owned, serializable values only. The same contract is carried
+//! unchanged across a process boundary today and can be carried behind an elevated broker later
+//! without changing service semantics.
+
+mod framing;
+mod handshake;
+
+pub use framing::{
+    FRAME_HEADER_BYTES, FrameError, decode_message, encode_message, read_frame, read_message,
+    write_frame, write_message,
+};
+pub use handshake::{ChildHello, HandshakeError, ParentHello};
 
 use fido_core::{Aaguid, DeviceGeneration, ExecutionQuiescence, MutationOutcome};
 use serde::{Deserialize, Serialize};
 
 pub const WORKER_PROTOCOL_VERSION: u16 = 1;
-/// Transport implementations must reject frames larger than this before deserialization.
+/// Largest frame the service accepts from a worker (responses). Transport implementations must
+/// reject larger frames before deserialization, and before allocating their payload.
 pub const MAX_WORKER_FRAME_BYTES: usize = 1_048_576;
+/// Largest frame a worker accepts from the service. Requests are tiny and carry no payload data,
+/// so the worker's inbound bound is much tighter than the response bound. It also stays below the
+/// smallest OS pipe capacity so the service's single request write can never block on a pipe the
+/// worker is draining.
+pub const MAX_WORKER_REQUEST_FRAME_BYTES: usize = 16_384;
+/// Largest `ParentHello`/`ChildHello` payload.
+pub const MAX_WORKER_HANDSHAKE_FRAME_BYTES: usize = 1_024;
+/// `WorkerRequestId` reserved for control exchanges the endpoint issues itself (for example the
+/// post-handshake health check). The service's own request ids start at 1.
+pub const ENDPOINT_CONTROL_REQUEST_ID: WorkerRequestId = WorkerRequestId(0);
 pub const MAX_DISCOVERED_DEVICES: usize = 64;
 pub const MAX_DEVICE_TEXT_BYTES: usize = 256;
 pub const MAX_DEVICE_STRING_ITEMS: usize = 128;
@@ -34,7 +54,12 @@ pub struct WorkerGeneration(pub u64);
 #[serde(transparent)]
 pub struct WorkerDeviceId(pub u64);
 
-/// Relative execution budget measured from service dispatch, never a wall-clock timestamp.
+/// Relative native-execution budget for one whole request, never a wall-clock timestamp.
+///
+/// The worker starts one deadline when it receives the request and hands each native sub-call only
+/// the time that remains, so a request that makes several native calls cannot exceed this budget.
+/// The endpoint adds its own small, named transport margin on top before it declares the exchange
+/// dead and terminates the worker; that margin is transport time, not extra native time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RequestBudgetMs(pub u64);

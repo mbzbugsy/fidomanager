@@ -16,10 +16,25 @@ use fido_worker_protocol::{
 };
 use thiserror::Error;
 
+use crate::{MonotonicClock, SystemMonotonicClock};
+
+/// Nested deadlines for one discovery refresh. Each layer owns exactly one deadline and is shorter
+/// than the layer above it:
+///
+/// ```text
+/// transaction   whole refresh                     owner: DiscoveryCoordinator
+///   exchange    one request, budget + margin      owner: WorkerEndpoint
+///     native    budget, split across sub-calls    owner: the worker / native adapter
+/// ```
+///
+/// Later exchanges in a transaction receive what is *left* of the transaction, never a fresh
+/// operation budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiscoveryPolicy {
     pub list_devices_budget_ms: u64,
     pub get_device_info_budget_ms: u64,
+    /// Upper bound for one whole `refresh()`: `ListDevices` plus every uncached `GetDeviceInfo`.
+    pub transaction_budget_ms: u64,
 }
 
 impl DiscoveryPolicy {
@@ -30,6 +45,13 @@ impl DiscoveryPolicy {
         if self.get_device_info_budget_ms == 0 {
             return Err(DiscoveryPolicyError::ZeroGetDeviceInfoBudget);
         }
+        if self.transaction_budget_ms
+            < self
+                .list_devices_budget_ms
+                .max(self.get_device_info_budget_ms)
+        {
+            return Err(DiscoveryPolicyError::TransactionBudgetBelowOperationBudget);
+        }
         Ok(self)
     }
 }
@@ -39,6 +61,8 @@ impl Default for DiscoveryPolicy {
         Self {
             list_devices_budget_ms: 2_000,
             get_device_info_budget_ms: 2_000,
+            // Order of magnitude from the M1.5 spike; to be tuned against real-device timings.
+            transaction_budget_ms: 5_000,
         }
     }
 }
@@ -49,7 +73,13 @@ pub enum DiscoveryPolicyError {
     ZeroListDevicesBudget,
     #[error("GetInfo execution budget must be greater than zero")]
     ZeroGetDeviceInfoBudget,
+    #[error("transaction budget must cover at least one full operation budget")]
+    TransactionBudgetBelowOperationBudget,
 }
+
+/// Smallest native budget worth dispatching. When less than this remains in the transaction the
+/// refresh fails closed instead of starting an exchange that cannot finish.
+const MIN_EXCHANGE_BUDGET_MS: u64 = 20;
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerEndpointError {
@@ -59,17 +89,33 @@ pub enum WorkerEndpointError {
     TransportFailure,
     #[error("worker frame exceeded the configured transport bound")]
     FrameTooLarge,
+    #[error("worker sent a malformed, truncated, or unsolicited frame")]
+    MalformedFrame,
+    #[error("worker did not answer before the exchange deadline and was terminated")]
+    ExchangeDeadlineExceeded,
 }
 
 /// Service-facing worker endpoint.
 ///
-/// Implementations may use an in-process worker thread today and a child/elevated process later;
-/// service semantics must not depend on that placement.
+/// Implementations place the worker in a killable child process today and behind an elevated
+/// broker later; service semantics must not depend on that placement.
 pub trait WorkerEndpoint {
     fn exchange(
         &mut self,
         request: WorkerRequestEnvelope,
     ) -> Result<WorkerResponseEnvelope, WorkerEndpointError>;
+
+    /// Time the endpoint adds *beyond* a request's native budget before it declares the exchange
+    /// dead. It is transport time (framing, scheduling) and is never available to native code, so
+    /// the coordinator subtracts it when fitting an exchange into the transaction deadline.
+    fn transport_margin_ms(&self) -> u64;
+
+    /// Force native execution to stop and report what is *proven*.
+    ///
+    /// `Quiescent` means the worker can no longer execute native calls (for a process worker: it
+    /// has been killed **and reaped**). Anything the endpoint cannot prove is `Active`. The call
+    /// is idempotent and may be retried: an `Active` result means "try again", not "gone".
+    fn contain(&mut self) -> ExecutionQuiescence;
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +140,10 @@ pub enum DiscoveryError {
     DeviceIdentityViolation,
     #[error("replacement worker generation must strictly increase")]
     NonIncreasingWorkerGeneration,
+    #[error("previous worker is not proven quiescent, so it cannot be replaced")]
+    PreviousWorkerNotContained,
+    #[error("discovery transaction deadline expired before every exchange completed")]
+    TransactionDeadlineExceeded,
     #[error("worker returned too many discovered devices")]
     TooManyDevices,
     #[error("worker returned duplicate device identities in one enumeration")]
@@ -282,8 +332,9 @@ enum WorkerState {
     Quarantined,
 }
 
-pub struct DiscoveryCoordinator<E> {
+pub struct DiscoveryCoordinator<E, C = SystemMonotonicClock> {
     endpoint: E,
+    clock: C,
     worker_generation: WorkerGeneration,
     worker_state: WorkerState,
     policy: DiscoveryPolicy,
@@ -294,23 +345,50 @@ pub struct DiscoveryCoordinator<E> {
     next_enumeration_epoch: u64,
 }
 
-impl<E: WorkerEndpoint> DiscoveryCoordinator<E> {
+impl<E: WorkerEndpoint> DiscoveryCoordinator<E, SystemMonotonicClock> {
     pub fn new(
         endpoint: E,
         worker_generation: WorkerGeneration,
         policy: DiscoveryPolicy,
     ) -> Result<Self, DiscoveryPolicyError> {
+        Self::with_clock(
+            endpoint,
+            worker_generation,
+            policy,
+            SystemMonotonicClock::new(),
+        )
+    }
+}
+
+impl<E: WorkerEndpoint, C: MonotonicClock> DiscoveryCoordinator<E, C> {
+    pub fn with_clock(
+        endpoint: E,
+        worker_generation: WorkerGeneration,
+        policy: DiscoveryPolicy,
+        clock: C,
+    ) -> Result<Self, DiscoveryPolicyError> {
         Ok(Self {
             endpoint,
+            clock,
             worker_generation,
             worker_state: WorkerState::Usable,
             policy: policy.validate()?,
             registry: DeviceRegistry::new(),
             info_cache: Vec::new(),
+            // Id 0 is reserved for exchanges the endpoint issues itself (health check).
             next_request_id: 1,
             next_cancellation_id: 1,
             next_enumeration_epoch: 1,
         })
+    }
+
+    pub fn worker_generation(&self) -> WorkerGeneration {
+        self.worker_generation
+    }
+
+    /// Whether the worker has been taken out of service and must be replaced before reuse.
+    pub fn is_quarantined(&self) -> bool {
+        self.worker_state == WorkerState::Quarantined
     }
 
     pub fn refresh(&mut self) -> Result<DeviceListSnapshot, DiscoveryError> {
@@ -325,6 +403,10 @@ impl<E: WorkerEndpoint> DiscoveryCoordinator<E> {
             self.registry.clear_active();
             if error.requires_worker_quarantine() {
                 self.worker_state = WorkerState::Quarantined;
+                // Take the worker out of native execution *now*. Waiting for a replacement to ask
+                // would leave a misbehaving worker running; the proof is re-checked, not assumed,
+                // when `replace_worker` is called.
+                let _ = self.endpoint.contain();
             }
         }
         result
@@ -334,11 +416,24 @@ impl<E: WorkerEndpoint> DiscoveryCoordinator<E> {
         self.registry.resolve(handle)
     }
 
+    /// Retire the current worker: take it out of service and force it to stop.
+    ///
+    /// Returns what the endpoint can *prove*. Only `Quiescent` permits replacement; `Active` means
+    /// containment must be retried and no replacement may be started yet.
+    pub fn contain_worker(&mut self) -> ExecutionQuiescence {
+        self.worker_state = WorkerState::Quarantined;
+        self.registry.clear_active();
+        self.endpoint.contain()
+    }
+
     /// Replace a quarantined or retired worker with a fresh worker instance.
     ///
-    /// The caller must ensure the previous worker can no longer execute native calls. A strictly
-    /// increasing generation prevents stale responses from a prior worker incarnation from being
-    /// accepted after replacement.
+    /// The previous worker must be **proven** quiescent: this method asks the endpoint to contain
+    /// it and refuses the replacement unless that proof comes back. (Containment is idempotent, so
+    /// a worker that was already killed and reaped answers immediately.) A strictly increasing
+    /// generation additionally prevents stale responses from a prior worker incarnation from being
+    /// accepted after replacement. On refusal the new endpoint is dropped and the current worker
+    /// stays quarantined.
     pub fn replace_worker(
         &mut self,
         endpoint: E,
@@ -346,6 +441,9 @@ impl<E: WorkerEndpoint> DiscoveryCoordinator<E> {
     ) -> Result<(), DiscoveryError> {
         if worker_generation.0 <= self.worker_generation.0 {
             return Err(DiscoveryError::NonIncreasingWorkerGeneration);
+        }
+        if self.contain_worker() != ExecutionQuiescence::Quiescent {
+            return Err(DiscoveryError::PreviousWorkerNotContained);
         }
 
         self.endpoint = endpoint;
@@ -357,10 +455,17 @@ impl<E: WorkerEndpoint> DiscoveryCoordinator<E> {
     }
 
     fn refresh_inner(&mut self) -> Result<DeviceListSnapshot, DiscoveryError> {
+        let transaction_deadline_ms = self
+            .clock
+            .now()
+            .as_millis()
+            .saturating_add(self.policy.transaction_budget_ms);
+
         let list_response = self.exchange_read_only(
             WorkerRequest::ListDevices,
             None,
             self.policy.list_devices_budget_ms,
+            transaction_deadline_ms,
         )?;
 
         let discovered = match list_response.response {
@@ -396,6 +501,7 @@ impl<E: WorkerEndpoint> DiscoveryCoordinator<E> {
                 },
                 Some(device.device_generation),
                 self.policy.get_device_info_budget_ms,
+                transaction_deadline_ms,
             )?;
 
             match info_response.response {
@@ -483,8 +589,21 @@ impl<E: WorkerEndpoint> DiscoveryCoordinator<E> {
         &mut self,
         request: WorkerRequest,
         device_generation: Option<fido_core::DeviceGeneration>,
-        budget_ms: u64,
+        operation_budget_ms: u64,
+        transaction_deadline_ms: u64,
     ) -> Result<WorkerResponseEnvelope, DiscoveryError> {
+        // The native budget is what is left of the transaction after the endpoint's own transport
+        // margin, capped by the operation budget. It is never a fresh full budget.
+        let remaining_ms = transaction_deadline_ms.saturating_sub(self.clock.now().as_millis());
+        let native_budget_ms = remaining_ms
+            .saturating_sub(self.endpoint.transport_margin_ms())
+            .min(operation_budget_ms);
+        if native_budget_ms < operation_budget_ms.min(MIN_EXCHANGE_BUDGET_MS) {
+            // The worker is idle and healthy; the refresh simply ran out of time. Fail the whole
+            // refresh closed without quarantining anything.
+            return Err(DiscoveryError::TransactionDeadlineExceeded);
+        }
+
         let request_id = WorkerRequestId(self.take_request_id()?);
         let cancellation_id = CancellationId(self.take_cancellation_id()?);
         let envelope = WorkerRequestEnvelope {
@@ -494,7 +613,7 @@ impl<E: WorkerEndpoint> DiscoveryCoordinator<E> {
             operation_class: request.operation_class(),
             worker_generation: self.worker_generation,
             device_generation,
-            budget_ms: RequestBudgetMs(budget_ms),
+            budget_ms: RequestBudgetMs(native_budget_ms),
             request,
         };
         envelope
@@ -724,6 +843,7 @@ fn read_status_for_error(code: WorkerErrorCode) -> Result<DeviceReadStatus, Disc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::FakeClock;
     use fido_core::{Aaguid, DeviceGeneration, MutationOutcome};
     use fido_worker_protocol::{MAX_DEVICE_TEXT_BYTES, WorkerDeviceOption, WorkerResponseEvidence};
 
@@ -740,6 +860,12 @@ mod tests {
         force_active_response: bool,
         force_transport_failure: bool,
         exchange_count: usize,
+        contain_count: usize,
+        containment: ExecutionQuiescence,
+        transport_margin_ms: u64,
+        budgets_seen: Vec<u64>,
+        clock: Option<FakeClock>,
+        exchange_cost_ms: std::collections::VecDeque<u64>,
     }
 
     impl FakeEndpoint {
@@ -750,6 +876,12 @@ mod tests {
                 force_active_response: false,
                 force_transport_failure: false,
                 exchange_count: 0,
+                contain_count: 0,
+                containment: ExecutionQuiescence::Quiescent,
+                transport_margin_ms: 0,
+                budgets_seen: Vec::new(),
+                clock: None,
+                exchange_cost_ms: std::collections::VecDeque::new(),
             }
         }
 
@@ -777,11 +909,25 @@ mod tests {
     }
 
     impl WorkerEndpoint for FakeEndpoint {
+        fn transport_margin_ms(&self) -> u64 {
+            self.transport_margin_ms
+        }
+
+        fn contain(&mut self) -> ExecutionQuiescence {
+            self.contain_count += 1;
+            self.containment
+        }
+
         fn exchange(
             &mut self,
             request: WorkerRequestEnvelope,
         ) -> Result<WorkerResponseEnvelope, WorkerEndpointError> {
             self.exchange_count += 1;
+            self.budgets_seen.push(request.budget_ms.0);
+            if let Some(clock) = &self.clock {
+                let cost = self.exchange_cost_ms.pop_front().unwrap_or(0);
+                clock.advance(cost);
+            }
             if self.force_transport_failure {
                 return Err(WorkerEndpointError::TransportFailure);
             }
@@ -1108,11 +1254,192 @@ mod tests {
         Ok(())
     }
 
+    fn policy_with(list: u64, info: u64, transaction: u64) -> DiscoveryPolicy {
+        DiscoveryPolicy {
+            list_devices_budget_ms: list,
+            get_device_info_budget_ms: info,
+            transaction_budget_ms: transaction,
+        }
+    }
+
+    /// Coordinator over a fake endpoint whose exchanges consume fake time.
+    fn timed_coordinator(
+        devices: Vec<FakeDevice>,
+        policy: DiscoveryPolicy,
+        margin_ms: u64,
+        exchange_costs_ms: Vec<u64>,
+    ) -> Result<
+        (DiscoveryCoordinator<FakeEndpoint, FakeClock>, FakeClock),
+        Box<dyn std::error::Error>,
+    > {
+        let clock = FakeClock::default();
+        let generation = WorkerGeneration(3);
+        let mut endpoint = FakeEndpoint::new(generation, devices);
+        endpoint.clock = Some(clock.clone());
+        endpoint.transport_margin_ms = margin_ms;
+        endpoint.exchange_cost_ms = exchange_costs_ms.into();
+        let coordinator =
+            DiscoveryCoordinator::with_clock(endpoint, generation, policy, clock.clone())?;
+        Ok((coordinator, clock))
+    }
+
+    #[test]
+    fn policy_rejects_transaction_budget_below_operation_budget() {
+        assert_eq!(
+            policy_with(2_000, 2_000, 1_999).validate(),
+            Err(DiscoveryPolicyError::TransactionBudgetBelowOperationBudget)
+        );
+        assert_eq!(
+            policy_with(2_000, 3_000, 2_999).validate(),
+            Err(DiscoveryPolicyError::TransactionBudgetBelowOperationBudget)
+        );
+        assert!(policy_with(2_000, 2_000, 2_000).validate().is_ok());
+    }
+
+    #[test]
+    fn later_exchanges_receive_the_remaining_transaction_time_not_a_fresh_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut coordinator, _clock) = timed_coordinator(
+            vec![fake_device_with_id(7, 1), fake_device_with_id(8, 1)],
+            policy_with(2_000, 2_000, 3_000),
+            0,
+            // ListDevices takes 1.2 s, the first GetInfo takes 1.0 s.
+            vec![1_200, 1_000, 0],
+        )?;
+
+        let snapshot = coordinator.refresh()?;
+        assert_eq!(snapshot.devices.len(), 2);
+        assert_eq!(
+            coordinator.endpoint.budgets_seen,
+            vec![2_000, 1_800, 800],
+            "each exchange gets min(operation budget, what is left of the transaction)"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn transport_margin_is_subtracted_from_the_native_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut coordinator, _clock) = timed_coordinator(
+            vec![fake_device(1)],
+            policy_with(2_000, 2_000, 2_050),
+            100,
+            vec![0, 0],
+        )?;
+
+        coordinator.refresh()?;
+        // 2_050 ms left minus the 100 ms the endpoint adds beyond the native budget.
+        assert_eq!(coordinator.endpoint.budgets_seen, vec![1_950, 1_950]);
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_deadline_exhaustion_fails_closed_without_quarantining_the_worker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut coordinator, _clock) = timed_coordinator(
+            vec![fake_device(1)],
+            policy_with(2_000, 2_000, 2_000),
+            0,
+            // ListDevices leaves 10 ms of the 2 s transaction: too little to dispatch GetInfo.
+            vec![1_990],
+        )?;
+
+        assert_eq!(
+            coordinator.refresh(),
+            Err(DiscoveryError::TransactionDeadlineExceeded)
+        );
+        assert_eq!(
+            coordinator.endpoint.exchange_count, 1,
+            "no exchange may be dispatched once the transaction has run out"
+        );
+        assert!(
+            !coordinator.is_quarantined(),
+            "an idle, healthy worker is not at fault for a slow transaction"
+        );
+        assert_eq!(coordinator.endpoint.contain_count, 0);
+
+        // The next transaction starts fresh and the worker is still usable.
+        assert!(coordinator.refresh().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn quarantine_asks_the_endpoint_to_contain_the_worker_immediately()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut coordinator = coordinator(vec![fake_device(1)])?;
+        coordinator.endpoint.force_transport_failure = true;
+        assert!(coordinator.refresh().is_err());
+
+        assert!(coordinator.is_quarantined());
+        assert_eq!(
+            coordinator.endpoint.contain_count, 1,
+            "a quarantined worker must be stopped now, not when a replacement asks"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn replace_worker_requires_proof_of_quiescence() -> Result<(), Box<dyn std::error::Error>> {
+        let mut coordinator = coordinator(vec![fake_device(1)])?;
+        coordinator.endpoint.force_transport_failure = true;
+        assert!(coordinator.refresh().is_err());
+        // The old worker cannot prove it stopped.
+        coordinator.endpoint.containment = ExecutionQuiescence::Active;
+
+        assert_eq!(
+            coordinator.replace_worker(
+                FakeEndpoint::new(WorkerGeneration(4), vec![fake_device(2)]),
+                WorkerGeneration(4),
+            ),
+            Err(DiscoveryError::PreviousWorkerNotContained)
+        );
+        assert_eq!(coordinator.worker_generation(), WorkerGeneration(3));
+        assert!(coordinator.is_quarantined());
+        assert_eq!(
+            coordinator.refresh(),
+            Err(DiscoveryError::WorkerQuarantined)
+        );
+
+        // Once the endpoint can prove it, the same replacement is accepted.
+        coordinator.endpoint.containment = ExecutionQuiescence::Quiescent;
+        coordinator.replace_worker(
+            FakeEndpoint::new(WorkerGeneration(4), vec![fake_device(2)]),
+            WorkerGeneration(4),
+        )?;
+        assert_eq!(coordinator.worker_generation(), WorkerGeneration(4));
+        assert_eq!(coordinator.refresh()?.devices.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn contain_worker_retires_a_usable_worker_and_blocks_reuse()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut coordinator = coordinator(vec![fake_device(1)])?;
+        let handle = coordinator.refresh()?.devices[0].handle;
+
+        assert_eq!(coordinator.contain_worker(), ExecutionQuiescence::Quiescent);
+        assert!(coordinator.is_quarantined());
+        assert_eq!(coordinator.resolve_handle(handle), None);
+        assert_eq!(
+            coordinator.refresh(),
+            Err(DiscoveryError::WorkerQuarantined)
+        );
+        Ok(())
+    }
+
     #[test]
     fn read_only_response_rejects_mutation_evidence() -> Result<(), Box<dyn std::error::Error>> {
         struct MutationEvidenceEndpoint;
 
         impl WorkerEndpoint for MutationEvidenceEndpoint {
+            fn transport_margin_ms(&self) -> u64 {
+                0
+            }
+
+            fn contain(&mut self) -> ExecutionQuiescence {
+                ExecutionQuiescence::Quiescent
+            }
+
             fn exchange(
                 &mut self,
                 request: WorkerRequestEnvelope,

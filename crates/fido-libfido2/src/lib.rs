@@ -4,6 +4,7 @@
 //! worker and libfido2 pointers never cross this crate boundary.
 
 use std::fmt;
+use std::time::{Duration, Instant};
 
 pub const MAX_NATIVE_PATH_BYTES: usize = 4_096;
 pub const MAX_NATIVE_DEVICE_TEXT_BYTES: usize = 256;
@@ -104,17 +105,68 @@ impl fmt::Display for NativeError {
 
 impl std::error::Error for NativeError {}
 
-/// Native discovery surface consumed by the in-process worker.
+/// The single deadline for one whole worker request.
+///
+/// The worker creates exactly one `NativeDeadline` when it receives a request. Every native
+/// sub-call derives its timeout from [`NativeDeadline::next_call_timeout_ms`], which reports only
+/// the time that is *left*. A request that performs several native calls (for example `open` then
+/// `get_cbor_info`) therefore cannot spend the full budget twice.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeDeadline {
+    expires_at: Instant,
+}
+
+impl NativeDeadline {
+    /// Far enough in the future to behave as "no deadline" if the budget overflows `Instant`.
+    const OVERFLOW_FALLBACK: Duration = Duration::from_secs(60 * 60 * 24 * 365);
+
+    pub fn after(budget: Duration) -> Self {
+        let now = Instant::now();
+        let expires_at = now
+            .checked_add(budget)
+            .or_else(|| now.checked_add(Self::OVERFLOW_FALLBACK))
+            .unwrap_or(now);
+        Self { expires_at }
+    }
+
+    pub fn remaining(&self) -> Duration {
+        self.expires_at.saturating_duration_since(Instant::now())
+    }
+
+    pub fn is_expired(&self) -> bool {
+        self.remaining().is_zero()
+    }
+
+    /// Timeout to hand the next native sub-call, in whole milliseconds, rounded up so a live
+    /// deadline never yields zero (libfido2 treats zero as "return immediately").
+    ///
+    /// Returns a `TimedOut` error once the deadline has expired so callers stop *before* starting
+    /// another native call rather than after it.
+    pub fn next_call_timeout_ms(&self) -> Result<i32, NativeError> {
+        let remaining = self.remaining();
+        if remaining.is_zero() {
+            return Err(NativeError::new(NativeErrorKind::TimedOut, None));
+        }
+        let millis = remaining.as_nanos().div_ceil(1_000_000).max(1);
+        Ok(i32::try_from(millis).unwrap_or(i32::MAX))
+    }
+}
+
+/// Native discovery surface consumed by the worker engine.
 ///
 /// Implementations own all native identifiers and must never expose raw paths outside
-/// `NativeDeviceKey`.
+/// `NativeDeviceKey`. Every method receives the request's [`NativeDeadline`] and must split the
+/// remaining time across its native sub-calls instead of granting each one a fresh budget.
 pub trait NativeDiscoveryBackend: Send {
-    fn manifest(&mut self, budget_ms: u64) -> Result<Vec<NativeDiscoveredDevice>, NativeError>;
+    fn manifest(
+        &mut self,
+        deadline: NativeDeadline,
+    ) -> Result<Vec<NativeDiscoveredDevice>, NativeError>;
 
     fn get_info(
         &mut self,
         key: &NativeDeviceKey,
-        budget_ms: u64,
+        deadline: NativeDeadline,
     ) -> Result<NativeDeviceInfo, NativeError>;
 }
 
@@ -122,12 +174,12 @@ pub trait NativeDiscoveryBackend: Send {
 mod native {
     use std::ffi::{c_char, c_int, c_void};
     use std::ptr;
-    use std::time::{Duration, Instant};
 
     use super::{
         MAX_NATIVE_DEVICE_TEXT_BYTES, MAX_NATIVE_DISCOVERED_DEVICES, MAX_NATIVE_PATH_BYTES,
-        MAX_NATIVE_STRING_ITEMS, NativeDeviceInfo, NativeDeviceKey, NativeDeviceOption,
-        NativeDiscoveredDevice, NativeDiscoveryBackend, NativeError, NativeErrorKind,
+        MAX_NATIVE_STRING_ITEMS, NativeDeadline, NativeDeviceInfo, NativeDeviceKey,
+        NativeDeviceOption, NativeDiscoveredDevice, NativeDiscoveryBackend, NativeError,
+        NativeErrorKind,
     };
 
     const FIDO_OK: c_int = 0;
@@ -190,18 +242,24 @@ mod native {
     impl NativeDiscoveryBackend for LibFido2Adapter {
         fn manifest(
             &mut self,
-            _budget_ms: u64,
+            deadline: NativeDeadline,
         ) -> Result<Vec<NativeDiscoveredDevice>, NativeError> {
+            // Do not start a native call with no time left to spend on it.
+            deadline.next_call_timeout_ms()?;
+
             let mut list = DevInfoList::new(MAX_NATIVE_DISCOVERED_DEVICES)?;
             let mut found = 0usize;
 
             // SAFETY: `list.ptr` was allocated by fido_dev_info_new for exactly `list.capacity`
             // entries and `found` is a valid writable size_t pointer.
+            //
+            // `fido_dev_info_manifest` accepts no timeout, so this call is bounded only by the
+            // worker-process kill boundary enforced by the service, never by `deadline`.
             let result = unsafe {
                 fido_dev_info_manifest(list.ptr, list.capacity, ptr::addr_of_mut!(found))
             };
             if result != FIDO_OK {
-                return Err(map_libfido2_error(result, Duration::ZERO, 0));
+                return Err(map_libfido2_error(result, &deadline));
             }
             if found > list.capacity {
                 return Err(NativeError::new(NativeErrorKind::Malformed, None));
@@ -261,47 +319,27 @@ mod native {
         fn get_info(
             &mut self,
             key: &NativeDeviceKey,
-            budget_ms: u64,
+            deadline: NativeDeadline,
         ) -> Result<NativeDeviceInfo, NativeError> {
-            let timeout_ms = i32::try_from(budget_ms)
-                .ok()
-                .filter(|value| *value > 0)
-                .ok_or_else(|| NativeError::new(NativeErrorKind::Internal, None))?;
             let path = key.to_cstring()?;
             let mut device = Device::new()?;
 
-            // SAFETY: device is a live libfido2 object and timeout is a positive c_int.
-            let timeout_result = unsafe { fido_dev_set_timeout(device.ptr, timeout_ms) };
-            if timeout_result != FIDO_OK {
-                return Err(map_libfido2_error(
-                    timeout_result,
-                    Duration::ZERO,
-                    budget_ms,
-                ));
-            }
-
-            let started = Instant::now();
+            // Each sub-call below is given only the time that is left on the request deadline,
+            // re-read immediately before the call, so `open` and `get_cbor_info` share one budget.
+            device.set_timeout(&deadline)?;
             // SAFETY: path is NUL-terminated for the duration of the call and device is live.
             let open_result = unsafe { fido_dev_open(device.ptr, path.as_ptr()) };
             if open_result != FIDO_OK {
-                return Err(map_libfido2_error(
-                    open_result,
-                    started.elapsed(),
-                    budget_ms,
-                ));
+                return Err(map_libfido2_error(open_result, &deadline));
             }
             device.opened = true;
 
             let info = CborInfo::new()?;
-            let started = Instant::now();
+            device.set_timeout(&deadline)?;
             // SAFETY: both pointers are live libfido2 objects owned by guards in this scope.
             let info_result = unsafe { fido_dev_get_cbor_info(device.ptr, info.ptr) };
             if info_result != FIDO_OK {
-                return Err(map_libfido2_error(
-                    info_result,
-                    started.elapsed(),
-                    budget_ms,
-                ));
+                return Err(map_libfido2_error(info_result, &deadline));
             }
 
             // SAFETY: `info.ptr` remains live until `info` is dropped after extraction.
@@ -352,6 +390,17 @@ mod native {
                 return Err(NativeError::new(NativeErrorKind::Internal, None));
             }
             Ok(Self { ptr, opened: false })
+        }
+
+        /// Applies the remaining request time as libfido2's timeout for the *next* native call.
+        fn set_timeout(&mut self, deadline: &NativeDeadline) -> Result<(), NativeError> {
+            let timeout_ms = deadline.next_call_timeout_ms()?;
+            // SAFETY: device is a live libfido2 object and timeout is a positive c_int.
+            let result = unsafe { fido_dev_set_timeout(self.ptr, timeout_ms) };
+            if result != FIDO_OK {
+                return Err(map_libfido2_error(result, deadline));
+            }
+            Ok(())
         }
     }
 
@@ -567,12 +616,14 @@ mod native {
         Err(NativeError::new(NativeErrorKind::Malformed, None))
     }
 
-    fn map_libfido2_error(code: c_int, elapsed: Duration, budget_ms: u64) -> NativeError {
+    fn map_libfido2_error(code: c_int, deadline: &NativeDeadline) -> NativeError {
         let name = unsafe {
             copy_required_utf8(fido_strerr(code), ERROR_NAME_BOUND)
                 .unwrap_or_else(|_| "FIDO_ERR_UNKNOWN".to_owned())
         };
-        let timed_out_by_budget = budget_ms != 0 && elapsed >= Duration::from_millis(budget_ms);
+        // A transport-level failure that arrives after the request deadline is a timeout, not a
+        // vanished device.
+        let timed_out_by_budget = deadline.is_expired();
         let kind = match name.as_str() {
             "FIDO_ERR_CHANNEL_BUSY"
             | "FIDO_ERR_PROCESSING"
@@ -613,6 +664,53 @@ mod tests {
         assert!(NativeDeviceKey::from_bytes(Vec::new()).is_err());
         assert!(NativeDeviceKey::from_bytes(vec![b'x'; MAX_NATIVE_PATH_BYTES + 1]).is_err());
         assert!(NativeDeviceKey::from_bytes(b"abc\0def".to_vec()).is_err());
+    }
+
+    #[test]
+    fn deadline_timeout_shrinks_as_time_is_spent() -> Result<(), Box<dyn std::error::Error>> {
+        let deadline = NativeDeadline::after(Duration::from_millis(400));
+        let first = deadline.next_call_timeout_ms()?;
+        assert!((1..=400).contains(&first));
+
+        std::thread::sleep(Duration::from_millis(150));
+        let second = deadline.next_call_timeout_ms()?;
+        assert!(
+            second <= 400 - 100,
+            "second sub-call must only get the remaining time, got {second} ms"
+        );
+        assert!(second < first);
+        Ok(())
+    }
+
+    #[test]
+    fn expired_deadline_refuses_to_start_another_native_call() {
+        let deadline = NativeDeadline::after(Duration::from_millis(1));
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(deadline.is_expired());
+        let error = deadline.next_call_timeout_ms().err();
+        assert_eq!(
+            error.map(|error| error.kind()),
+            Some(NativeErrorKind::TimedOut)
+        );
+    }
+
+    #[test]
+    fn live_deadline_never_rounds_down_to_zero() -> Result<(), Box<dyn std::error::Error>> {
+        let deadline = NativeDeadline::after(Duration::from_micros(900));
+        // Either it already expired (error) or it must report at least 1 ms; never 0.
+        if let Ok(timeout) = deadline.next_call_timeout_ms() {
+            assert!(timeout >= 1);
+        }
+        let generous = NativeDeadline::after(Duration::from_secs(5));
+        assert!(generous.next_call_timeout_ms()? >= 1);
+        Ok(())
+    }
+
+    #[test]
+    fn overflowing_budget_does_not_panic_or_expire_immediately() {
+        let deadline = NativeDeadline::after(Duration::MAX);
+        assert!(!deadline.is_expired());
+        assert_eq!(deadline.next_call_timeout_ms().ok(), Some(i32::MAX));
     }
 
     #[test]

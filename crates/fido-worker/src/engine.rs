@@ -1,97 +1,20 @@
-//! In-process worker endpoint for Milestone 1 read-only discovery.
+//! Worker engine: validates requests and runs them against a native discovery backend.
 //!
-//! The worker owns native device keys and generation tracking. The service sees only the
-//! process-transparent worker protocol. If an exchange exceeds its hard service-side wait, the
-//! endpoint returns a transport failure; `DiscoveryCoordinator` then quarantines the worker.
-
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
+//! The engine owns native device keys and device-generation tracking. It has no notion of where it
+//! runs: the child-process runtime drives it today, and the same engine can sit behind an
+//! elevated broker later. Native paths and libfido2 objects never leave this side of the boundary.
 
 use fido_core::{Aaguid, DeviceGeneration, ExecutionQuiescence};
 use fido_libfido2::{
-    NativeDeviceInfo, NativeDeviceKey, NativeDiscoveredDevice, NativeDiscoveryBackend, NativeError,
-    NativeErrorKind,
+    NativeDeadline, NativeDeviceInfo, NativeDeviceKey, NativeDiscoveredDevice,
+    NativeDiscoveryBackend, NativeError, NativeErrorKind,
 };
 use fido_worker_protocol::{
-    MAX_DISCOVERED_DEVICES, WorkerDeviceId, WorkerDeviceInfo, WorkerDeviceOption, WorkerErrorCode,
-    WorkerGeneration, WorkerRequest, WorkerRequestEnvelope, WorkerResponse, WorkerResponseEnvelope,
-    WorkerResponseEvidence,
+    MAX_DISCOVERED_DEVICES, WORKER_PROTOCOL_VERSION, WorkerDeviceId, WorkerDeviceInfo,
+    WorkerDeviceOption, WorkerErrorCode, WorkerGeneration, WorkerRequest, WorkerRequestEnvelope,
+    WorkerResponse, WorkerResponseEnvelope, WorkerResponseEvidence,
 };
-
-use crate::{WorkerEndpoint, WorkerEndpointError};
-
-const HARD_DEADLINE_SLACK_MS: u64 = 250;
-
-struct WorkItem {
-    request: WorkerRequestEnvelope,
-    response_tx: mpsc::Sender<WorkerResponseEnvelope>,
-}
-
-/// Synchronous service endpoint backed by one dedicated native worker thread.
-///
-/// A service-side receive timeout does not prove the native call stopped. The coordinator therefore
-/// quarantines the endpoint after a transport failure. A thread that is genuinely stuck cannot be
-/// safely replaced in-process; the M1.5 killability spike decides when placement must move to a
-/// child process.
-pub struct InProcessWorkerEndpoint {
-    request_tx: mpsc::Sender<WorkItem>,
-    _worker_thread: thread::JoinHandle<()>,
-}
-
-impl InProcessWorkerEndpoint {
-    pub fn spawn<B>(backend: B, generation: WorkerGeneration) -> Result<Self, WorkerEndpointError>
-    where
-        B: NativeDiscoveryBackend + 'static,
-    {
-        let (request_tx, request_rx) = mpsc::channel::<WorkItem>();
-        let worker_thread = thread::Builder::new()
-            .name("fidomanager-fido-worker".to_owned())
-            .spawn(move || {
-                let mut engine = WorkerEngine::new(backend, generation);
-                while let Ok(item) = request_rx.recv() {
-                    let response = engine.handle(item.request);
-                    if item.response_tx.send(response).is_err() {
-                        // The service has abandoned/quarantined this exchange. Continue only after
-                        // the native call has returned; subsequent sends will fail once the endpoint
-                        // itself is dropped.
-                    }
-                }
-            })
-            .map_err(|_| WorkerEndpointError::Unavailable)?;
-
-        Ok(Self {
-            request_tx,
-            _worker_thread: worker_thread,
-        })
-    }
-}
-
-impl WorkerEndpoint for InProcessWorkerEndpoint {
-    fn exchange(
-        &mut self,
-        request: WorkerRequestEnvelope,
-    ) -> Result<WorkerResponseEnvelope, WorkerEndpointError> {
-        let wait_ms = request
-            .budget_ms
-            .0
-            .checked_add(HARD_DEADLINE_SLACK_MS)
-            .ok_or(WorkerEndpointError::TransportFailure)?;
-        let (response_tx, response_rx) = mpsc::channel();
-        self.request_tx
-            .send(WorkItem {
-                request,
-                response_tx,
-            })
-            .map_err(|_| WorkerEndpointError::Unavailable)?;
-
-        match response_rx.recv_timeout(Duration::from_millis(wait_ms)) {
-            Ok(response) => Ok(response),
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(WorkerEndpointError::TransportFailure),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(WorkerEndpointError::Unavailable),
-        }
-    }
-}
+use std::time::Duration;
 
 #[derive(Debug, Clone)]
 struct WorkerSlot {
@@ -105,7 +28,7 @@ struct WorkerSlot {
     present: bool,
 }
 
-struct WorkerEngine<B> {
+pub struct WorkerEngine<B> {
     backend: B,
     generation: WorkerGeneration,
     slots: Vec<WorkerSlot>,
@@ -113,7 +36,7 @@ struct WorkerEngine<B> {
 }
 
 impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
-    fn new(backend: B, generation: WorkerGeneration) -> Self {
+    pub fn new(backend: B, generation: WorkerGeneration) -> Self {
         Self {
             backend,
             generation,
@@ -122,7 +45,9 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
         }
     }
 
-    fn handle(&mut self, request: WorkerRequestEnvelope) -> WorkerResponseEnvelope {
+    /// Handles one request. The request's budget becomes **one** deadline, started here, that is
+    /// shared by every native sub-call the request makes.
+    pub fn handle(&mut self, request: WorkerRequestEnvelope) -> WorkerResponseEnvelope {
         if request.validate().is_err() || request.worker_generation != self.generation {
             return self.response(
                 &request,
@@ -132,10 +57,13 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
             );
         }
 
+        let deadline = NativeDeadline::after(Duration::from_millis(request.budget_ms.0));
         let response = match &request.request {
             WorkerRequest::HealthCheck => WorkerResponse::Healthy,
+            // The process worker implements cancellation by termination: the service kills the
+            // process at its deadline. A `Cancel` only reaches here while the worker is idle.
             WorkerRequest::Cancel { .. } => WorkerResponse::CancellationAccepted,
-            WorkerRequest::ListDevices => match self.list_devices(request.budget_ms.0) {
+            WorkerRequest::ListDevices => match self.list_devices(deadline) {
                 Ok(devices) => WorkerResponse::DevicesListed { devices },
                 Err(code) => WorkerResponse::Error { code },
             },
@@ -148,7 +76,7 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
                         },
                     );
                 };
-                match self.get_device_info(*device_id, device_generation, request.budget_ms.0) {
+                match self.get_device_info(*device_id, device_generation, deadline) {
                     Ok(info) => WorkerResponse::DeviceInfo { info },
                     Err(code) => WorkerResponse::Error { code },
                 }
@@ -164,7 +92,7 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
         response: WorkerResponse,
     ) -> WorkerResponseEnvelope {
         WorkerResponseEnvelope {
-            protocol_version: fido_worker_protocol::WORKER_PROTOCOL_VERSION,
+            protocol_version: WORKER_PROTOCOL_VERSION,
             request_id: request.request_id,
             worker_generation: self.generation,
             device_generation: request.device_generation,
@@ -178,11 +106,11 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
 
     fn list_devices(
         &mut self,
-        budget_ms: u64,
+        deadline: NativeDeadline,
     ) -> Result<Vec<fido_worker_protocol::WorkerDiscoveredDevice>, WorkerErrorCode> {
         let discovered = self
             .backend
-            .manifest(budget_ms)
+            .manifest(deadline)
             .map_err(|error| map_native_error(&error, NativeOperation::Manifest))?;
         if discovered.len() > MAX_DISCOVERED_DEVICES {
             return Err(WorkerErrorCode::MalformedDeviceData);
@@ -268,7 +196,7 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
         &mut self,
         device_id: WorkerDeviceId,
         device_generation: DeviceGeneration,
-        budget_ms: u64,
+        deadline: NativeDeadline,
     ) -> Result<WorkerDeviceInfo, WorkerErrorCode> {
         let Some(index) = self
             .slots
@@ -282,7 +210,7 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
         }
 
         let key = self.slots[index].key.clone();
-        match self.backend.get_info(&key, budget_ms) {
+        match self.backend.get_info(&key, deadline) {
             Ok(info) => Ok(to_worker_device_info(device_id, info)),
             Err(error) => {
                 if error.kind() == NativeErrorKind::Absent {
@@ -346,21 +274,12 @@ fn to_worker_device_info(device_id: WorkerDeviceId, info: NativeDeviceInfo) -> W
     }
 }
 
-#[cfg(feature = "native-libfido2")]
-pub fn spawn_libfido2_worker(
-    generation: WorkerGeneration,
-) -> Result<InProcessWorkerEndpoint, WorkerEndpointError> {
-    InProcessWorkerEndpoint::spawn(fido_libfido2::LibFido2Adapter::new(), generation)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
 
-    use fido_libfido2::{NativeDeviceOption, NativeError};
-    use fido_worker_protocol::{
-        CancellationId, RequestBudgetMs, WORKER_PROTOCOL_VERSION, WorkerRequestId,
-    };
+    use fido_libfido2::NativeDeviceOption;
+    use fido_worker_protocol::{CancellationId, RequestBudgetMs, WorkerRequestId};
 
     use super::*;
 
@@ -372,7 +291,7 @@ mod tests {
     impl NativeDiscoveryBackend for ScriptedBackend {
         fn manifest(
             &mut self,
-            _budget_ms: u64,
+            _deadline: NativeDeadline,
         ) -> Result<Vec<NativeDiscoveredDevice>, NativeError> {
             self.manifests.pop_front().unwrap_or_else(|| Ok(Vec::new()))
         }
@@ -380,7 +299,7 @@ mod tests {
         fn get_info(
             &mut self,
             _key: &NativeDeviceKey,
-            _budget_ms: u64,
+            _deadline: NativeDeadline,
         ) -> Result<NativeDeviceInfo, NativeError> {
             self.infos.pop_front().unwrap_or_else(|| Ok(native_info()))
         }
@@ -560,16 +479,15 @@ mod tests {
     }
 
     #[test]
-    fn dedicated_endpoint_round_trips_read_only_discovery() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn responses_report_quiescence_only_after_the_native_call_returned()
+    -> Result<(), Box<dyn std::error::Error>> {
         let generation = WorkerGeneration(9);
         let backend = ScriptedBackend {
             manifests: VecDeque::from([Ok(vec![native_device(5)?])]),
             infos: VecDeque::new(),
         };
-        let mut endpoint = InProcessWorkerEndpoint::spawn(backend, generation)?;
-        let response =
-            endpoint.exchange(request(generation, 1, WorkerRequest::ListDevices, None))?;
+        let mut engine = WorkerEngine::new(backend, generation);
+        let response = engine.handle(request(generation, 1, WorkerRequest::ListDevices, None));
         assert!(matches!(
             response.response,
             WorkerResponse::DevicesListed { ref devices } if devices.len() == 1
@@ -578,6 +496,77 @@ mod tests {
             response.evidence.execution_quiescence,
             ExecutionQuiescence::Quiescent
         );
+        Ok(())
+    }
+
+    /// Records the deadline each native call receives.
+    #[derive(Default)]
+    struct DeadlineRecorder {
+        manifest_remaining: Option<Duration>,
+        info_remaining: Option<Duration>,
+    }
+
+    impl NativeDiscoveryBackend for DeadlineRecorder {
+        fn manifest(
+            &mut self,
+            deadline: NativeDeadline,
+        ) -> Result<Vec<NativeDiscoveredDevice>, NativeError> {
+            self.manifest_remaining = Some(deadline.remaining());
+            Ok(vec![NativeDiscoveredDevice {
+                key: NativeDeviceKey::from_bytes(vec![1])?,
+                vendor_id: 1,
+                product_id: 2,
+                manufacturer: None,
+                product: None,
+            }])
+        }
+
+        fn get_info(
+            &mut self,
+            _key: &NativeDeviceKey,
+            deadline: NativeDeadline,
+        ) -> Result<NativeDeviceInfo, NativeError> {
+            self.info_remaining = Some(deadline.remaining());
+            Ok(native_info())
+        }
+    }
+
+    #[test]
+    fn request_budget_becomes_the_native_deadline() -> Result<(), Box<dyn std::error::Error>> {
+        let generation = WorkerGeneration(2);
+        let mut engine = WorkerEngine::new(DeadlineRecorder::default(), generation);
+
+        let mut list = request(generation, 1, WorkerRequest::ListDevices, None);
+        list.budget_ms = RequestBudgetMs(5_000);
+        let listed = listed_device(engine.handle(list))
+            .ok_or_else(|| std::io::Error::other("device missing"))?;
+
+        let mut info = request(
+            generation,
+            2,
+            WorkerRequest::GetDeviceInfo {
+                device_id: listed.device_id,
+            },
+            Some(listed.device_generation),
+        );
+        info.budget_ms = RequestBudgetMs(700);
+        engine.handle(info);
+
+        let manifest_remaining = engine
+            .backend
+            .manifest_remaining
+            .ok_or_else(|| std::io::Error::other("manifest not called"))?;
+        let info_remaining = engine
+            .backend
+            .info_remaining
+            .ok_or_else(|| std::io::Error::other("get_info not called"))?;
+
+        // The native call sees (almost) exactly the request budget: not a larger value, and not
+        // a budget carried over from a previous request.
+        assert!(manifest_remaining <= Duration::from_millis(5_000));
+        assert!(manifest_remaining > Duration::from_millis(4_000));
+        assert!(info_remaining <= Duration::from_millis(700));
+        assert!(info_remaining > Duration::from_millis(200));
         Ok(())
     }
 
