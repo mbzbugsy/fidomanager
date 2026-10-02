@@ -115,14 +115,14 @@
 </script>
 
 <svelte:head>
-  <title>FidoManager</title>
+  <title>Fido Manager</title>
 </svelte:head>
 
 <div class="app-frame">
   <header class="topbar">
-    <div class="brand" aria-label="FidoManager">
+    <div class="brand" aria-label="Fido Manager">
       <img class="brand-logo" src={logoUrl} alt="" />
-      <strong>FidoManager</strong>
+      <strong>Fido Manager</strong>
     </div>
 
     <div class="toolbar" role="toolbar" aria-label="Actions">
@@ -182,7 +182,7 @@
           <h3>Discovery unavailable</h3>
           <p>
             The latest authenticator scan did not produce a trustworthy device
-            snapshot. FidoManager cleared the previous view until discovery
+            snapshot. Fido Manager cleared the previous view until discovery
             succeeds again.
           </p>
           <span>Use Scan now to retry.</span>
@@ -281,7 +281,7 @@
           <div class="empty-key" aria-hidden="true"></div>
           <h3>No authenticator connected</h3>
           <p>
-            Insert a USB FIDO2 security key. FidoManager will detect it
+            Insert a USB FIDO2 security key. Fido Manager will detect it
             automatically.
           </p>
           <span>Scanning every second while this alpha is open.</span>
@@ -297,7 +297,7 @@
   </main>
 
   <footer class="app-footer">
-    <span>FidoManager 0.1 alpha</span>
+    <span>Fido Manager 0.1 alpha</span>
     <span class="footer-separator"></span>
     <span>{foundation?.phase ?? 'Milestone 1'}</span>
     <span class="footer-spacer"></span>

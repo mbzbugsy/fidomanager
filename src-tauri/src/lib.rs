@@ -62,7 +62,7 @@ pub fn run() {
     let app = match built {
         Ok(app) => app,
         Err(error) => {
-            eprintln!("failed to build FidoManager: {error}");
+            eprintln!("failed to build Fido Manager: {error}");
             std::process::exit(1);
         }
     };

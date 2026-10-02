@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "FidoManager",
+  "productName": "Fido Manager",
   "version": "0.1.0",
   "identifier": "eu.fidomanager.desktop",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "FidoManager",
+        "title": "Fido Manager",
         "width": 1000,
         "height": 700,
         "minWidth": 720,
