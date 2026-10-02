@@ -22,6 +22,7 @@ native-puat = ["dep:libc"]
 fido-core = { path = "../fido-core" }
 fido-platform = { path = "../fido-platform" }
 libc = { version = "0.2", optional = true }
+sha2 = "0.10"
 
 [[bin]]
 name = "fido-puat-spike"
