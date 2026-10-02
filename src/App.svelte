@@ -121,7 +121,7 @@
   <header class="topbar">
     <div class="brand" aria-label="FidoManager">
       <div class="brand-mark" aria-hidden="true">
-        <span></span><span></span>
+        <img src="/fidomanager-logo.png" alt="" />
       </div>
       <div>
         <strong>FidoManager</strong>
@@ -329,3 +329,23 @@
     <span>No secrets leave this device</span>
   </footer>
 </div>
+
+<style>
+  .brand-mark {
+    overflow: hidden;
+    border: 0;
+    background: transparent;
+  }
+
+  .brand-mark::before,
+  .brand-mark::after {
+    display: none;
+  }
+
+  .brand-mark img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+  }
+</style>
