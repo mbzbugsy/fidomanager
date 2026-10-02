@@ -986,6 +986,7 @@ dependencies = [
  "fido-core",
  "fido-platform",
  "libc",
+ "sha2",
 ]
 
 [[package]]

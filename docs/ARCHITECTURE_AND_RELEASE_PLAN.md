@@ -789,6 +789,8 @@ If text is absent, truncated, invalid, or does not match the hash:
 
 For MVP, if the pinned upstream libfido2 path cannot enumerate credentials using only the authoritative RP hash, hash-only/truncated/mismatching RPs are an explicit `Incomplete/Unsupported` product limitation. Do not add an ad-hoc raw-CBOR path merely to avoid that limitation during MVP. Upstream support may be pursued separately.
 
+M1.5 outcome (`docs/spikes/M1.5-rp-hash-enumeration.md`, libfido2 1.17.0): the public API exposes the authoritative hash (`fido_credman_rp_id_hash_ptr/len`) but `fido_credman_get_dev_rk` takes RP ID text and hashes it itself, so hash-only enumeration is an unsupported product limitation until upstream adds a hash-taking entry point. Credential enumeration continues only for an RP whose text verified against the hash; every other RP is `Incomplete/Unsupported` and its credentials are never listed or individually deletable. CTAP permits authenticators to truncate or omit RP ID text (CTAP 2.2 section 6.8.7), so this is an expected case, not an edge case.
+
 When authenticator metadata exposes resident-credential totals, completeness checking against successfully enumerated credentials is mandatory. Duplicate authoritative RP hashes or inconsistent counts produce incomplete/inconsistent state, never silent deduplication or a false empty result.
 
 Deletion is available only for credential records that were actually listed with an exact credential ID and remain valid in the current enumeration epoch.

@@ -8,6 +8,8 @@
 //! - [`environment`]: refuses to start the harness if `FIDO_DEBUG` would enable libfido2 logging.
 //! - [`retry`]: what retry state can be known before a PIN is submitted and conservative
 //!   interpretation of failures after.
+//! - [`rp_identity`]: authoritative RP ID hash identity, RP text verification, and completeness
+//!   reconciliation for RP-hash enumeration (issue #12).
 //! - [`secret`]: zeroizing, non-printable PIN storage with NUL rejection before the C boundary.
 //! - `native` (feature `native-puat`, libfido2 >= 1.17.0): the libfido2 implementation used by the
 //!   manual hardware harness `fido-puat-spike`.
@@ -18,6 +20,7 @@ pub mod contract;
 pub mod environment;
 pub mod guard;
 pub mod retry;
+pub mod rp_identity;
 pub mod secret;
 
 #[cfg(feature = "native-puat")]

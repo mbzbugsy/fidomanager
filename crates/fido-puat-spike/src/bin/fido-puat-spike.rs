@@ -8,7 +8,8 @@
 //!
 //! Subcommands that need no PIN: `info`, `timeout-probe`.
 //! Subcommands that send the PIN (each asks for typed confirmation first and never retries):
-//! `acquire`, `stale-token`, `replug`, `probe-ro-enforcement`.
+//! `acquire`, `stale-token`, `replug`, `probe-ro-enforcement`, `rp-inventory` (read-only RP and
+//! credential enumeration for the RP-hash spike, structural output only).
 
 use std::ffi::CStr;
 use std::fs::{File, OpenOptions};
@@ -29,6 +30,10 @@ use fido_puat_spike::guard::{DeviceSession, PuatDevice, PuatGuard};
 use fido_puat_spike::native::{self, InfoReport, LibFido2Device};
 use fido_puat_spike::retry::{
     PreSubmission, classify_acquisition_error, classify_token_use, pre_submission,
+};
+use fido_puat_spike::rp_identity::{
+    Completeness, Continuation, CredentialEnumeration, CredentialTotal, MalformedHash, RawRp,
+    RpEntry, RpList, RpTextState, assess,
 };
 use fido_puat_spike::secret::{PinInputError, PinSecret};
 
@@ -61,6 +66,7 @@ fn main() {
         Some("stale-token") => stale_token(&watch, &args[1..]),
         Some("replug") => replug(&watch, &args[1..]),
         Some("probe-ro-enforcement") => probe_ro_enforcement(&watch),
+        Some("rp-inventory") => rp_inventory(&watch, &args[1..]),
         _ => Err(USAGE.to_owned()),
     };
     if let Err(message) = outcome {
@@ -76,7 +82,9 @@ const USAGE: &str = "usage: fido-puat-spike <command>
   stale-token --first ro|cm                acquire, supersede with a second token, reuse the first
   replug --mode ro|cm                      acquire, unplug/replug, test fresh object + old token
   probe-ro-enforcement                     OPT-IN: delete of a random non-existent credential
-                                           under a read-only token (asks before sending)";
+                                           under a read-only token (asks before sending)
+  rp-inventory --mode ro|cm                acquire once, enumerate RPs and credentials READ-ONLY,
+                                           print structure only (counts, lengths, booleans)";
 
 // ---------------------------------------------------------------------------------------------
 // Process watchdog: the harness's stand-in for the worker kill boundary.
@@ -704,6 +712,226 @@ fn acquire_transaction(
             Ok(_) => result("metadata_with_token_after_reopen", 0),
             Err(code) => result("metadata_with_token_after_reopen", code),
         }
+    }
+
+    release(guard)
+}
+
+/// Result of the `rp-inventory` credential enumeration for one RP, kept aligned with the RP list.
+fn enumerate_credentials_for(
+    watch: &NativeCallWatch,
+    guard: &mut PuatGuard<'_, LibFido2Device>,
+    grant: &AuthorizationGrant,
+    entry: &RpEntry,
+) -> Result<CredentialEnumeration, String> {
+    let Continuation::ViaVerifiedText(rp_id) = entry.continuation() else {
+        // No public libfido2 entry point continues from a hash alone, and the harness must not
+        // guess text: nothing is sent for this RP.
+        return Ok(CredentialEnumeration::NotAttempted);
+    };
+    let outcome = guard
+        .use_token(grant, |d| {
+            watch.native("credman_rk", CALL_TIMEOUT_MS, || {
+                d.credman_rk_count_for(rp_id.as_c_str(), CALL_TIMEOUT_MS)
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(match outcome {
+        Ok(count) => CredentialEnumeration::Counted(u64::try_from(count).unwrap_or(u64::MAX)),
+        Err(code) => CredentialEnumeration::Failed { code },
+    })
+}
+
+/// CTAP2_ERR_NO_CREDENTIALS: what a device with no resident credentials answers to
+/// enumerateRPsBegin.
+const FIDO_ERR_NO_CREDENTIALS: i32 = 0x2e;
+
+fn rp_inventory(watch: &NativeCallWatch, args: &[String]) -> HarnessResult {
+    if args.iter().any(|arg| arg == "--rp-id" || arg == "--uv") {
+        return Err(
+            "rp-inventory takes only --mode ro|cm (an RP-scoped token cannot list RPs)".to_owned(),
+        );
+    }
+    let request = parse_mode(args, "--mode")?;
+    let target = single_device(watch)?;
+    let mut device = open_fresh(watch, &target.path)?;
+    let info = read_info(watch, &mut device)?;
+    let planned = plan_or_explain(&capabilities(&info), &request, VerificationMethod::Pin)?;
+
+    let announcement = format!(
+        "This sends your PIN ONCE to request {:?} (permission {:#x}). If the grant is not \
+         read-only (the Thetis has no perCredMgmtRO, so this is ordinary credential management) \
+         the token the authenticator issues COULD delete credentials, although this command only \
+         issues read requests: getCredsMetadata, enumerateRPs, enumerateCredentials. It prints \
+         ONLY counts, lengths and true/false values: no RP IDs, RP names, user names, credential \
+         IDs, hashes, PIN or token bytes. RP and credential data is read into memory by libfido2, \
+         compared in memory, and freed; nothing is written to disk. The token is cleared at the \
+         end. A wrong PIN consumes one retry and there is no automatic retry. Nothing is \
+         deleted or changed.",
+        planned.kind(),
+        planned.permissions()
+    );
+    let Some(pin) = gate_and_read_pin(watch, &mut device, &announcement)? else {
+        println!("declined; nothing was sent");
+        return Ok(());
+    };
+
+    let mut session = DeviceSession::open(device, DeviceGeneration(1))
+        .map_err(|error| format!("fresh object refused: {error:?}"))?;
+    let failure = match watch.native("get_puat", CALL_TIMEOUT_MS, || {
+        session.acquire(&planned, Some(&pin), CALL_TIMEOUT_MS)
+    }) {
+        Ok((guard, grant)) => {
+            drop(pin); // wiped; not needed again
+            inventory_transaction(watch, guard, &grant)?;
+            None
+        }
+        Err(error) => Some(error),
+    };
+    if let Some(error) = failure {
+        report_acquire_failure(watch, &mut session, &error);
+        return Ok(());
+    }
+    let after = session.without_token(|d| (d.attached_token_len(), d.token_pointer_is_null()));
+    println!("RESULT step=after_release token_len_and_ptr_null={after:?}");
+    Ok(())
+}
+
+fn inventory_transaction(
+    watch: &NativeCallWatch,
+    mut guard: PuatGuard<'_, LibFido2Device>,
+    grant: &AuthorizationGrant,
+) -> HarnessResult {
+    println!(
+        "RESULT step=acquire outcome=ok grant={:?} token_len={}",
+        grant.kind(),
+        guard.device_for_experiment().attached_token_len()
+    );
+
+    // getCredsMetadata: the authenticator's own credential count.
+    let reported_existing = match guard
+        .use_token(grant, |d| {
+            watch.native("credman_metadata", CALL_TIMEOUT_MS, || {
+                d.credman_metadata(CALL_TIMEOUT_MS)
+            })
+        })
+        .map_err(|e| e.to_string())?
+    {
+        Ok((existing, remaining)) => {
+            println!(
+                "RESULT step=metadata code=0 metadata_existing={existing} rk_remaining={remaining}"
+            );
+            Some(existing)
+        }
+        Err(code) => {
+            result("metadata", code);
+            None
+        }
+    };
+
+    // enumerateRPs: copy hash + text out for the identity contract.
+    let listed = guard
+        .use_token(grant, |d| {
+            watch.native("credman_rp_list", CALL_TIMEOUT_MS, || {
+                d.credman_rp_list(CALL_TIMEOUT_MS)
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    let owned = match listed {
+        Ok(list) => list,
+        Err(FIDO_ERR_NO_CREDENTIALS) => {
+            println!(
+                "RESULT step=enumerate_rps code=0x2e name=NO_CREDENTIALS rp_count=0 note=device_reports_no_resident_credentials"
+            );
+            Vec::new()
+        }
+        Err(code) => {
+            result("enumerate_rps", code);
+            println!("No RP list; stopping without a completeness claim.");
+            return release(guard);
+        }
+    };
+    let raw: Vec<RawRp<'_>> = owned
+        .iter()
+        .map(|rp| RawRp {
+            hash: rp.hash.as_deref(),
+            text: rp.text.as_deref(),
+        })
+        .collect();
+    let list = RpList::from_raw(&raw);
+
+    // Structural evidence only. Lengths and booleans, never content.
+    let (mut absent, mut wrong_len, mut verified, mut mismatch, mut malformed, mut unavailable) =
+        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    let mut hash_lens = Vec::new();
+    for (entry, source) in list.entries().iter().zip(&owned) {
+        hash_lens.push(source.hash.as_ref().map(Vec::len));
+        match entry {
+            RpEntry::MalformedHash(MalformedHash::Absent) => absent += 1,
+            RpEntry::MalformedHash(MalformedHash::WrongLength { .. }) => wrong_len += 1,
+            RpEntry::Identified(record) => match record.text() {
+                RpTextState::VerifiedText(_) => verified += 1,
+                RpTextState::TextHashMismatch => mismatch += 1,
+                RpTextState::TextMalformed => malformed += 1,
+                RpTextState::TextUnavailable => unavailable += 1,
+            },
+        }
+    }
+    let text_present = verified + mismatch + malformed;
+    println!(
+        "RESULT step=enumerate_rps code=0 rp_count={} rp_hash_len={:?} rp_hash_absent={absent} \
+         rp_hash_wrong_len={wrong_len} duplicate_hashes={} rp_text_present={text_present} \
+         rp_text_hash_matches={verified} rp_text_hash_mismatch={mismatch} \
+         rp_text_malformed={malformed} rp_text_unavailable={unavailable}",
+        list.entries().len(),
+        hash_lens,
+        list.issues()
+            .iter()
+            .filter(|issue| matches!(
+                issue,
+                fido_puat_spike::rp_identity::RpListIssue::DuplicateHash { .. }
+            ))
+            .count(),
+    );
+
+    // enumerateCredentials for each RP whose text verified; every other RP is blocked, not empty.
+    let mut credentials = Vec::with_capacity(list.entries().len());
+    for (index, entry) in list.entries().iter().enumerate() {
+        let outcome = enumerate_credentials_for(watch, &mut guard, grant, entry)?;
+        match outcome {
+            CredentialEnumeration::Counted(count) => {
+                println!(
+                    "RESULT step=enumerate_rks rp_index={index} code=0 credential_count={count}"
+                );
+            }
+            CredentialEnumeration::Failed { code } => {
+                result(&format!("enumerate_rks_rp_{index}"), code);
+            }
+            CredentialEnumeration::NotAttempted => {
+                println!(
+                    "RESULT step=enumerate_rks rp_index={index} attempted=false reason={:?}",
+                    entry.continuation()
+                );
+            }
+        }
+        credentials.push(outcome);
+    }
+
+    let assessment = assess(&list, &credentials, reported_existing);
+    let enumerated = match assessment.credentials {
+        CredentialTotal::Exact(total) | CredentialTotal::AtLeast(total) => total,
+    };
+    println!(
+        "RESULT step=reconcile metadata_existing={reported_existing:?} credential_count={enumerated} \
+         counts_reconcile={} completeness={:?} credentials={:?} incomplete={:?} inconsistent={:?}",
+        reported_existing == Some(enumerated),
+        assessment.completeness,
+        assessment.credentials,
+        assessment.incomplete,
+        assessment.inconsistent,
+    );
+    if assessment.completeness != Completeness::Complete {
+        println!("NOTE: inspection is NOT complete; the total above is a lower bound only.");
     }
 
     release(guard)

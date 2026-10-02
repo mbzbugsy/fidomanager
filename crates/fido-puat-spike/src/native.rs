@@ -7,7 +7,8 @@
 //!   them (libfido2 ignores the PIN when a token is attached, and would otherwise acquire a fresh
 //!   full-`cm` token per call);
 //! - token bytes are never read: only `fido_dev_puat_len` and whether `fido_dev_puat_ptr` is NULL;
-//! - RP IDs and user names returned by the authenticator are never printed, only counts.
+//! - RP IDs, RP names and user names returned by the authenticator are never printed, only counts
+//!   and booleans; the RP ID hash and text are copied out only to be compared in memory.
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
@@ -21,6 +22,13 @@ const MAX_DEVICES: usize = 16;
 const MAX_PATH_BYTES: usize = 4_096;
 const MAX_TEXT_BYTES: usize = 256;
 const MAX_ITEMS: usize = 128;
+/// Largest RP list the spike will copy; more is reported as an error, never truncated silently.
+const MAX_RPS: usize = 512;
+/// Hash bytes copied per RP. Anything longer than 32 is malformed, so 65 bytes are enough to keep
+/// the "wrong length" verdict without copying an attacker-chosen size.
+const MAX_HASH_COPY: usize = 65;
+/// Local (non-libfido2) error: the RP list exceeded [`MAX_RPS`].
+pub const ERR_LOCAL_TOO_MANY_RPS: c_int = -10;
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 compile_error!("native-puat is supported only on macOS and Linux");
@@ -99,6 +107,9 @@ unsafe extern "C" {
     fn fido_credman_rp_free(rp: *mut *mut c_void);
     fn fido_credman_get_dev_rp(device: *mut c_void, rp: *mut c_void, pin: *const c_char) -> c_int;
     fn fido_credman_rp_count(rp: *const c_void) -> usize;
+    fn fido_credman_rp_id(rp: *const c_void, index: usize) -> *const c_char;
+    fn fido_credman_rp_id_hash_len(rp: *const c_void, index: usize) -> usize;
+    fn fido_credman_rp_id_hash_ptr(rp: *const c_void, index: usize) -> *const u8;
     fn fido_credman_rk_new() -> *mut c_void;
     fn fido_credman_rk_free(rk: *mut *mut c_void);
     fn fido_credman_get_dev_rk(
@@ -205,6 +216,17 @@ pub struct InfoReport {
     pub supports_uv: bool,
     pub has_uv: bool,
     pub supports_credman: bool,
+}
+
+/// One RP as libfido2 reported it, copied out of the `fido_credman_rp_t` before it is freed.
+/// Holds account metadata: never print or log it.
+pub struct OwnedRawRp {
+    /// `None` when `fido_credman_rp_id_hash_ptr` was `NULL`. At most 65 bytes are copied.
+    pub hash: Option<Vec<u8>>,
+    /// `None` when `fido_credman_rp_id` was `NULL` (distinct from an empty string). Scanned up to
+    /// `MAX_TEXT_BYTES + 1`; a longer string is returned truncated at that bound, which the
+    /// contract then rejects as malformed.
+    pub text: Option<Vec<u8>>,
 }
 
 /// One `fido_dev_t`. Created fresh for every session; freed (which also wipes any token) on drop.
@@ -419,8 +441,36 @@ impl LibFido2Device {
         outcome
     }
 
+    /// enumerateRPsBegin/GetNextRP with `pin = NULL`, copying each RP's hash and text out for the
+    /// identity contract. Fails (rather than truncates) above `MAX_RPS` entries.
+    pub fn credman_rp_list(&mut self, timeout_ms: c_int) -> Result<Vec<OwnedRawRp>, c_int> {
+        self.set_timeout(timeout_ms)?;
+        // SAFETY: allocation checked; freed below.
+        let mut rp = unsafe { fido_credman_rp_new() };
+        if rp.is_null() {
+            return Err(-9);
+        }
+        // SAFETY: live objects; NULL PIN so only the attached token authorizes.
+        let result = unsafe { fido_credman_get_dev_rp(self.ptr, rp, ptr::null()) };
+        let outcome = if result == FIDO_OK {
+            // SAFETY: populated rp object, live until freed below; everything is copied here.
+            unsafe { copy_rp_list(rp) }
+        } else {
+            Err(result)
+        };
+        // SAFETY: allocated above.
+        unsafe { fido_credman_rp_free(ptr::addr_of_mut!(rp)) };
+        outcome
+    }
+
     /// enumerateCredentialsBegin/GetNext for one RP with `pin = NULL`. Returns the count only.
     pub fn credman_rk_count(&mut self, rp: &RpId, timeout_ms: c_int) -> Result<usize, c_int> {
+        self.credman_rk_count_for(rp.as_c_str(), timeout_ms)
+    }
+
+    /// As [`Self::credman_rk_count`] for RP ID text already verified against the authoritative
+    /// hash (libfido2 SHA-256s the text itself; there is no hash-taking entry point).
+    pub fn credman_rk_count_for(&mut self, rp: &CStr, timeout_ms: c_int) -> Result<usize, c_int> {
         self.set_timeout(timeout_ms)?;
         // SAFETY: allocation checked; freed below.
         let mut rk = unsafe { fido_credman_rk_new() };
@@ -428,8 +478,7 @@ impl LibFido2Device {
             return Err(-9);
         }
         // SAFETY: live objects; RP ID NUL-terminated and validated; NULL PIN.
-        let result =
-            unsafe { fido_credman_get_dev_rk(self.ptr, rp.as_c_str().as_ptr(), rk, ptr::null()) };
+        let result = unsafe { fido_credman_get_dev_rk(self.ptr, rp.as_ptr(), rk, ptr::null()) };
         // SAFETY: rk is live.
         let outcome = if result == FIDO_OK {
             Ok(unsafe { fido_credman_rk_count(rk) })
@@ -500,6 +549,53 @@ impl Drop for LibFido2Device {
         // SAFETY: allocated by fido_dev_new, not yet freed. fido_dev_free also wipes any token.
         unsafe { fido_dev_free(ptr::addr_of_mut!(self.ptr)) };
     }
+}
+
+/// Copies every RP out of a populated `fido_credman_rp_t`.
+///
+/// # Safety
+/// `rp` must be a live, populated `fido_credman_rp_t`.
+unsafe fn copy_rp_list(rp: *const c_void) -> Result<Vec<OwnedRawRp>, c_int> {
+    // SAFETY (whole function): `rp` is live; indices are below `fido_credman_rp_count`, which
+    // never exceeds the allocated entries libfido2's accessors bound-check; hash and text are
+    // copied with explicit bounds before the object is freed.
+    unsafe {
+        let count = fido_credman_rp_count(rp);
+        if count > MAX_RPS {
+            return Err(ERR_LOCAL_TOO_MANY_RPS);
+        }
+        let mut list = Vec::with_capacity(count);
+        for index in 0..count {
+            let hash_ptr = fido_credman_rp_id_hash_ptr(rp, index);
+            let hash = if hash_ptr.is_null() {
+                None
+            } else {
+                let len = fido_credman_rp_id_hash_len(rp, index).min(MAX_HASH_COPY);
+                Some(std::slice::from_raw_parts(hash_ptr, len).to_vec())
+            };
+            let text = bounded_bytes(fido_credman_rp_id(rp, index), MAX_TEXT_BYTES);
+            list.push(OwnedRawRp { hash, text });
+        }
+        Ok(list)
+    }
+}
+
+/// Bounded copy of a libfido2-owned C string as bytes: `None` on NULL, `Some(empty)` for an empty
+/// string, and `max_bytes + 1` bytes (no terminator seen) for anything longer.
+unsafe fn bounded_bytes(pointer: *const c_char, max_bytes: usize) -> Option<Vec<u8>> {
+    if pointer.is_null() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    for offset in 0..=max_bytes {
+        // SAFETY: libfido2 promises a NUL-terminated string; the scan stops at max_bytes + 1.
+        let byte = unsafe { *pointer.cast::<u8>().add(offset) };
+        if byte == 0 {
+            return Some(bytes);
+        }
+        bytes.push(byte);
+    }
+    Some(bytes)
 }
 
 /// Bounded copy of a libfido2-owned C string; `None` on NULL, overlong, or empty.
