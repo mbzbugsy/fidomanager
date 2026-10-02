@@ -116,6 +116,9 @@ impl DiscoveryError {
                 | Self::DeviceIdentityViolation
                 | Self::TooManyDevices
                 | Self::DuplicateDevice
+                | Self::Worker(
+                    WorkerErrorCode::ProtocolMismatch | WorkerErrorCode::WorkerUnavailable
+                )
         )
     }
 }
@@ -142,6 +145,15 @@ struct DeviceIdentityHistory {
     vendor_id: u16,
     product_id: u16,
     present: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CachedDeviceInfo {
+    worker_device_id: WorkerDeviceId,
+    device_generation: fido_core::DeviceGeneration,
+    vendor_id: u16,
+    product_id: u16,
+    info: WorkerDeviceInfo,
 }
 
 #[derive(Debug, Default)]
@@ -276,6 +288,7 @@ pub struct DiscoveryCoordinator<E> {
     worker_state: WorkerState,
     policy: DiscoveryPolicy,
     registry: DeviceRegistry,
+    info_cache: Vec<CachedDeviceInfo>,
     next_request_id: u64,
     next_cancellation_id: u64,
     next_enumeration_epoch: u64,
@@ -293,6 +306,7 @@ impl<E: WorkerEndpoint> DiscoveryCoordinator<E> {
             worker_state: WorkerState::Usable,
             policy: policy.validate()?,
             registry: DeviceRegistry::new(),
+            info_cache: Vec::new(),
             next_request_id: 1,
             next_cancellation_id: 1,
             next_enumeration_epoch: 1,
@@ -338,6 +352,7 @@ impl<E: WorkerEndpoint> DiscoveryCoordinator<E> {
         self.worker_generation = worker_generation;
         self.worker_state = WorkerState::Usable;
         self.registry.reset_for_worker();
+        self.info_cache.clear();
         Ok(())
     }
 
@@ -356,11 +371,25 @@ impl<E: WorkerEndpoint> DiscoveryCoordinator<E> {
 
         validate_discovered_devices(&discovered)?;
         let registered = self.registry.reconcile(&discovered)?;
+        self.prune_info_cache(&discovered);
         let epoch = self.mint_enumeration_epoch()?;
         let mut snapshots = Vec::with_capacity(registered.len());
 
         for (device, handle) in registered {
             let mut snapshot = base_snapshot(&device, handle);
+
+            if let Some(info) = self.cached_device_info(&device) {
+                let discovery_metadata_was_malformed =
+                    snapshot.read_status == DeviceReadStatus::Malformed;
+                apply_device_info(&mut snapshot, info);
+                if !discovery_metadata_was_malformed {
+                    snapshot.read_status = DeviceReadStatus::Ready;
+                    snapshot.freshness = ViewFreshness::Fresh;
+                }
+                snapshots.push(snapshot);
+                continue;
+            }
+
             let info_response = self.exchange_read_only(
                 WorkerRequest::GetDeviceInfo {
                     device_id: device.device_id,
@@ -378,6 +407,7 @@ impl<E: WorkerEndpoint> DiscoveryCoordinator<E> {
                     if validate_device_info(&info).is_ok() {
                         let discovery_metadata_was_malformed =
                             snapshot.read_status == DeviceReadStatus::Malformed;
+                        self.cache_device_info(&device, &info);
                         apply_device_info(&mut snapshot, info);
                         if !discovery_metadata_was_malformed {
                             snapshot.read_status = DeviceReadStatus::Ready;
@@ -404,6 +434,52 @@ impl<E: WorkerEndpoint> DiscoveryCoordinator<E> {
             enumeration_epoch: epoch,
             devices: snapshots,
         })
+    }
+
+    fn cached_device_info(
+        &self,
+        device: &WorkerDiscoveredDevice,
+    ) -> Option<WorkerDeviceInfo> {
+        self.info_cache
+            .iter()
+            .find(|cached| {
+                cached.worker_device_id == device.device_id
+                    && cached.device_generation == device.device_generation
+                    && cached.vendor_id == device.vendor_id
+                    && cached.product_id == device.product_id
+            })
+            .map(|cached| cached.info.clone())
+    }
+
+    fn cache_device_info(&mut self, device: &WorkerDiscoveredDevice, info: &WorkerDeviceInfo) {
+        if let Some(cached) = self.info_cache.iter_mut().find(|cached| {
+            cached.worker_device_id == device.device_id
+                && cached.device_generation == device.device_generation
+                && cached.vendor_id == device.vendor_id
+                && cached.product_id == device.product_id
+        }) {
+            cached.info = info.clone();
+            return;
+        }
+
+        self.info_cache.push(CachedDeviceInfo {
+            worker_device_id: device.device_id,
+            device_generation: device.device_generation,
+            vendor_id: device.vendor_id,
+            product_id: device.product_id,
+            info: info.clone(),
+        });
+    }
+
+    fn prune_info_cache(&mut self, discovered: &[WorkerDiscoveredDevice]) {
+        self.info_cache.retain(|cached| {
+            discovered.iter().any(|device| {
+                cached.worker_device_id == device.device_id
+                    && cached.device_generation == device.device_generation
+                    && cached.vendor_id == device.vendor_id
+                    && cached.product_id == device.product_id
+            })
+        });
     }
 
     fn exchange_read_only(
@@ -811,6 +887,23 @@ mod tests {
                 device_generation: DeviceGeneration(9),
             })
         );
+        Ok(())
+    }
+
+    #[test]
+    fn cached_get_info_is_not_reissued_for_same_generation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut coordinator = coordinator(vec![fake_device(1)])?;
+
+        let first = coordinator.refresh()?;
+        assert_eq!(first.devices[0].read_status, DeviceReadStatus::Ready);
+        assert_eq!(coordinator.endpoint.exchange_count, 2);
+
+        let second = coordinator.refresh()?;
+        assert_eq!(second.devices[0].read_status, DeviceReadStatus::Ready);
+        assert_eq!(second.devices[0].aaguid, first.devices[0].aaguid);
+        assert_eq!(coordinator.endpoint.exchange_count, 3);
+
         Ok(())
     }
 
