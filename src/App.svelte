@@ -52,7 +52,10 @@
   }
 
   function friendlyStatus(status: string) {
-    return status.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase();
+    return status
+      .replace(/_/g, ' ')
+      .replace(/([a-z])([A-Z])/g, '$1 $2')
+      .toLowerCase();
   }
 
   async function loadFoundation() {
@@ -79,6 +82,7 @@
         second: '2-digit',
       });
     } catch (error) {
+      snapshot = null;
       discoveryError =
         typeof error === 'string' ? error : 'Native discovery is unavailable.';
     } finally {
@@ -197,7 +201,18 @@
         >
       </div>
 
-      {#if snapshot && snapshot.devices.length > 0}
+      {#if discoveryError}
+        <div class="empty-state">
+          <div class="empty-key" aria-hidden="true"></div>
+          <h3>Discovery unavailable</h3>
+          <p>
+            The latest authenticator scan did not produce a trustworthy device
+            snapshot. FidoManager cleared the previous view until discovery
+            succeeds again.
+          </p>
+          <span>Use Scan now to retry.</span>
+        </div>
+      {:else if snapshot && snapshot.devices.length > 0}
         <div class="device-grid">
           {#each snapshot.devices as device (device.handle)}
             <article class="device-card">
