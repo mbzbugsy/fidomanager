@@ -152,6 +152,17 @@ pub enum ViewFreshness {
     Incomplete,
 }
 
+impl ViewFreshness {
+    /// Stable renderer wire name matching the enum's Serde snake_case representation.
+    pub const fn as_wire_name(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Stale => "stale",
+            Self::Incomplete => "incomplete",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryAdmission {
@@ -183,6 +194,22 @@ pub enum DeviceReadStatus {
     Unavailable,
     Malformed,
     Error,
+}
+
+impl DeviceReadStatus {
+    /// Stable renderer wire name matching the enum's Serde snake_case representation.
+    pub const fn as_wire_name(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Busy => "busy",
+            Self::AccessDenied => "access_denied",
+            Self::TimedOut => "timed_out",
+            Self::Unsupported => "unsupported",
+            Self::Unavailable => "unavailable",
+            Self::Malformed => "malformed",
+            Self::Error => "error",
+        }
+    }
 }
 
 /// One authenticator option exactly as reported by GetInfo, after native-boundary validation.
@@ -250,6 +277,18 @@ mod tests {
         ] {
             assert!(serde_json::from_str::<CredentialHandle>(encoded).is_err());
         }
+    }
+
+    #[test]
+    fn device_status_wire_names_match_serde_contract() {
+        assert_eq!(DeviceReadStatus::Ready.as_wire_name(), "ready");
+        assert_eq!(
+            DeviceReadStatus::AccessDenied.as_wire_name(),
+            "access_denied"
+        );
+        assert_eq!(DeviceReadStatus::TimedOut.as_wire_name(), "timed_out");
+        assert_eq!(ViewFreshness::Fresh.as_wire_name(), "fresh");
+        assert_eq!(ViewFreshness::Incomplete.as_wire_name(), "incomplete");
     }
 
     #[test]
