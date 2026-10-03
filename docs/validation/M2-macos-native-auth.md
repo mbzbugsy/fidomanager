@@ -182,10 +182,11 @@ is not a portable or cryptographic session-attestation API.
 
 [UNRESOLVED] PerCredMgmtRO/legacy hardware and built-in UV remain outside this single-key evidence.
 
-[INFERENCE] The required macOS M2 hardware gate passed. This foundation is ready for independent
-review; it is not a merge approval. Native per-key selection and transient result presentation
-were compiled/checked after the initial hardware observations; secret transport, native
-acquisition/cleanup and exact-grant validation retain the same bounded transaction design.
+[INFERENCE] The required macOS M2 hardware gate passed. The subsequent completed independent
+review and lifecycle evidence are recorded below; this is not merge approval. Native per-key
+selection and transient result presentation were compiled/checked after the initial hardware
+observations; secret transport, native acquisition/cleanup and exact-grant validation retain the
+same bounded transaction design.
 
 [MACOS] The operator reported visible cancellation feedback; a supplied screenshot independently
 showed successful validation feedback on the reference Thetis (AAGUID matching M1.5). The
@@ -212,7 +213,14 @@ were `(1, 1, 1)` and `(2, 2, 1)`. The operator confirmed that `PIN check passed`
 only on the selected key. Disconnect/reconnect tag clearing follows the inspected registry
 correlation/pruning design and deterministic tests; it was not separately observed on hardware.
 
-[UNRESOLVED] Independent security/architecture review is required before merge.
+[SOURCE] Independent security/architecture review is complete for runtime head
+`6c0a9e837ec5ae2d1b159c33fc98de4841ac8de0`. Claude and Gemini both returned
+`APPROVE WITH NON-BLOCKING FOLLOW-UPS` after the F1 reservation-unwind, F4 parent cleanup-invariant,
+and F6 capability-selection fixes; neither retained a blocking code finding. Remaining reviewer
+findings are non-blocking follow-ups. The subsequent
+`0aef04937e50c9b8cdd1b93dc7dd4bf31b06fdd4` commit changed documentation only to record final
+lifecycle evidence. The empirical lifecycle gate is satisfied for the tested macOS M2 reference
+path; this does not imply Windows or Linux M2 completion.
 
 ## Focused M2 presentation and identity follow-up
 
