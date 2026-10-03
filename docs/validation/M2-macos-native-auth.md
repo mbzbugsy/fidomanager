@@ -175,10 +175,12 @@ no PIN or PUAT bytes were exposed. Computer-use capture was denied by macOS TCC;
 permission was changed. The operator's initial report of no dialog was subsequently resolved
 by the successful native workflows.
 
-[UNRESOLVED] Real workstation lock/sleep delivery must be distinguished from deterministic epoch
-revocation. The distributed screen-lock notification is platform-specific and is not a portable
-or cryptographic session-attestation API. No platform lifecycle success is claimed without
-observation. PerCredMgmtRO/legacy hardware and built-in UV remain outside this single-key evidence.
+[MACOS] Real workstation lock/sleep delivery was subsequently observed in the separate active-workflow
+runs recorded under "Final empirical macOS lifecycle evidence" below; this evidence is distinct from
+deterministic epoch revocation. The distributed screen-lock notification is platform-specific and
+is not a portable or cryptographic session-attestation API.
+
+[UNRESOLVED] PerCredMgmtRO/legacy hardware and built-in UV remain outside this single-key evidence.
 
 [INFERENCE] The required macOS M2 hardware gate passed. This foundation is ready for independent
 review; it is not a merge approval. Native per-key selection and transient result presentation
@@ -285,7 +287,90 @@ typecheck (zero errors/warnings) and production build passed using Node 24.19.0 
 The existing frontend test command passed with **no test files**; no frontend test coverage is
 claimed. `git diff --check` passed. These checks establish deterministic/source evidence for the
 label follow-up; no new native UI observation or hardware authentication workflow is claimed.
-The existing independent-review and real lock/sleep-delivery merge gates remain unresolved.
+At this presentation follow-up, independent review and real lock/sleep delivery remained unresolved.
+The later empirical evidence below satisfies the lifecycle delivery gate for the tested macOS path.
+
+## Final empirical macOS lifecycle evidence
+
+[MACOS] [HARDWARE] Follow-up observations on 2026-10-03–04 (Europe/Stockholm) tested production
+head `6c0a9e837ec5ae2d1b159c33fc98de4841ac8de0` on the macOS workstation and reference Thetis
+path described above. These observations came from separate runs, including a later focused
+post-lock admission reproduction; they are not one continuous successful test sequence.
+No PIN was submitted in these lifecycle tests. Temporary local diagnostics recorded nonsecret
+event/stage categories, epoch-advancement and cleanup booleans, and relative timing. All temporary
+diagnostics/helpers were removed and the original executable rebuilt after testing. Each run
+ended with runtime source restored exactly to the tested HEAD and a clean checkout.
+
+### A — active-app screen lock: PASSED
+
+[MACOS] [HARDWARE] The production native PIN sheet was active when the Mac locked.
+`screen_lock` reached the production callback while the workflow was active, before unlock or
+the prompt timeout, and advanced the authority epoch. The workflow returned `Revoked`, never
+`Validated`; prompt teardown and worker quiescence/reap were proven. A fresh workflow opened
+afterward. No PIN was submitted.
+
+Representative timing from one run, relative to sheet opening:
+
+`+2.48s lock → +2.59s lifecycle callback / epoch advancement → +2.88s teardown + Revoked → +6.10s unlock`
+
+### B — inactive-app screen lock: PASSED for lifecycle delivery/revocation
+
+[MACOS] [HARDWARE] A fresh application process opened an active native PIN sheet, then
+FidoManager became inactive before lock. The production `screen_lock` callback arrived while
+the app remained inactive and the workflow was active, before unlock or reactivation. Distributed
+notification delivery was **not deferred until app reactivation in this observed run**.
+The epoch advanced, the workflow returned `Revoked`, and prompt teardown and worker quiescence
+were proven. No PIN was submitted.
+
+Representative timing from this active-workflow run, relative to sheet opening:
+
+`+6.52s app inactive → +9.98s lifecycle callback → +10.25s Revoked/cleanup → +14.74s unlock → +38.35s app reactivation`
+
+[MACOS] The first post-lock fresh-sheet attempt in that run was reported not to open, but no
+backend workflow or admission-error log was captured. Its cause was unconfirmed; no specific
+admission failure or cooldown explanation was established from that capture.
+
+[MACOS] **Supplemental post-lock admission/recovery evidence, from a later separate fresh-process
+reproduction:** temporary stage diagnostics traced native menu click → `authentication::start()`
+→ target resolution → `AuthenticationAuthority::reserve()` → discovery refresh → presenter.
+The menu click reached the backend; `start()` entered; target resolution and `reserve()` succeeded;
+discovery refresh succeeded with the selected target still valid; the presenter was reached;
+and a fresh native sheet opened approximately 0.39 s after the click, visually confirmed by the
+operator. No failing stage, separate menu/UI defect, or SensitiveWorkflowGate recovery defect
+reproduced. This proves successful post-lock admission in that reproduction; it does not identify
+the cause of the earlier reported failure.
+
+The focused reproduction's initial workflow had already returned `TimedOut` before lock.
+It is supplemental evidence for **post-lock admission/recovery only**, and is **not additional
+active-workflow revocation evidence**. B's active revocation evidence comes from the earlier
+inactive-app run above.
+
+### C — system sleep/wake: PASSED
+
+[MACOS] [HARDWARE] Another fresh application process had an active production native PIN sheet
+when the operator put the Mac to sleep. The production NSWorkspace sleep lifecycle callback
+(`NSWorkspaceWillSleepNotification`) was delivered before wake while the workflow was active
+and advanced the epoch; `screen_lock` also arrived during the transition. The workflow returned
+`Revoked`, never `Validated`, with prompt teardown and worker quiescence/reap proven.
+A separate read-only observer supplied the wake marker. A fresh workflow opened after wake,
+confirmed by both native presentation diagnostics and the operator. No PIN was submitted.
+
+Representative timing from this run, relative to sheet opening:
+
+`+4.27s sleep callback → +4.46s Revoked/cleanup → +11.32s wake marker`
+
+### Lifecycle merge-gate conclusion
+
+[INFERENCE] The real macOS lifecycle delivery merge gate is satisfied for the tested M2 macOS
+reference path: active-app lock, inactive-app lock, and system sleep/wake. The separate runs
+prove observed production callback delivery and fail-closed active-workflow revocation,
+prompt teardown, and worker quiescence on this tested workstation. Supplemental post-lock
+admission succeeded without a reproduced menu/UI or gate recovery defect.
+
+This conclusion does not generalize to all macOS versions, Linux, Windows, other grant kinds,
+or built-in UV. The earlier unexplained fresh-sheet report is not retroactively assigned a
+cause, and the supplemental `TimedOut` reproduction is not counted as active revocation.
+Satisfying this lifecycle gate is not merge approval; PR #21 remains Draft.
 
 ## Exact changed files
 
