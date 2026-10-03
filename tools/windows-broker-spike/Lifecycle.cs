@@ -2,6 +2,8 @@ namespace WindowsBrokerSpike;
 
 // Deterministic model used by the harness, not a replacement for fido-service or its permits.
 // One launch, one retained client, one request. Reconnect never adopts the old authority.
+// Client GUID/request ID checks are model correlation, not process authentication or independent
+// anti-replay proof: runtime initializes this client GUID from the already OS-bound request.
 internal sealed class Lifecycle(Guid broker, Guid client)
 {
     private Request? active;

@@ -145,6 +145,8 @@ internal static class Runtime
         });
         if (impersonated != client.Identity.Sid) throw new InvalidDataException("pipe impersonation SID mismatch");
         Program.Log("IPC", new { ConnectedPeer = peer.Evidence(), ImpersonatedSidMatchesClient = impersonated == client.Identity.Sid });
+        // request.Client is correlation data from this OS-bound peer, not an independently trusted
+        // client generation. Authentication relies on the retained launch/pipe/token checks above.
         Lifecycle state = new(generation, request.Client); state.Begin(request);
         using CancellationTokenSource lost = new();
         using CancellationTokenSource watchStop = new();

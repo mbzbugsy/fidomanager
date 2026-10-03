@@ -26,9 +26,9 @@ internal static class Program
                 Frames = new System.Diagnostics.StackTrace(e, true).GetFrames()
                     .Where(f => f.GetMethod()?.DeclaringType?.Namespace is string ns
                         && (ns == "WindowsBrokerSpike" || ns == "System.IO.Pipes"))
+                    .Take(8)
                     .Select(f => new { Method = f.GetMethod()?.DeclaringType?.Name + "." + f.GetMethod()?.Name, Line = f.GetFileLineNumber() }),
-                NativeError = e is System.ComponentModel.Win32Exception native ? (int?)native.NativeErrorCode : null,
-                e.Message
+                NativeError = e is System.ComponentModel.Win32Exception native ? (int?)native.NativeErrorCode : null
             });
             return 1;
         }
@@ -41,14 +41,14 @@ internal static class Program
         Directory.CreateDirectory(directory);
         string path = Path.Combine(directory, $"{Environment.ProcessId}-{Guid.NewGuid():N}.log");
         evidence = new StreamWriter(new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read)) { AutoFlush = true };
-        Console.Error.WriteLine("[WINDOWS-MANAGED][WINDOWS] Evidence file: " + path);
+        Console.Error.WriteLine("[WINDOWS] Evidence file: " + path);
     }
     internal static string RedactDescriptor(string descriptor)
         => System.Text.RegularExpressions.Regex.Replace(descriptor, @"S-1-(?:\d+-)*\d+", "<principal-sid>");
 
     internal static void Log(string label, object value)
     {
-        string context = OperatingSystem.IsWindows() ? "[WINDOWS-MANAGED]" : "";
+        string context = OperatingSystem.IsWindows() ? "[WINDOWS]" : "";
         string line = $"{context}[{label}] {JsonSerializer.Serialize(new { Utc = DateTimeOffset.UtcNow, Value = value })}";
         Console.Error.WriteLine(line);
         evidence?.WriteLine(line);
