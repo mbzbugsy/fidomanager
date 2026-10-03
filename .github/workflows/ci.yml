@@ -50,6 +50,7 @@ jobs:
           sudo apt-get install --no-install-recommends -y \
             build-essential \
             libayatana-appindicator3-dev \
+            libcbor-dev \
             libfido2-dev \
             librsvg2-dev \
             libssl-dev \
@@ -58,6 +59,11 @@ jobs:
 
       - name: Setup pinned Rust
         run: rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
+
+      - name: Pinned native source and allocation-bound tests (no Linux enablement)
+        run: |
+          python3 scripts/build-libfido2.py fetch
+          python3 scripts/test-libfido2.py
 
       - name: Rust formatting
         run: cargo fmt --all --check
@@ -79,13 +85,20 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Reviewed native baseline
+      - name: Private native build prerequisites
         run: |
-          brew install pkg-config libfido2
-          test "$(pkg-config --modversion libfido2)" = "1.17.0"
+          # System libfido2 is installed ONLY for the negative linkage control.
+          brew install cmake pkg-config openssl@3 libcbor libfido2
+          python3 scripts/build-libfido2.py fetch
       - name: Setup pinned Rust
         run: rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
+      - name: Native parser bounds, negative linkage and reproducible build
+        run: python3 scripts/test-libfido2.py --rebuild
       - name: Compile production AppKit and PUAT path
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Deterministic macOS auth and process tests (no hardware claim)
         run: cargo test --workspace --all-targets --locked
+      - name: Verify production worker's exact private static linkage
+        run: |
+          cargo build -p fido-worker --locked
+          python3 scripts/verify-libfido2-linkage.py target/debug/fido-worker

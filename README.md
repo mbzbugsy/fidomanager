@@ -66,3 +66,21 @@ In particular, the project needs independent review of:
 ## Licence
 
 Apache-2.0. See [LICENSE](LICENSE).
+
+## macOS native worker development
+
+The macOS worker builds a private, checksum-pinned libfido2 1.17.0 static archive
+with a reviewed credential-management allocation bound. Install Python 3.9+, Xcode
+Command Line Tools, CMake, pkg-config, OpenSSL and libcbor, then prepare the source:
+
+```sh
+brew install cmake pkg-config openssl@3 libcbor
+python3 scripts/build-libfido2.py fetch
+cargo build -p fido-worker --locked
+python3 scripts/verify-libfido2-linkage.py target/debug/fido-worker
+```
+
+Cargo fails if the pinned source is missing or invalid; it never falls back to
+Homebrew/system libfido2 on macOS. See the [build design and validation](docs/validation/M3-bounded-libfido2.md)
+for native tests, offline builds, limits and packaging implications. Linux retains
+the existing discovery-only system-library build.
