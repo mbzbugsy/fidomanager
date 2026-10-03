@@ -113,6 +113,18 @@ def pkg_config(option, package):
     return subprocess.check_output(["pkg-config", option, package], text=True).strip()
 
 
+def native_build_environment(inherited):
+    environment = dict(inherited)
+    # Remove explicit build overrides while retaining the host/Xcode environment.
+    for name in ("CC", "CXX", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS",
+                 "CMAKE_TOOLCHAIN_FILE", "CMAKE_GENERATOR", "CMAKE_PREFIX_PATH",
+                 "CMAKE_C_COMPILER_LAUNCHER", "CMAKE_C_LINKER_LAUNCHER",
+                 "CPATH", "C_INCLUDE_PATH", "LIBRARY_PATH"):
+        environment.pop(name, None)
+    environment.update(ZERO_AR_DATE="1", SOURCE_DATE_EPOCH="1781654400")
+    return environment
+
+
 def build(output, target):
     if platform.system() != "Darwin" or target not in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
         raise RuntimeError("Private libfido2 build is currently enabled only for macOS")
@@ -124,11 +136,7 @@ def build(output, target):
         spec = prepare(source)
         architecture = "arm64" if target.startswith("aarch64") else "x86_64"
         compiler = subprocess.check_output(["xcrun", "--find", "clang"], text=True).strip()
-        environment = dict(os.environ)
-        # Do not inherit flags that could substitute a compiler, enable FUZZ or alter this build.
-        for name in ("CC", "CXX", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "CMAKE_TOOLCHAIN_FILE", "CMAKE_GENERATOR", "CMAKE_PREFIX_PATH"):
-            environment.pop(name, None)
-        environment.update(ZERO_AR_DATE="1", SOURCE_DATE_EPOCH="1781654400")
+        environment = native_build_environment(os.environ)
         cmake_output = output / "cmake"
         # Each invocation configures from verified fresh source, never a stale CMake cache.
         if cmake_output.exists():

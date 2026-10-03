@@ -62,7 +62,13 @@ On macOS, `crates/fido-libfido2/build.rs` automatically builds freshly verified 
 under its Cargo `OUT_DIR`. CMake uses a fixed Release/static-only configuration,
 native IOKit HID, no PCSC/HIDAPI/NFC, no tools/examples/tests/manpages, no fuzzing,
 an explicit Xcode clang, target architecture and macOS deployment target 11.0.
-Caller compiler/link flags and CMake toolchain/generator overrides are removed.
+The environment passed to CMake configure/build removes exactly `CC`, `CXX`,
+`CFLAGS`, `CXXFLAGS`, `CPPFLAGS`, `LDFLAGS`, `CMAKE_TOOLCHAIN_FILE`,
+`CMAKE_GENERATOR`, `CMAKE_PREFIX_PATH`, `CMAKE_C_COMPILER_LAUNCHER`,
+`CMAKE_C_LINKER_LAUNCHER`, `CPATH`, `C_INCLUDE_PATH` and `LIBRARY_PATH`.
+It sets `ZERO_AR_DATE=1` and `SOURCE_DATE_EPOCH=1781654400`. Other host variables
+remain inherited, including `PATH`, `SDKROOT`, `DEVELOPER_DIR`, `HOME` and `TMPDIR`;
+this is explicit override sanitization, not a hermetic environment.
 Source/build prefix maps and deterministic archive timestamps remove temporary-path
 and time dependence. `build-identity.json` records source/patch/archive digests,
 baseline, bound, architecture, compiler and dependency versions **without local
@@ -79,6 +85,12 @@ retained probe to the actual private archive's `credman.c.o`, whose archive dige
 must match the path-free build identity. `otool` must show no libfido2 dylib, and
 `nm` must show the probe, `fido_init` and `fido_dev_get_puat` defined in the worker
 with no unresolved FIDO symbols.
+
+Before emitting either dependency's Cargo link-search directive, the build script
+requires valid UTF-8, removes at most one final LF record terminator from pkg-config
+output, rejects all remaining control characters (including LF and CR), and
+requires an absolute path to an existing directory. It preserves other whitespace.
+No libfido2 pkg-config lookup is added.
 
 Reproducibility here means verified identical source/patch/configuration and
 byte-identical archives on repeated builds with the **same** compiler, SDK and
@@ -134,7 +146,17 @@ original vulnerability. Corrupt/missing archives, a corrupt patch and changed
 patch context fail closed. Private-archive linkage succeeds and the unpatched
 system-library linkage fails on the required probe symbol.
 
-Local macOS validation passed:
+Both parser paths also reject a subsequent count of 257 with an existing allocated
+array (`n_alloc = 1`, `n_rx = 0`), leaving its pointer/counts unchanged and making
+zero allocator calls. The unpatched control reaches the refusing allocator for the
+same state. The harness explicitly rejects `NDEBUG`, and the runner verifies this
+compile failure for both patched and unpatched builds. Tests compiled from the real
+Cargo build script exercise valid directory output, invalid UTF-8, embedded/control
+characters, relative/missing paths and regular files. Environment tests check all
+14 removed variables, retained host variables and fixed timestamp overrides.
+
+Local macOS validation was rerun for the review follow-ups from
+`d4b2d266472152a3a62e2a9bfc08d85fe43c6b29` and passed:
 
 | Check | Result |
 | --- | --- |
@@ -193,6 +215,14 @@ and re-sign the worker when updating the statically embedded libfido2. The retai
 upstream BSD notice is `native/libfido2/LICENSE.upstream`; release materials must also
 retain all applicable notices from the fetched source and transitive dependencies.
 Signing/notarization and complete distribution packaging are separate work.
+
+Follow-ups remain outside this PR: M3 should strengthen attribution of `_fido_*`
+symbols to the private archive when the first production `fido_credman_*` call
+sites are added. Release packaging must verify the **release worker** before
+strip/sign; the current linkage check validates the development worker.
+Universal/cross-arch builds are currently unsupported. Archive hash/extract TOCTOU
+hardening, replacing codeload, M3 inventory error-state handling, changes to
+`fido-puat-spike` and a hardware smoke run are also deferred.
 
 Independent patch/linkage security review is required before merge, per #22.
 The PR remains Draft; no merge or issue closure is performed here.

@@ -1,5 +1,20 @@
 use std::{env, path::PathBuf, process::Command};
 
+fn validated_pkg_config_libdir(output: &[u8]) -> Result<PathBuf, &'static str> {
+    let output = std::str::from_utf8(output).map_err(|_| "invalid dependency directory UTF-8")?;
+    // pkg-config terminates its output with LF. Consume exactly that record terminator,
+    // preserving path whitespace and rejecting any remaining control characters.
+    let directory = output.strip_suffix('\n').unwrap_or(output);
+    if directory.chars().any(char::is_control) {
+        return Err("control character in dependency directory");
+    }
+    let directory = PathBuf::from(directory);
+    if !directory.is_absolute() || !directory.is_dir() {
+        return Err("dependency directory must be an existing absolute directory");
+    }
+    Ok(directory)
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=LIBFIDO2_LIB_DIR");
     for variable in [
@@ -67,14 +82,66 @@ fn main() {
             .output()
             .unwrap_or_else(|_| panic!("pkg-config is required for native dependencies"));
         assert!(directory.status.success(), "native dependency unavailable");
-        let directory = String::from_utf8(directory.stdout)
-            .unwrap_or_else(|_| panic!("invalid dependency directory"));
-        println!("cargo:rustc-link-search=native={}", directory.trim());
+        let directory = validated_pkg_config_libdir(&directory.stdout)
+            .unwrap_or_else(|reason| panic!("{reason}"));
+        println!("cargo:rustc-link-search=native={}", directory.display());
     }
     for library in ["crypto", "cbor", "z"] {
         println!("cargo:rustc-link-lib={library}");
     }
     for framework in ["CoreFoundation", "IOKit"] {
         println!("cargo:rustc-link-lib=framework={framework}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validated_pkg_config_libdir;
+    use std::{env, fs, path::PathBuf};
+
+    #[test]
+    fn dependency_libdir_rejects_invalid_output_before_cargo_emission() {
+        let root = PathBuf::from(env::var_os("FIDOMANAGER_LIBDIR_TEST_ROOT").unwrap());
+        assert!(root.is_dir());
+        let directory = root.to_str().unwrap();
+        for output in [directory.to_owned(), format!("{directory}\n")] {
+            assert_eq!(
+                validated_pkg_config_libdir(output.as_bytes()),
+                Ok(root.clone())
+            );
+        }
+        let file = root.join("regular-file");
+        fs::write(&file, b"not a directory").unwrap();
+        for output in [
+            format!("{directory}\n\n"),
+            format!("{directory}\r"),
+            format!("{directory}\r\n"),
+            format!("{directory}\ncargo:rustc-link-lib=fido2\n"),
+            format!("{directory}\t"),
+            format!("{directory}\0"),
+            format!("{directory}\u{0085}"),
+        ] {
+            assert_eq!(
+                validated_pkg_config_libdir(output.as_bytes()),
+                Err("control character in dependency directory"),
+                "{output:?}"
+            );
+        }
+        for output in [
+            "relative-directory".to_owned(),
+            String::new(),
+            root.join("missing-directory").to_str().unwrap().to_owned(),
+            file.to_str().unwrap().to_owned(),
+        ] {
+            assert_eq!(
+                validated_pkg_config_libdir(output.as_bytes()),
+                Err("dependency directory must be an existing absolute directory"),
+                "{output:?}"
+            );
+        }
+        assert_eq!(
+            validated_pkg_config_libdir(&[0xff]),
+            Err("invalid dependency directory UTF-8")
+        );
     }
 }

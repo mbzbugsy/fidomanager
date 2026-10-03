@@ -63,6 +63,23 @@ def source_tests():
                 command.insert(1, "-DEXPECT_UNPATCHED")
             subprocess.run(command, check=True)
             subprocess.run([str(binary)], check=True)
+            disabled_asserts = subprocess.run([*command, "-DNDEBUG"], capture_output=True, text=True)
+            assert disabled_asserts.returncode != 0 and "NDEBUG is forbidden" in disabled_asserts.stderr, "test harness accepted disabled assertions"
+
+        removed_variables = ("CC", "CXX", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS",
+                             "CMAKE_TOOLCHAIN_FILE", "CMAKE_GENERATOR", "CMAKE_PREFIX_PATH",
+                             "CMAKE_C_COMPILER_LAUNCHER", "CMAKE_C_LINKER_LAUNCHER",
+                             "CPATH", "C_INCLUDE_PATH", "LIBRARY_PATH")
+        inherited = dict.fromkeys(removed_variables, "untrusted override")
+        host_variables = {"PATH": "/host/bin", "SDKROOT": "/host/sdk",
+                          "DEVELOPER_DIR": "/host/Xcode", "HOME": "/host/home",
+                          "TMPDIR": "/host/tmp"}
+        inherited.update(host_variables, ZERO_AR_DATE="0", SOURCE_DATE_EPOCH="0")
+        environment = builder.native_build_environment(inherited)
+        assert all(name not in environment for name in removed_variables)
+        assert all(environment[name] == value for name, value in host_variables.items())
+        assert environment["ZERO_AR_DATE"] == "1" and environment["SOURCE_DATE_EPOCH"] == "1781654400"
+        assert all(inherited[name] == "untrusted override" for name in removed_variables)
 
         # Corruption must fail before extraction/build; no arbitrary source or patch fallback.
         corrupt = work / "corrupt.tar.gz"
@@ -110,8 +127,17 @@ def source_tests():
         environment = dict(os.environ, CARGO_FEATURE_NATIVE_LIBFIDO2="1", CARGO_CFG_TARGET_OS="macos", LIBFIDO2_LIB_DIR="/unpatched/system/library")
         rejected = subprocess.run([str(script)], env=environment, capture_output=True, text=True)
         assert rejected.returncode != 0 and "forbids system libfido2 directory overrides" in rejected.stderr
+
+        # Compile tests from the production Cargo build script to exercise the exact validator.
+        script_tests = work / "cargo-build-script-tests"
+        subprocess.run(["rustc", str(ROOT / "crates/fido-libfido2/build.rs"), "--edition=2024", "--test", "-o", str(script_tests)], check=True)
+        fixture = work / "libdir-fixture"
+        fixture.mkdir()
+        subprocess.run([str(script_tests)], env=dict(os.environ, FIDOMANAGER_LIBDIR_TEST_ROOT=str(fixture)), check=True)
     print("PASS: corrupt/missing source, corrupt patch and changed patch context fail closed")
     print("PASS: production Cargo build script rejects a system-library override")
+    print("PASS: pkg-config libdir validation and explicit native build environment sanitization")
+    print("PASS: patched and unpatched harness builds reject NDEBUG")
 
 
 def archive_tests(directory):

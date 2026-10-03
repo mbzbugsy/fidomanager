@@ -1,4 +1,7 @@
 /* FidoManager tests only: compiled with exact functions extracted from pinned source. */
+#ifdef NDEBUG
+#error "credman bound tests require assertions (NDEBUG is forbidden)"
+#endif
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -17,12 +20,12 @@ static void *
 instrumented_recallocarray(void *old, size_t old_count, size_t n, size_t size)
 {
 	(void)old_count;
-	assert(old == NULL);
 	allocator_calls++;
 	/* Record but never actually attempt an over-limit allocation, even in the
 	 * unpatched negative control. Under-limit allocations use the real entry size. */
 	if (n > FIDOMANAGER_TEST_LIMIT)
 		return NULL;
+	assert(old == NULL);
 	return calloc(n == 0 ? 1 : n, size);
 }
 
@@ -56,6 +59,35 @@ check_count(uint64_t n, bool rp_path)
 		assert(rp.ptr == NULL && rk.ptr == NULL);
 		assert(rp.n_alloc == 0 && rk.n_alloc == 0);
 	}
+	free(rp.ptr);
+	free(rk.ptr);
+	cbor_decref(&key);
+	cbor_decref(&value);
+}
+
+static void
+check_existing_array_over_limit(bool rp_path)
+{
+	fido_credman_rp_t rp = {0};
+	fido_credman_rk_t rk = {0};
+	rp.ptr = calloc(1, sizeof(*rp.ptr));
+	rk.ptr = calloc(1, sizeof(*rk.ptr));
+	assert(rp.ptr != NULL && rk.ptr != NULL);
+	void *rp_pointer = rp.ptr, *rk_pointer = rk.ptr;
+	rp.n_alloc = rk.n_alloc = 1;
+	cbor_item_t *key = cbor_build_uint8(rp_path ? 5 : 9);
+	cbor_item_t *value = cbor_build_uint64(FIDOMANAGER_TEST_LIMIT + 1);
+	assert(key != NULL && value != NULL);
+	allocator_calls = 0;
+	assert((rp_path ? credman_parse_rp_count(key, value, &rp) :
+	    credman_parse_rk_count(key, value, &rk)) == -1);
+#ifdef EXPECT_UNPATCHED
+	assert(allocator_calls == 1);
+#else
+	assert(allocator_calls == 0);
+#endif
+	assert(rp.ptr == rp_pointer && rk.ptr == rk_pointer);
+	assert(rp.n_alloc == 1 && rk.n_alloc == 1 && rp.n_rx == 0 && rk.n_rx == 0);
 	free(rp.ptr);
 	free(rk.ptr);
 	cbor_decref(&key);
@@ -105,6 +137,8 @@ main(void)
 		check_count(counts[i], false);
 	}
 	check_original_sanity_checks();
+	check_existing_array_over_limit(true);
+	check_existing_array_over_limit(false);
 #ifdef EXPECT_UNPATCHED
 	puts("PASS: unpatched RP/RK negative control reaches refusing allocator for oversized counts");
 #else
