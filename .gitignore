@@ -20,6 +20,10 @@ Thumbs.db
 *.swp
 *.swo
 
+# Non-shipping Windows feasibility harness
+/tools/windows-broker-spike/bin/
+/tools/windows-broker-spike/obj/
+
 # Local environment
 .env
 .env.*
