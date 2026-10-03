@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+build = "build.rs"
 
 [features]
 # The production worker binary needs the real adapter. Library consumers (tests, fixtures) that

@@ -13,7 +13,7 @@ use std::{
     ptr,
 };
 
-#[link(name = "fido2")]
+// macOS resolves these symbols exclusively from the private archive selected by build.rs.
 unsafe extern "C" {
     fn fido_dev_supports_permissions(device: *const c_void) -> bool;
     fn fido_dev_get_retry_count(device: *mut c_void, retries: *mut c_int) -> c_int;

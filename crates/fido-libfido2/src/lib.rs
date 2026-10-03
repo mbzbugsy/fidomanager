@@ -227,8 +227,10 @@ mod native {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     compile_error!("native-libfido2 is currently supported only on macOS and Linux");
 
-    #[link(name = "fido2")]
+    #[cfg_attr(not(target_os = "macos"), link(name = "fido2"))]
     unsafe extern "C" {
+        #[cfg(target_os = "macos")]
+        fn fidomanager_libfido2_1_17_0_credman_limit() -> u32;
         fn fido_init(flags: c_int);
         fn fido_strerr(code: c_int) -> *const c_char;
 
@@ -271,6 +273,10 @@ mod native {
 
     impl LibFido2Adapter {
         pub fn new() -> Self {
+            #[cfg(target_os = "macos")]
+            // SAFETY: private scalar probe compiled in the same patched credman.c translation
+            // unit as the count checks. An unpatched archive cannot resolve this link symbol.
+            assert_eq!(unsafe { fidomanager_libfido2_1_17_0_credman_limit() }, 256);
             // SAFETY: fido_init takes no pointers and is the documented process initialization
             // entry point. Calling it before libfido2 operations is required by the C API.
             unsafe { fido_init(0) };

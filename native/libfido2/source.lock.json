@@ -1,0 +1,12 @@
+{
+  "version": "1.17.0",
+  "revision": "b974e7cf2ee7392134cc12c08b76a068cf250dd8",
+  "url": "https://codeload.github.com/Yubico/libfido2/tar.gz/b974e7cf2ee7392134cc12c08b76a068cf250dd8",
+  "archive_sha256": "a7c340900cb58b6905e12855944069024f39707f9573d52d4830a4561a50819a",
+  "patch_sha256": "8b416da841fca9268d45aa1f10236270be0983400dc471d2920ff09fc5ce0465",
+  "credman_upstream_sha256": "29e1fd0cca87360c2c984f9c26e806643333563ca080f795ea58b33c4a1d0877",
+  "credman_patched_sha256": "754cd897dc1a383d9e924eb4b7c8c8eeb039b7f2f9b41b467c1d5c1e989ed25a",
+  "enumeration_limit": 256,
+  "identity_symbol": "fidomanager_libfido2_1_17_0_credman_limit",
+  "archive_name": "libfidomanager_fido2_bounded.a"
+}
