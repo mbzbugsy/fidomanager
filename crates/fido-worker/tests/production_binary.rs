@@ -46,6 +46,19 @@ fn production_worker_accepts_no_arguments() -> TestResult {
 }
 
 #[test]
+fn debug_environment_is_refused_before_native_initialization() -> TestResult {
+    let status = Command::new(worker_path())
+        .env_clear()
+        .env("FIDO_DEBUG", "")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    assert_eq!(status.code(), Some(fido_worker::exit::CONFIG));
+    Ok(())
+}
+
+#[test]
 fn production_worker_leaves_when_its_stdin_closes_before_the_handshake() -> TestResult {
     let mut child = Command::new(worker_path())
         .env_clear()

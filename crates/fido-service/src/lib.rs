@@ -3,6 +3,9 @@
 #[cfg(all(feature = "native-ui-spike", target_os = "macos"))]
 pub mod native_ui_spike;
 
+pub mod authentication;
+pub mod presentation;
+
 mod discovery;
 mod process_worker;
 mod supervisor;
@@ -41,7 +44,11 @@ pub struct FoundationInfo {
 
 pub const fn foundation_info() -> FoundationInfo {
     FoundationInfo {
-        phase: "milestone-1-read-only-discovery",
+        phase: if cfg!(target_os = "macos") {
+            "milestone-2-native-authentication"
+        } else {
+            "milestone-1-read-only-discovery"
+        },
         worker_protocol_version: fido_worker_protocol::WORKER_PROTOCOL_VERSION,
         reviewed_libfido2_baseline: REVIEWED_LIBFIDO2_BASELINE,
     }

@@ -1,4 +1,4 @@
-//! Backend-only sensitive-interaction contract. No renderer DTOs or secret transport.
+//! Backend-only sensitive-interaction contract. PIN completion never enters renderer DTOs.
 //!
 //! One controller belongs to one trusted authority. The authority supplies a workflow generation;
 //! the controller mints a fresh prompt identity. Native hosts hold the reservation until teardown
@@ -10,6 +10,16 @@ use std::time::{Duration, Instant};
 
 use fido_core::{PromptInstanceId, WorkflowId};
 use thiserror::Error;
+
+#[cfg(all(feature = "native-pin", target_os = "macos"))]
+pub mod macos_pin;
+
+/// Trusted native completion, delivered only after acknowledged sheet teardown. Never a DTO.
+pub struct PinCompletion {
+    pub binding: PromptBinding,
+    pub outcome: PromptOutcome,
+    pub pin: Option<fido_auth::PinSecret>,
+}
 
 #[cfg(all(feature = "modality-spike", not(debug_assertions)))]
 compile_error!("modality-spike is a non-shipping debug-only prototype");

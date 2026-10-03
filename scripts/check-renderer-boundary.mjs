@@ -107,7 +107,11 @@ assertExactArray(
 const foundation = discoveredCommands.find(
   ({ name }) => name === 'foundation_status',
 );
-if (!foundation || foundation.parameters !== '') {
+if (
+  !foundation ||
+  foundation.parameters.replace(/\s+/g, '').replace(/,$/, '') !==
+    "state:tauri::State<'_,AppState>"
+) {
   throw new Error(
     'foundation_status must not accept renderer-controlled parameters.',
   );
@@ -151,7 +155,7 @@ assertExactArray(
   'Milestone 1 permits only tauri-plugin-single-instance.',
 );
 if (
-  /fido-(?:core|worker-protocol|worker|worker-fixture|libfido2|platform|native-ui)\s*=/.test(
+  /fido-(?:auth|core|worker-protocol|worker|worker-fixture|libfido2|platform|native-ui)\s*=/.test(
     cargoToml,
   )
 ) {

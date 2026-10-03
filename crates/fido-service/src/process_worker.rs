@@ -184,9 +184,23 @@ pub struct ProcessWorkerLauncher {
     executable: ResolvedWorkerExecutable,
     fixed_args: &'static [&'static str],
     config: ProcessWorkerConfig,
+    verification_display_scope: Option<[u8; 32]>,
 }
 
 impl ProcessWorkerLauncher {
+    fn display_scope() -> Option<[u8; 32]> {
+        let mut scope = [0; 32];
+        getrandom::fill(&mut scope).ok()?;
+        Some(scope)
+    }
+    /// Fixed backend-only mode. Unsupported platforms retain discovery and refuse authentication.
+    pub fn enable_authentication(mut self) -> Self {
+        if cfg!(target_os = "macos") {
+            self.fixed_args = &["--authentication"];
+        }
+        self
+    }
+
     pub const DEFAULT_WORKER_FILE_NAME: &'static str = if cfg!(windows) {
         "fido-worker.exe"
     } else {
@@ -201,6 +215,7 @@ impl ProcessWorkerLauncher {
             executable,
             fixed_args: &[],
             config: ProcessWorkerConfig::default(),
+            verification_display_scope: Self::display_scope(),
         })
     }
 
@@ -212,12 +227,13 @@ impl ProcessWorkerLauncher {
             executable,
             fixed_args: &[],
             config: config.validate()?,
+            verification_display_scope: Self::display_scope(),
         })
     }
 
     /// Arguments are compile-time constants by construction (`'static`), so nothing a renderer or
-    /// user supplies at runtime can reach the worker's command line. The production worker takes
-    /// none; this exists for the test fixture's scenario selector.
+    /// user supplies at runtime can reach the worker's command line. The production worker accepts
+    /// only its fixed authentication mode; this also supports the test fixture scenario selector.
     pub fn with_fixed_args(mut self, args: &'static [&'static str]) -> Self {
         self.fixed_args = args;
         self
@@ -232,7 +248,13 @@ impl WorkerLauncher for ProcessWorkerLauncher {
     type Endpoint = ProcessWorkerEndpoint;
 
     fn launch(&mut self, generation: WorkerGeneration) -> Result<Self::Endpoint, LaunchError> {
-        ProcessWorkerEndpoint::launch(&self.executable, self.fixed_args, generation, self.config)
+        ProcessWorkerEndpoint::launch(
+            &self.executable,
+            self.fixed_args,
+            generation,
+            self.config,
+            self.verification_display_scope,
+        )
     }
 }
 
@@ -303,6 +325,10 @@ pub struct ProcessWorkerEndpoint {
     generation: WorkerGeneration,
     pid: u32,
     config: ProcessWorkerConfig,
+    #[cfg(unix)]
+    secret: Option<std::os::unix::net::UnixStream>,
+    revocation: Option<(std::sync::Arc<std::sync::atomic::AtomicU64>, u64)>,
+    verification_display_scope: Option<[u8; 32]>,
 }
 
 impl ProcessWorkerEndpoint {
@@ -311,6 +337,7 @@ impl ProcessWorkerEndpoint {
         fixed_args: &'static [&'static str],
         generation: WorkerGeneration,
         config: ProcessWorkerConfig,
+        verification_display_scope: Option<[u8; 32]>,
     ) -> Result<Self, LaunchError> {
         let mut command = Command::new(executable.path());
         command
@@ -324,6 +351,16 @@ impl ProcessWorkerEndpoint {
             } else {
                 Stdio::null()
             });
+
+        #[cfg(unix)]
+        let secret = if fixed_args.first() == Some(&"--authentication") {
+            Some(
+                fido_platform::process::secret_channel::attach(&mut command)
+                    .map_err(|_| LaunchError::SpawnFailed)?,
+            )
+        } else {
+            None
+        };
 
         let mut child = command.spawn().map_err(|_| LaunchError::SpawnFailed)?;
         let pid = child.id();
@@ -342,6 +379,10 @@ impl ProcessWorkerEndpoint {
             generation,
             pid,
             config,
+            #[cfg(unix)]
+            secret,
+            revocation: None,
+            verification_display_scope,
         };
         // From here on every early return drops or explicitly fails `endpoint`, which kills and
         // reaps the child: a failed launch never leaves a process behind.
@@ -364,7 +405,8 @@ impl ProcessWorkerEndpoint {
     }
 
     fn handshake(&mut self) -> Result<(), LaunchError> {
-        let hello = ParentHello::new(self.generation, std::process::id());
+        let mut hello = ParentHello::new(self.generation, std::process::id());
+        hello.verification_display_scope = self.verification_display_scope;
         let encoded = encode_message(&hello).map_err(|_| LaunchError::HandshakeMalformed)?;
         let stdin = self.stdin.as_mut().ok_or(LaunchError::SpawnFailed)?;
         // A worker that already died (for example a dynamic-loader failure) breaks the pipe here.
@@ -440,6 +482,10 @@ impl ProcessWorkerEndpoint {
         // Closing stdin lets an idle worker leave on its own, but the kill below never depends on
         // the worker cooperating.
         self.stdin = None;
+        #[cfg(unix)]
+        {
+            self.secret = None;
+        }
         // "Already exited" is not an error here: the wait below is authoritative.
         let _ = child.kill();
 
@@ -487,7 +533,42 @@ impl ProcessWorkerEndpoint {
             generation,
             pid: 0,
             config,
+            #[cfg(unix)]
+            secret: None,
+            revocation: None,
+            verification_display_scope: None,
         }
+    }
+
+    pub(crate) fn set_revocation(
+        &mut self,
+        epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        expected: u64,
+    ) {
+        self.revocation = Some((epoch, expected));
+    }
+
+    fn revoked(&self) -> bool {
+        self.revocation.as_ref().is_some_and(|(epoch, expected)| {
+            epoch.load(std::sync::atomic::Ordering::SeqCst) != *expected
+        })
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn submit_secret(
+        &mut self,
+        binding: fido_auth::AcquisitionBinding,
+        request_id: u64,
+        pin: fido_auth::PinSecret,
+    ) -> Result<(), WorkerEndpointError> {
+        if self.revoked() {
+            return Err(self.abandon(WorkerEndpointError::Unavailable));
+        }
+        let secret = self.secret.take().ok_or(WorkerEndpointError::Unavailable)?;
+        let result = fido_auth::send_secret(&secret, binding, request_id, pin);
+        // Close immediately: EOF seals the one-use frame. No reusable channel or PIN queue.
+        drop(secret);
+        result.map_err(|_| self.abandon(WorkerEndpointError::TransportFailure))
     }
 
     fn abandon(&mut self, error: WorkerEndpointError) -> WorkerEndpointError {
@@ -509,6 +590,9 @@ impl WorkerEndpoint for ProcessWorkerEndpoint {
         &mut self,
         request: WorkerRequestEnvelope,
     ) -> Result<WorkerResponseEnvelope, WorkerEndpointError> {
+        if self.revoked() {
+            return Err(self.abandon(WorkerEndpointError::Unavailable));
+        }
         if matches!(self.process, ProcessState::Reaped) {
             return Err(WorkerEndpointError::Unavailable);
         }
@@ -554,8 +638,20 @@ impl WorkerEndpoint for ProcessWorkerEndpoint {
             Err(_) => return Err(self.abandon(WorkerEndpointError::Unavailable)),
         }
 
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match self.events.recv_timeout(remaining) {
+        let event = loop {
+            if self.revoked() {
+                return Err(self.abandon(WorkerEndpointError::Unavailable));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self
+                .events
+                .recv_timeout(remaining.min(Duration::from_millis(25)))
+            {
+                Err(mpsc::RecvTimeoutError::Timeout) if !remaining.is_zero() => continue,
+                event => break event,
+            }
+        };
+        match event {
             Ok(ReaderEvent::Frame(bytes)) => {
                 let response = decode_message::<WorkerResponseEnvelope>(&bytes)
                     .map_err(|_| self.abandon(WorkerEndpointError::MalformedFrame))?;

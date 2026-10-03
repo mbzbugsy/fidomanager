@@ -18,6 +18,10 @@ pub struct ParentHello {
     /// Process id of the service. The worker refuses to run unless this is still its parent, and
     /// keeps checking for the rest of its life (see the worker's parent-death watchdog).
     pub parent_pid: u32,
+    /// Non-authorizing, application-lifetime scope for hashed connection display history.
+    /// Never exposed to the renderer; absent disables history correlation.
+    #[serde(default)]
+    pub verification_display_scope: Option<[u8; 32]>,
 }
 
 /// Second frame, worker to service.
@@ -46,6 +50,7 @@ impl ParentHello {
             protocol_version: WORKER_PROTOCOL_VERSION,
             worker_generation,
             parent_pid,
+            verification_display_scope: None,
         }
     }
 

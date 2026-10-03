@@ -1,16 +1,18 @@
 [package]
-name = "fido-worker-protocol"
+name = "fido-auth"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-repository.workspace = true
 
 [dependencies]
-fido-auth = { path = "../fido-auth" }
 fido-core = { path = "../fido-core" }
 serde.workspace = true
+zeroize = "=1.8.2"
+
+[dev-dependencies]
 serde_json.workspace = true
+static_assertions = "=1.1.0"
 
 [lints]
 workspace = true

@@ -333,7 +333,7 @@ enum WorkerState {
 }
 
 pub struct DiscoveryCoordinator<E, C = SystemMonotonicClock> {
-    endpoint: E,
+    pub(crate) endpoint: E,
     clock: C,
     worker_generation: WorkerGeneration,
     worker_state: WorkerState,
@@ -625,7 +625,7 @@ impl<E: WorkerEndpoint, C: MonotonicClock> DiscoveryCoordinator<E, C> {
         Ok(response)
     }
 
-    fn take_request_id(&mut self) -> Result<u64, DiscoveryError> {
+    pub(crate) fn take_request_id(&mut self) -> Result<u64, DiscoveryError> {
         let value = self.next_request_id;
         self.next_request_id = self
             .next_request_id
@@ -781,6 +781,7 @@ fn base_snapshot(device: &WorkerDiscoveredDevice, handle: DeviceHandle) -> Devic
     let discovery_metadata_is_valid = manufacturer_is_valid && product_is_valid;
 
     DeviceSnapshot {
+        verification_history_id: device.verification_history_id,
         handle,
         generation: device.device_generation,
         vendor_id: device.vendor_id,
@@ -985,6 +986,7 @@ mod tests {
         let device_id = WorkerDeviceId(device_id);
         FakeDevice {
             discovered: WorkerDiscoveredDevice {
+                verification_history_id: None,
                 device_id,
                 device_generation: DeviceGeneration(generation),
                 vendor_id: 0x1050,

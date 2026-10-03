@@ -10,10 +10,14 @@ repository.workspace = true
 # process, so the trusted authority never links libfido2.
 [features]
 default = []
-native-ui-spike = ["dep:fido-native-ui", "fido-native-ui/modality-spike"]
+native-pin = ["fido-native-ui/native-pin"]
+native-ui-spike = ["fido-native-ui/modality-spike"]
 
 [dependencies]
-fido-native-ui = { path = "../fido-native-ui", optional = true }
+fido-auth = { path = "../fido-auth" }
+getrandom = "=0.3.4"
+fido-platform = { path = "../fido-platform" }
+fido-native-ui = { path = "../fido-native-ui" }
 fido-core = { path = "../fido-core" }
 fido-worker-protocol = { path = "../fido-worker-protocol" }
 thiserror.workspace = true

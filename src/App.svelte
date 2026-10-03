@@ -7,6 +7,8 @@
     phase: string;
     workerProtocolVersion: number;
     reviewedLibfido2Baseline: string;
+    authenticationNotice: string | null;
+    authenticationNoticeRevision: string;
   };
 
   type AuthenticatorOption = {
@@ -15,6 +17,8 @@
   };
 
   type Authenticator = {
+    displayName: string;
+    displayDetail: string;
     handle: string;
     generation: string;
     vendorId: number;
@@ -30,6 +34,7 @@
     firmwareVersion: string | null;
     readStatus: string;
     freshness: string;
+    pinCheckPassed: boolean;
   };
 
   type AuthenticatorList = {
@@ -45,8 +50,34 @@
   let lastScan: string | null = null;
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let foundationTimer: ReturnType<typeof setTimeout> | null = null;
+  let activeNoticeRevision: string | null = null;
+  let noticeVisible = false;
+  let noticeTimer: ReturnType<typeof setTimeout> | null = null;
 
   const pollDelayMs = 1000;
+
+  function updateNotice(revision: string | null, message: string | null) {
+    if (revision === activeNoticeRevision) return;
+    activeNoticeRevision = revision;
+    if (noticeTimer) clearTimeout(noticeTimer);
+    noticeVisible = Boolean(message);
+    if (noticeVisible) {
+      noticeTimer = setTimeout(() => {
+        noticeVisible = false;
+      }, 10_000);
+    }
+  }
+
+  function dismissNotice() {
+    noticeVisible = false;
+    if (noticeTimer) clearTimeout(noticeTimer);
+  }
+
+  $: updateNotice(
+    foundation?.authenticationNoticeRevision ?? null,
+    foundation?.authenticationNotice ?? null,
+  );
 
   function hex16(value: number) {
     return value.toString(16).padStart(4, '0');
@@ -64,6 +95,10 @@
       foundation = await invoke<FoundationStatus>('foundation_status');
     } catch {
       foundation = null;
+    } finally {
+      if (!stopped) {
+        foundationTimer = setTimeout(() => void loadFoundation(), pollDelayMs);
+      }
     }
   }
 
@@ -110,6 +145,8 @@
     return () => {
       stopped = true;
       if (timer) clearTimeout(timer);
+      if (foundationTimer) clearTimeout(foundationTimer);
+      if (noticeTimer) clearTimeout(noticeTimer);
     };
   });
 </script>
@@ -207,8 +244,19 @@
                     ></span>
                     <span>{friendlyStatus(device.readStatus)}</span>
                   </div>
-                  <h3>{device.product ?? 'FIDO authenticator'}</h3>
-                  <p>{device.manufacturer ?? 'Unknown manufacturer'}</p>
+                  <h3>{device.displayName}</h3>
+                  {#if device.pinCheckPassed}
+                    <span
+                      class="verification-tag"
+                      title="Historical PIN check only. Temporary authorization has been cleared."
+                      >PIN check passed</span
+                    >
+                  {/if}
+                  <p
+                    title="Manufacturer and supported transports. Key numbers are temporary display labels."
+                  >
+                    {device.displayDetail}
+                  </p>
                 </div>
 
                 <div class="vidpid">
@@ -232,12 +280,11 @@
 
               <div class="detail-grid">
                 <div class="detail wide">
-                  <span>AAGUID</span>
+                  <span
+                    title="Authenticator model/variant, not a unique physical key"
+                    >AAGUID</span
+                  >
                   <code>{device.aaguid ?? 'Not reported'}</code>
-                </div>
-                <div class="detail">
-                  <span>Generation</span>
-                  <strong>{device.generation}</strong>
                 </div>
                 <div class="detail">
                   <span>Freshness</span>
@@ -266,13 +313,6 @@
                   </div>
                 </div>
               {/if}
-
-              <footer class="device-footer">
-                <span>Handle</span>
-                <code
-                  >{device.handle.slice(0, 8)}…{device.handle.slice(-8)}</code
-                >
-              </footer>
             </article>
           {/each}
         </div>
@@ -304,3 +344,18 @@
     <span>No secrets leave this device</span>
   </footer>
 </div>
+
+{#if noticeVisible && foundation?.authenticationNotice}
+  <div class="authentication-toast" role="status" aria-live="polite">
+    <div>
+      <strong>Authentication result</strong>
+      <p>{foundation.authenticationNotice}</p>
+    </div>
+    <button
+      class="notice-dismiss"
+      type="button"
+      aria-label="Dismiss authentication result"
+      onclick={dismissNotice}>Dismiss</button
+    >
+  </div>
+{/if}

@@ -57,7 +57,22 @@ enum Inbound {
 
 /// Runs the worker until the process ends. Never returns: every exit path is an explicit
 /// `exit_immediately` so no thread can be left behind blocked in native code.
-pub fn run<B, R, W>(input: R, mut output: W, backend: B, config: RuntimeConfig) -> !
+pub fn run<B, R, W>(input: R, output: W, backend: B, config: RuntimeConfig) -> !
+where
+    B: NativeDiscoveryBackend,
+    R: Read + Send + 'static,
+    W: Write,
+{
+    run_with_secret(input, output, backend, config, None)
+}
+
+pub fn run_with_secret<B, R, W>(
+    input: R,
+    mut output: W,
+    backend: B,
+    config: RuntimeConfig,
+    secret: Option<Box<dyn Read + Send>>,
+) -> !
 where
     B: NativeDiscoveryBackend,
     R: Read + Send + 'static,
@@ -92,7 +107,28 @@ where
         exit_immediately(exit::OS);
     }
 
-    let mut engine = WorkerEngine::new(backend, hello.worker_generation);
+    let expiry = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let started = std::time::Instant::now();
+    let watchdog_expiry = Arc::clone(&expiry);
+    if thread::Builder::new()
+        .name("fido-auth-expiry".into())
+        .spawn(move || {
+            loop {
+                thread::sleep(Duration::from_millis(25));
+                let end = watchdog_expiry.load(Ordering::SeqCst);
+                if end != 0 && started.elapsed().as_millis() >= u128::from(end) {
+                    exit_immediately(exit::ORDERLY);
+                }
+            }
+        })
+        .is_err()
+    {
+        exit_immediately(exit::OS);
+    }
+    let mut engine = WorkerEngine::new(backend, hello.worker_generation)
+        .with_secret(secret)
+        .with_verification_display_scope(hello.verification_display_scope);
+
     loop {
         let request = match inbound_rx.recv() {
             Ok(Inbound::Request(request)) => request,
@@ -100,6 +136,23 @@ where
             Err(_) => exit_immediately(exit::INTERNAL),
         };
 
+        if matches!(
+            request.request,
+            fido_worker_protocol::WorkerRequest::PrepareAuthentication { .. }
+        ) {
+            // Finite even if the parent/UI stalls after prepare; independent of native execution.
+            if expiry
+                .compare_exchange(
+                    0,
+                    started.elapsed().as_millis() as u64 + fido_auth::AUTH_TRANSACTION_SECS * 1000,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_err()
+            {
+                exit_immediately(exit::PROTOCOL);
+            }
+        }
         let response = engine.handle(request);
 
         // Cleared before the response is written: the service cannot send its next request until

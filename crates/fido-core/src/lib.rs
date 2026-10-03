@@ -224,6 +224,8 @@ pub struct DeviceOption {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceSnapshot {
+    /// Non-authorizing historical display correlation. Not a reusable device/grant handle.
+    pub verification_history_id: Option<[u8; 32]>,
     pub handle: DeviceHandle,
     pub generation: DeviceGeneration,
     pub vendor_id: u16,

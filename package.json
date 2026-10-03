@@ -13,9 +13,10 @@
     "preview": "vite preview",
     "lint": "prettier --check .",
     "format": "prettier --write .",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
     "typecheck": "svelte-check --tsconfig ./tsconfig.json",
     "test": "vitest run --passWithNoTests",
-    "security:renderer-boundary": "node scripts/check-renderer-boundary.mjs",
+    "security:renderer-boundary": "node scripts/check-renderer-boundary.mjs && node scripts/test-renderer-boundary.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
