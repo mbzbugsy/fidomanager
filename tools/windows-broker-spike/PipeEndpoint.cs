@@ -17,8 +17,9 @@ internal static class PipeEndpoint
     internal static NamedPipeServerStream Create(TokenIdentity owner)
     {
         // Individual rights omit FILE_CREATE_PIPE_INSTANCE (4). Medium mandatory label admits the
-        // medium client. User SID is not sufficient: the retained process + token check follows.
-        string sddl = $"D:P(A;;GA;;;SY)(A;;0x00120003;;;{owner.Sid})S:(ML;;NW;;;ME)";
+        // medium client. FILE_READ_ATTRIBUTES is explicit; FILE_CREATE_PIPE_INSTANCE stays absent.
+        // User SID is not sufficient: the retained process + token check follows.
+        string sddl = $"D:P(A;;GA;;;SY)(A;;0x00120083;;;{owner.Sid})S:(ML;;NW;;;ME)";
         Native.Check(Native.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out nint sd, out _));
         SafePipeHandle? handle = null;
         try
@@ -33,11 +34,20 @@ internal static class PipeEndpoint
             foreach (GenericAce ace in parsed.DiscretionaryAcl)
             {
                 if (ace is not CommonAce a || a.AceQualifier != AceQualifier.AccessAllowed || a.AceFlags != AceFlags.None
-                    || !((a.SecurityIdentifier.Value == owner.Sid && a.AccessMask == 0x120003)
+                    || !((a.SecurityIdentifier.Value == owner.Sid && a.AccessMask == 0x120083)
                          || (a.SecurityIdentifier.Value == "S-1-5-18" && a.AccessMask is 0x10000000 or 0x1f01ff)))
                     throw new InvalidDataException("unexpected pipe principal/rights");
             }
-            Program.Log("IPC", new { RequestedSddl = sddl, EffectiveSddl = actual, Pipe = Name(owner) });
+            // Preserve access masks/standard principals without recording enterprise user/group SIDs.
+
+            Program.Log("IPC", new
+            {
+                RequestedSddl = Program.RedactDescriptor(sddl),
+                EffectiveSddl = Program.RedactDescriptor(actual),
+                Pipe = Name(owner),
+                OwnerIsInitiatingUser = parsed.Owner?.Value == owner.Sid,
+                OwnerIsBuiltinAdministrators = parsed.Owner?.Value == "S-1-5-32-544"
+            });
             return new NamedPipeServerStream(PipeDirection.InOut, true, false, handle);
         }
         catch { handle?.Dispose(); throw; }
@@ -67,10 +77,14 @@ internal static class PipeEndpoint
         do
         {
             // Identification SQOS, non-inheritable, exact rights (no GENERIC_WRITE).
-            SafePipeHandle handle = Native.CreateFileW(name, 0x120003, 0, 0, 3, 0x40000000 | 0x00100000 | 0x00010000, 0);
-            if (!handle.IsInvalid) return new NamedPipeClientStream(PipeDirection.InOut, true, true, handle);
+            SafePipeHandle handle = Native.CreateFileW(name, 0x120083, 0, 0, 3, 0x40000000 | 0x00100000 | 0x00010000, 0);
+            if (!handle.IsInvalid)
+            {
+                Program.Log("IPC", new { CreateFilePipeConnected = true, RequestedAccess = "0x120083" });
+                return new NamedPipeClientStream(PipeDirection.InOut, true, true, handle);
+            }
             int error = Marshal.GetLastPInvokeError(); handle.Dispose();
-            if (error is not (2 or 231)) throw new System.ComponentModel.Win32Exception(error);
+            if (error is not (2 or 231)) throw new System.ComponentModel.Win32Exception(error, "CreateFileW(pipe) failed");
             Native.WaitNamedPipeW(name, 100);
             Thread.Sleep(50);
         } while (elapsed.Elapsed < TimeSpan.FromSeconds(10));

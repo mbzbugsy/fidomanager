@@ -41,6 +41,11 @@ internal static class Native
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern uint WaitForSingleObject(SafeFileHandle handle, uint milliseconds);
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool GetExitCodeProcess(SafeFileHandle process, out uint code);
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool TerminateProcess(SafeFileHandle process, uint code);
+    [DllImport("kernel32.dll")] internal static extern nint GetCurrentProcess();
+    [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool DuplicateHandle(SafeFileHandle sourceProcess, nint sourceHandle, nint targetProcess, out SafeFileHandle duplicate, uint access, bool inherit, uint options);
+    [DllImport("kernelbase.dll")] internal static extern bool CompareObjectHandles(SafeHandle first, SafeHandle second);
+    [DllImport("kernel32.dll")] internal static extern nint GetCurrentThread();
+    [DllImport("advapi32.dll", SetLastError = true)] internal static extern bool OpenThreadToken(nint thread, uint access, bool openAsSelf, out SafeFileHandle token);
     [DllImport("advapi32.dll", SetLastError = true)] internal static extern bool OpenProcessToken(SafeFileHandle process, uint access, out SafeFileHandle token);
     [DllImport("advapi32.dll", SetLastError = true)] internal static extern bool GetTokenInformation(SafeFileHandle token, int kind, nint buffer, uint length, out uint needed);
     [DllImport("advapi32.dll")] internal static extern nint GetSidSubAuthorityCount(nint sid);
@@ -65,7 +70,7 @@ internal static class Native
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool TerminateJobObject(SafeFileHandle job, uint code);
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool IsProcessInJob(SafeFileHandle process, SafeFileHandle job, out bool member);
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool CreatePipe(out SafeFileHandle read, out SafeFileHandle write, ref SecurityAttributes attributes, uint size);
-    [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool SetHandleInformation(SafeFileHandle handle, uint mask, uint flags);
+    [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool SetHandleInformation(SafeHandle handle, uint mask, uint flags);
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool InitializeProcThreadAttributeList(nint list, int count, uint flags, ref nuint size);
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool UpdateProcThreadAttribute(nint list, uint flags, nuint kind, nint value, nuint size, nint previous, nint returned);
     [DllImport("kernel32.dll")] internal static extern void DeleteProcThreadAttributeList(nint list);

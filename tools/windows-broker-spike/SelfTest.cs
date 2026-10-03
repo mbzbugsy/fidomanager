@@ -75,6 +75,22 @@ internal static class SelfTest
         foreach (TokenIdentity different in new[] { identity with { Sid = "other-admin" },
             identity with { LogonSid = "other-logon-sid" }, identity with { Logon = "other-logon" }, identity with { Session = 2 } })
             Reject(() => IdentityRules.SameSession(identity, different));
+        TokenIdentity high = identity with { Elevated = true, Integrity = 0x3000, Logon = "linked-high-logon" };
+        IdentityRules.ElevationPair(identity, high, identity); Check(true);
+        foreach (TokenIdentity different in new[] { high with { Sid = "other-admin" },
+            high with { LogonSid = "other-logon-sid" }, high with { Session = 2 },
+            high with { Elevated = false }, high with { Integrity = 0x2000 } })
+            Reject(() => IdentityRules.ElevationPair(identity, different, identity));
+        foreach (TokenIdentity unlinked in new[] { identity with { Sid = "other-admin" },
+            identity with { LogonSid = "other-logon-sid" }, identity with { Logon = "unlinked-logon" },
+            identity with { Session = 2 }, identity with { Elevated = true }, identity with { Integrity = 0x3000 } })
+            Reject(() => IdentityRules.ElevationPair(identity, high, unlinked));
+        foreach (string sid in new[] { "S-1-5-21-1-2-3-4", "S-1-12-1-1-2-3-4" })
+            Check(Program.RedactDescriptor($"D:P(A;;GA;;;SY)(A;;0x120083;;;{sid})S:(ML;;NW;;;ME)")
+                == "D:P(A;;GA;;;SY)(A;;0x120083;;;<principal-sid>)S:(ML;;NW;;;ME)");
+        string identityEvidence = System.Text.Json.JsonSerializer.Serialize(identity.Evidence());
+        Check(!identityEvidence.Contains("Sid", StringComparison.Ordinal));
+        Check(!identityEvidence.Contains("Logon", StringComparison.Ordinal));
         IdentityRules.SameProcess(10, 100, 10, 100);
         Reject(() => IdentityRules.SameProcess(10, 100, 11, 100));
         Reject(() => IdentityRules.SameProcess(10, 100, 10, 200)); // PID recycled, same SID still insufficient

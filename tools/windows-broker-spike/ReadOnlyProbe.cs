@@ -72,7 +72,10 @@ internal static class ReadOnlyProbe
                         finally { Fn<Free>("fido_cbor_info_free")(ref info); }
                     }
                     string pathHash = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(nativePath)));
-                    observations.Add(new(backend, pathHash, vendor, product, open, infoResult, credman));
+                    // USB product/manufacturer metadata only; never serial numbers or credentials.
+                    string? manufacturer = Marshal.PtrToStringUTF8(Fn<Path>("fido_dev_info_manufacturer_string")(entry));
+                    string? productName = Marshal.PtrToStringUTF8(Fn<Path>("fido_dev_info_product_string")(entry));
+                    observations.Add(new(backend, pathHash, vendor, product, open, infoResult, credman, manufacturer, productName));
                 }
                 finally
                 {

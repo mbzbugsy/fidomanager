@@ -11,6 +11,10 @@ internal static class ChildWorker
     // No breakaway, no shared job handle, no inherited pipe server/client/token handles.
     internal static string Run(bool hang, CancellationToken cancel, bool orphanFixture = false)
     {
+        // Deliberately inheritable unrelated object: prove the explicit list excludes it before
+        // child code runs. Compare object identity, so a coincident numeric handle is not a leak.
+        using EventWaitHandle sentinel = new(false, EventResetMode.ManualReset);
+        Native.Check(Native.SetHandleInformation(sentinel.SafeWaitHandle, 1, 1));
         using SafeFileHandle job = Native.Handle(Native.CreateJobObjectW(0, null));
         Native.JobLimits limits = new() { Basic = new() { Flags = 0x2000 } }; // KILL_ON_JOB_CLOSE
         Native.Check(Native.SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf<Native.JobLimits>()));
@@ -64,7 +68,25 @@ internal static class ChildWorker
                     Peer.SameSession(parent.Identity, child.Identity);
                     if (parent.Identity.Integrity != child.Identity.Integrity || parent.Identity.Elevated != child.Identity.Elevated)
                         throw new InvalidOperationException("worker token changed");
-                    Program.Log("WINDOWS", new { Worker = child.Evidence(), JobMember = member, InheritedHandles = "stdout/stderr only", AtomicJobAssignment = true, SuspendedUntilValidated = true });
+                    bool copied = Native.DuplicateHandle(process, sentinel.SafeWaitHandle.DangerousGetHandle(),
+                        Native.GetCurrentProcess(), out SafeFileHandle candidate, 0, false, 2);
+                    int copyError = copied ? 0 : Marshal.GetLastPInvokeError();
+                    using (candidate)
+                    {
+                        if (!copied && copyError != 6) throw new System.ComponentModel.Win32Exception(copyError, "sentinel inheritance query");
+                        if (copied && Native.CompareObjectHandles(candidate, sentinel.SafeWaitHandle))
+                            throw new InvalidOperationException("unrelated inheritable handle leaked into worker");
+                    }
+                    Program.Log("WINDOWS", new
+                    {
+                        Worker = child.Evidence(),
+                        JobMember = member,
+                        InheritedHandles = "stdout/stderr only",
+                        InheritableSentinelExcluded = true,
+                        SentinelCheckedWhileSuspended = true,
+                        AtomicJobAssignment = true,
+                        SuspendedUntilValidated = true
+                    });
                     if (Native.ResumeThread(thread) == uint.MaxValue) throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError());
                     write.Dispose(); // only child holds the write end now
                     using FileStream output = new(read, FileAccess.Read);
@@ -83,8 +105,8 @@ internal static class ChildWorker
                         Native.Check(Native.TerminateJobObject(job, 125)); // also contain any descendants
                         reaped = Quiescent(job, process);
                         if (!reaped) throw new InvalidOperationException("job still active after worker exit");
-                        Program.Log("DIRECT-ACCESS", result);
-                        return System.Text.Json.JsonSerializer.Serialize(result);
+                        Program.Log("DIRECT-ACCESS", result.Evidence());
+                        return System.Text.Json.JsonSerializer.Serialize(result.Evidence());
                     }
                     catch (OperationCanceledException) when (hang && !cancel.IsCancellationRequested)
                     {
@@ -138,5 +160,8 @@ internal static class ChildWorker
     }
 }
 
-internal sealed record DeviceObservation(string Backend, string PathHash, int Vendor, int Product, int Open, int? GetInfo, bool? Credman);
-internal sealed record WorkerReport(uint Pid, long Created, TokenIdentity Identity, string DllSha256, int Manifest, int Count, DeviceObservation[] Devices);
+internal sealed record DeviceObservation(string Backend, string PathHash, int Vendor, int Product, int Open, int? GetInfo, bool? Credman, string? Manufacturer, string? ProductName);
+internal sealed record WorkerReport(uint Pid, long Created, TokenIdentity Identity, string DllSha256, int Manifest, int Count, DeviceObservation[] Devices)
+{
+    internal object Evidence() => new { Pid, Created, Identity = Identity.Evidence(), DllSha256, Manifest, Count, Devices };
+}

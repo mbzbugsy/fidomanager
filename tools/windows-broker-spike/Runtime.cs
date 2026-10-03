@@ -1,7 +1,6 @@
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
-using System.Security.Principal;
 using Microsoft.Win32.SafeHandles;
 
 namespace WindowsBrokerSpike;
@@ -16,8 +15,15 @@ internal static class Runtime
         if (args is ["worker-probe"])
         { Wire.Write(Console.OpenStandardOutput(), ReadOnlyProbe.Run(), default).GetAwaiter().GetResult(); return 0; }
         Program.StartEvidence();
-        Program.Log("WINDOWS", new { Os = Environment.OSVersion.ToString(), Framework = Environment.Version.ToString(), Self = self.Evidence() });
+        Program.Log("WINDOWS", new { Os = Environment.OSVersion.ToString(), Framework = Environment.Version.ToString(), Architecture = RuntimeInformation.ProcessArchitecture.ToString(), Self = self.Evidence() });
         if (args is ["identity"]) return 0;
+        if (args is ["ipc-unrelated"])
+        {
+            using NamedPipeClientStream pipe = PipeEndpoint.Connect(self.Identity);
+            using CancellationTokenSource deadline = new(TimeSpan.FromSeconds(2));
+            Wire.Read<Challenge>(pipe, deadline.Token).GetAwaiter().GetResult();
+            throw new InvalidOperationException("unexpected challenge to unrelated process");
+        }
         if (args is ["probe"]) { ChildWorker.Run(false, default); return 0; }
         if (args is ["containment-test"]) { ChildWorker.Run(true, default); return 0; }
         if (args is ["orphan-fixture"]) { ChildWorker.Run(true, default, true); return 0; }
@@ -49,10 +55,10 @@ internal static class Runtime
         finally { Native.CoUninitialize(); }
         if (launch.Process == 0) throw new InvalidOperationException("no retained elevated launch handle");
         using Peer broker = new(new SafeFileHandle(launch.Process, true));
-        Peer.SameSession(self.Identity, broker.Identity);
+        Program.Log("WINDOWS", new { LaunchedBroker = broker.Evidence() });
+        Peer.SameElevationSession(self, broker);
         if (!broker.Identity.Elevated || broker.Identity.Integrity < 0x3000)
             throw new InvalidOperationException("broker not elevated");
-        Program.Log("WINDOWS", new { LaunchedBroker = broker.Evidence() });
         Program.Log("UI", new { AllowSetForegroundWindow = Native.AllowSetForegroundWindow(broker.Pid) });
         using NamedPipeClientStream pipe = PipeEndpoint.Connect(self.Identity);
         Native.Check(Native.GetNamedPipeServerProcessId(pipe.SafePipeHandle, out uint serverPid));
@@ -108,8 +114,8 @@ internal static class Runtime
         using Peer client = new(pid); // CLI PID/time are hints. Hold the OS handle, never signal by PID.
         if (client.Created != created || client.Identity.Elevated || client.Identity.Integrity != 0x2000)
             throw new InvalidDataException("stale launch/client token");
-        Peer.SameSession(self.Identity, client.Identity); // alternate credentials intentionally unsupported
-        using NamedPipeServerStream pipe = PipeEndpoint.Create(self.Identity);
+        Peer.SameElevationSession(client, self); // alternate credentials intentionally unsupported
+        using NamedPipeServerStream pipe = PipeEndpoint.Create(client.Identity); // initiating medium logon owns the namespace
         using CancellationTokenSource deadline = new(TimeSpan.FromSeconds(10));
         Task connect = pipe.WaitForConnectionAsync(deadline.Token);
         while (!connect.IsCompleted)
@@ -123,7 +129,7 @@ internal static class Runtime
         IdentityRules.SameProcess(client.Pid, client.Created, actualPid, peer.Created);
         if (!client.Alive)
             throw new InvalidDataException("pipe peer is not retained launching process");
-        Peer.SameSession(self.Identity, peer.Identity);
+        Peer.SameSession(client.Identity, peer.Identity);
         Guid generation = Guid.NewGuid();
         Wire.Write(pipe, new Challenge(Wire.Version, generation), deadline.Token).GetAwaiter().GetResult();
         Request request = Wire.Read<Request>(pipe, deadline.Token).GetAwaiter().GetResult();
@@ -131,11 +137,14 @@ internal static class Runtime
         string? impersonated = null;
         pipe.RunAsClient(() =>
         {
-            using WindowsIdentity identity = WindowsIdentity.GetCurrent(true)
-            ?? throw new InvalidDataException("no impersonation token"); impersonated = identity.User?.Value;
+            // Query the identification token directly; no lazy managed identity assembly loads
+            // while impersonating an identification-only caller. OpenAsSelf changes query access,
+            // not the token being observed. RunAsClient still reverts before any work.
+            Native.Check(Native.OpenThreadToken(Native.GetCurrentThread(), 8, true, out SafeFileHandle token));
+            using (token) impersonated = Peer.ReadSid(token);
         });
         if (impersonated != client.Identity.Sid) throw new InvalidDataException("pipe impersonation SID mismatch");
-        Program.Log("IPC", new { ConnectedPeer = peer.Evidence(), ImpersonatedSid = impersonated });
+        Program.Log("IPC", new { ConnectedPeer = peer.Evidence(), ImpersonatedSidMatchesClient = impersonated == client.Identity.Sid });
         Lifecycle state = new(generation, request.Client); state.Begin(request);
         using CancellationTokenSource lost = new();
         using CancellationTokenSource watchStop = new();

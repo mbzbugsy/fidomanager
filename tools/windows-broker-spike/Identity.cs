@@ -6,7 +6,11 @@ using Microsoft.Win32.SafeHandles;
 
 namespace WindowsBrokerSpike;
 
-internal sealed record TokenIdentity(string Sid, string LogonSid, string Logon, uint Session, bool Elevated, uint Integrity);
+internal sealed record TokenIdentity(string Sid, string LogonSid, string Logon, uint Session, bool Elevated, uint Integrity)
+{
+    // OS identifiers remain in memory for peer validation, never in diagnostic evidence.
+    internal object Evidence() => new { Session, Elevated, Integrity };
+}
 
 [SupportedOSPlatform("windows")]
 internal sealed class Peer : IDisposable
@@ -44,10 +48,13 @@ internal sealed class Peer : IDisposable
         finally { Marshal.FreeHGlobal(buffer); }
     }
 
+    internal static string ReadSid(SafeFileHandle token)
+        => Info(token, 1, p => new SecurityIdentifier(Marshal.ReadIntPtr(p)).Value);
+
     internal static TokenIdentity ReadToken(SafeFileHandle token)
     {
-        string sid = Info(token, 1, p => new SecurityIdentifier(Marshal.ReadIntPtr(p)).Value);
-        string logonSid = Info(token, 2, p =>
+        string sid = ReadSid(token);
+        string logonSid = Info(token, 28, p => // TokenLogonSid: query only the required group
         {
             int count = Marshal.ReadInt32(p), start = IntPtr.Size == 8 ? 8 : 4, stride = IntPtr.Size == 8 ? 16 : 8;
             for (int i = 0; i < count; i++)
@@ -71,8 +78,25 @@ internal sealed class Peer : IDisposable
         return new(sid, logonSid, logon, session, elevated, integrity);
     }
 
+    internal static void SameElevationSession(Peer medium, Peer high)
+    {
+        Native.Check(Native.OpenProcessToken(high.Handle, 8, out SafeFileHandle token));
+        using (token)
+        {
+            using SafeFileHandle linked = Info(token, 19, p => Native.Handle(new SafeFileHandle(Marshal.ReadIntPtr(p), true)));
+            IdentityRules.ElevationPair(medium.Identity, high.Identity, ReadToken(linked));
+        }
+        Program.Log("IPC", new
+        {
+            OsLinkedTokenPairVerified = true,
+            SameUser = true,
+            SameLogonSid = true,
+            SameSession = true,
+            SameAuthenticationId = medium.Identity.Logon == high.Identity.Logon
+        });
+    }
     internal static void SameSession(TokenIdentity one, TokenIdentity two)
         => IdentityRules.SameSession(one, two);
-    internal object Evidence() => new { Pid, Created, Identity, Image };
+    internal object Evidence() => new { Pid, Created, Identity = Identity.Evidence(), Image = Path.GetFileName(Image) };
     public void Dispose() => Handle.Dispose();
 }
