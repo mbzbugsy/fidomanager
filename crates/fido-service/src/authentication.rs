@@ -76,21 +76,52 @@ impl AuthenticationAuthority {
             SensitiveWorkflowKind::CredentialInspection,
             self.clock.now(),
         )?;
-        let acquisition = self
-            .next_acquisition
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
-            .map(AcquisitionId)
-            .map_err(|_| AdmissionError::WorkflowIdExhausted)?;
-        let (prompt, prompt_outcome) = self
-            .controller
-            .lock()
-            .map_err(|_| AdmissionError::RecoveryBarrier)?
-            .request(
-                admission.workflow_id(),
-                Instant::now(),
-                Duration::from_secs(fido_auth::PROMPT_LIFETIME_SECS),
-            )
-            .map_err(|_| AdmissionError::OperationInProgress)?;
+        let setup = (|| {
+            let acquisition = self
+                .next_acquisition
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
+                .map(AcquisitionId)
+                .map_err(|_| (AdmissionError::WorkflowIdExhausted, RecoveryAdmission::Open))?;
+            let mut controller = self
+                .controller
+                .lock()
+                .map_err(|_| (AdmissionError::RecoveryBarrier, RecoveryAdmission::Barrier))?;
+            let (prompt, prompt_outcome) = controller
+                .request(
+                    admission.workflow_id(),
+                    Instant::now(),
+                    Duration::from_secs(fido_auth::PROMPT_LIFETIME_SECS),
+                )
+                .map_err(|_| {
+                    // request() creates no new active prompt on Err. An existing prompt cannot be
+                    // torn down by this failed reservation, so retain a separate recovery barrier.
+                    let recovery = if controller.is_active() {
+                        RecoveryAdmission::Barrier
+                    } else {
+                        RecoveryAdmission::Open
+                    };
+                    (AdmissionError::OperationInProgress, recovery)
+                })?;
+            Ok((acquisition, prompt, prompt_outcome))
+        })();
+        let (acquisition, prompt, prompt_outcome) = match setup {
+            Ok(setup) => setup,
+            Err((error, recovery_admission)) => {
+                // No worker/native call or new sheet has started. Release exactly this admission
+                // as an internal failure; controller uncertainty may still block recovery.
+                gate.finish(
+                    &admission,
+                    WorkflowCompletion::Failed,
+                    WorkflowReleaseEvidence {
+                        execution_quiescence: ExecutionQuiescence::Quiescent,
+                        recovery_admission,
+                    },
+                    self.clock.now(),
+                )
+                .map_err(|_| AdmissionError::RecoveryBarrier)?;
+                return Err(error);
+            }
+        };
         Ok(AuthenticationReservation {
             admission,
             prompt,
@@ -275,14 +306,7 @@ impl AuthenticationAuthority {
             {
                 return Err(Status::Uncertain);
             }
-            match response.response {
-                WorkerResponse::AuthenticationValidated { evidence }
-                    if evidence.binding == binding && evidence.kind == kind =>
-                {
-                    Ok(evidence)
-                }
-                _ => Err(Status::Uncertain),
-            }
+            validate_authentication_evidence(response.response, binding, kind)
         })();
         match transaction {
             Ok(evidence) => {
@@ -335,6 +359,26 @@ impl AuthenticationAuthority {
     }
 }
 
+fn validate_authentication_evidence(
+    response: WorkerResponse,
+    binding: AcquisitionBinding,
+    kind: GrantKind,
+) -> Result<AuthenticationEvidence, Status> {
+    match response {
+        WorkerResponse::AuthenticationValidated { evidence }
+            if evidence.binding == binding && evidence.kind == kind =>
+        {
+            // Enforce cleanup independently of the worker, even for otherwise exact evidence.
+            if evidence.status == Status::Validated && !evidence.attached_puat_cleared {
+                Err(Status::CleanupFailed)
+            } else {
+                Ok(evidence)
+            }
+        }
+        _ => Err(Status::Uncertain),
+    }
+}
+
 fn envelope(binding: AcquisitionBinding, id: u64, request: WorkerRequest) -> WorkerRequestEnvelope {
     WorkerRequestEnvelope {
         protocol_version: WORKER_PROTOCOL_VERSION,
@@ -375,6 +419,150 @@ pub fn presentation_failed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fido_core::{DeviceGeneration, PromptInstanceId, WorkflowId};
+
+    #[test]
+    fn reservation_unwinds_acquisition_exhaustion_before_any_prompt() {
+        let a = AuthenticationAuthority::default();
+        a.next_acquisition.store(u64::MAX, Ordering::SeqCst);
+        assert!(matches!(
+            a.reserve(),
+            Err(AdmissionError::WorkflowIdExhausted)
+        ));
+        assert!(!a.gate.lock().unwrap_or_else(|_| panic!("gate")).is_active());
+        assert!(
+            !a.controller
+                .lock()
+                .unwrap_or_else(|_| panic!("controller"))
+                .is_active()
+        );
+        // Repair only the synthetic test exhaustion. There was no native authority to reuse.
+        a.next_acquisition.store(1, Ordering::SeqCst);
+        assert!(a.reserve().is_ok());
+    }
+
+    #[test]
+    fn reservation_unwinds_prompt_request_failure_without_new_controller_state() {
+        let a = AuthenticationAuthority::default();
+        a.controller
+            .lock()
+            .unwrap_or_else(|_| panic!("controller"))
+            .shutdown();
+        assert!(matches!(
+            a.reserve(),
+            Err(AdmissionError::OperationInProgress)
+        ));
+        assert!(!a.gate.lock().unwrap_or_else(|_| panic!("gate")).is_active());
+        let mut controller = a.controller.lock().unwrap_or_else(|_| panic!("controller"));
+        assert!(!controller.is_active());
+        // Restore the synthetic shutdown only in this test, then prove the gate was not orphaned.
+        *controller = PromptController::default();
+        drop(controller);
+        assert!(a.reserve().is_ok());
+    }
+
+    #[test]
+    fn reservation_unwinds_without_tearing_down_an_existing_prompt() {
+        let a = AuthenticationAuthority::default();
+        let (existing, outcome) = a
+            .controller
+            .lock()
+            .unwrap_or_else(|_| panic!("controller"))
+            .request(
+                WorkflowId::from_raw(99),
+                Instant::now(),
+                Duration::from_secs(30),
+            )
+            .unwrap_or_else(|_| panic!("prompt"));
+        assert!(matches!(
+            a.reserve(),
+            Err(AdmissionError::OperationInProgress)
+        ));
+        let gate = a.gate.lock().unwrap_or_else(|_| panic!("gate"));
+        assert!(!gate.is_active());
+        assert_eq!(gate.recovery_admission(), RecoveryAdmission::Barrier);
+        drop(gate);
+        assert!(
+            a.controller
+                .lock()
+                .unwrap_or_else(|_| panic!("controller"))
+                .is_active()
+        );
+        assert!(outcome.try_recv().is_err());
+        assert!(matches!(a.reserve(), Err(AdmissionError::RecoveryBarrier)));
+        a.controller
+            .lock()
+            .unwrap_or_else(|_| panic!("controller"))
+            .did_teardown(existing.binding(), Instant::now())
+            .unwrap_or_else(|_| panic!("teardown"));
+    }
+
+    #[test]
+    fn reservation_unwinds_poisoned_controller_but_retains_recovery_barrier() {
+        let a = AuthenticationAuthority::default();
+        let controller = Arc::clone(&a.controller);
+        let poisoned = std::thread::spawn(move || {
+            let _held = controller.lock().unwrap_or_else(|_| panic!("controller"));
+            panic!("synthetic controller poisoning");
+        });
+        assert!(poisoned.join().is_err());
+        assert!(matches!(a.reserve(), Err(AdmissionError::RecoveryBarrier)));
+        let gate = a.gate.lock().unwrap_or_else(|_| panic!("gate"));
+        assert!(!gate.is_active());
+        assert_eq!(gate.recovery_admission(), RecoveryAdmission::Barrier);
+        drop(gate);
+        assert!(matches!(a.reserve(), Err(AdmissionError::RecoveryBarrier)));
+    }
+
+    #[test]
+    fn parent_rejects_validated_evidence_without_attached_puat_cleanup() {
+        let binding = AcquisitionBinding {
+            worker_generation: 1,
+            device_generation: DeviceGeneration(1),
+            workflow_id: WorkflowId::from_raw(1),
+            prompt_instance_id: PromptInstanceId::from_raw(1),
+            acquisition_id: AcquisitionId(1),
+        };
+        let evidence = AuthenticationEvidence {
+            binding,
+            kind: GrantKind::CredMan,
+            status: Status::Validated,
+            attached_puat_cleared: false,
+        };
+        assert_eq!(
+            validate_authentication_evidence(
+                WorkerResponse::AuthenticationValidated { evidence },
+                binding,
+                evidence.kind
+            ),
+            Err(Status::CleanupFailed)
+        );
+        let cleaned = AuthenticationEvidence {
+            attached_puat_cleared: true,
+            ..evidence
+        };
+        assert_eq!(
+            validate_authentication_evidence(
+                WorkerResponse::AuthenticationValidated { evidence: cleaned },
+                binding,
+                cleaned.kind
+            ),
+            Ok(cleaned)
+        );
+        let other = AcquisitionBinding {
+            acquisition_id: AcquisitionId(2),
+            ..binding
+        };
+        assert_eq!(
+            validate_authentication_evidence(
+                WorkerResponse::AuthenticationValidated { evidence },
+                other,
+                evidence.kind
+            ),
+            Err(Status::Uncertain)
+        );
+    }
+
     #[test]
     fn admission_has_zero_queue_and_bound_prompt_identity() {
         let a = AuthenticationAuthority::default();

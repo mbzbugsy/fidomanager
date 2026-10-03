@@ -123,6 +123,9 @@ pub fn select_kind<'a>(
         return None;
     }
     let permissions = seen.get("pinUvAuthToken") == Some(&true);
+    if !permissions && versions.iter().any(|v| v == "FIDO_2_1") {
+        return None;
+    }
     let ro = seen.get("perCredMgmtRO") == Some(&true);
     let cm = seen.get("credMgmt") == Some(&true);
     let preview = seen.get("credentialMgmtPreview") == Some(&true);
@@ -547,6 +550,52 @@ mod tests {
         assert_eq!(
             select_kind(&versions, [("clientPin", true), ("clientPin", false)]),
             None
+        );
+    }
+
+    #[test]
+    fn legacy_preview_refuses_contradictory_ctap21_without_permission_tokens() {
+        for versions in [
+            vec!["FIDO_2_1".to_owned()],
+            vec!["FIDO_2_0".to_owned(), "FIDO_2_1".to_owned()],
+            vec![
+                "FIDO_2_0".to_owned(),
+                "FIDO_2_1_PRE".to_owned(),
+                "FIDO_2_1".to_owned(),
+            ],
+        ] {
+            for token_option in [None, Some(("pinUvAuthToken", false))] {
+                let mut options = vec![("clientPin", true), ("credentialMgmtPreview", true)];
+                options.extend(token_option);
+                assert_eq!(select_kind(&versions, options), None);
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_preview_and_scoped_ctap21_remain_distinct() {
+        for versions in [
+            vec!["FIDO_2_0".to_owned()],
+            vec!["FIDO_2_0".to_owned(), "FIDO_2_1_PRE".to_owned()],
+        ] {
+            assert_eq!(
+                select_kind(
+                    &versions,
+                    [("clientPin", true), ("credentialMgmtPreview", true)]
+                ),
+                Some(GrantKind::LegacyUnscoped)
+            );
+        }
+        assert_eq!(
+            select_kind(
+                &["FIDO_2_0".to_owned(), "FIDO_2_1".to_owned()],
+                [
+                    ("clientPin", true),
+                    ("credMgmt", true),
+                    ("pinUvAuthToken", true)
+                ]
+            ),
+            Some(GrantKind::CredMan)
         );
     }
 }

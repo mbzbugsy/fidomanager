@@ -90,8 +90,11 @@ pub mod secret_channel {
 
     pub const SECRET_FD: i32 = 3;
 
-    /// Both socket endpoints are CLOEXEC. Only this Command's post-fork child gets a dup at 3;
-    /// unrelated concurrent spawns cannot inherit either endpoint. No path/env/bootstrap secret.
+    /// Both endpoints are CLOEXEC when pair() returns, before ordinary subsequent exec. On macOS
+    /// socketpair creation and setting FD_CLOEXEC are separate operations, leaving a theoretical
+    /// creation-to-fcntl window. Current FidoManager production spawning is controlled/serialized;
+    /// future in-process helper/plugin spawn concurrency must revisit this assumption.
+    /// Only this Command's post-fork child gets a dup at 3. No path/env/bootstrap secret.
     pub fn attach(command: &mut Command) -> io::Result<UnixStream> {
         let (parent, child) = UnixStream::pair()?;
         parent.set_write_timeout(Some(std::time::Duration::from_millis(100)))?;
