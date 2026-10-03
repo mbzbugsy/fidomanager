@@ -80,12 +80,25 @@ fn two_keys_use_selected_native_target_and_discard_both_old_handles() -> TestRes
     )?;
     let authority = AuthenticationAuthority::default();
     let mut previous_history_ids = None;
+    let mut retired_handles = Vec::new();
     for (selected, kind) in [
         (1, fido_auth::GrantKind::CredManReadOnly),
         (0, fido_auth::GrantKind::CredMan),
     ] {
         let snapshot = supervisor.refresh()?;
         assert_eq!(snapshot.devices.len(), 2);
+        let presentations =
+            fido_service::presentation::authenticator_presentations(&snapshot.devices);
+        assert!(presentations[0].detail.ends_with(" · Key 1"));
+        assert!(presentations[1].detail.ends_with(" · Key 2"));
+        for (device, presentation) in snapshot.devices.iter().zip(&presentations) {
+            assert!(
+                !presentation
+                    .label()
+                    .contains(&format!("{:032x}", device.handle.as_raw()))
+            );
+            assert!(!presentation.label().contains("session"));
+        }
         let history_ids = [
             snapshot.devices[0].verification_history_id,
             snapshot.devices[1].verification_history_id,
@@ -128,9 +141,25 @@ fn two_keys_use_selected_native_target_and_discard_both_old_handles() -> TestRes
         assert!(result.attached_puat_cleared && result.worker_quiescent && result.prompt_torn_down);
         for device in snapshot.devices {
             assert!(supervisor.resolve_handle(device.handle).is_none());
+            retired_handles.push(device.handle);
         }
         std::thread::sleep(Duration::from_millis(1_020));
     }
+    // Rediscovery can yield the same visible labels, but no old handle may bind to either key.
+    let replacement = supervisor.refresh()?;
+    let presentations =
+        fido_service::presentation::authenticator_presentations(&replacement.devices);
+    assert!(presentations[0].detail.ends_with(" · Key 1"));
+    assert!(presentations[1].detail.ends_with(" · Key 2"));
+    let result = authority.validate(
+        &mut supervisor,
+        retired_handles[0],
+        authority.reserve()?,
+        |_, _, _, _, _, _| panic!("Stale selection must fail before presenting a PIN prompt"),
+    );
+    assert_eq!(result.status, Status::StaleAcquisition);
+    assert!(result.grant_kind.is_none());
+    assert!(result.worker_quiescent && result.prompt_torn_down);
     Ok(())
 }
 

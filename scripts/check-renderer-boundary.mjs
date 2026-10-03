@@ -155,7 +155,7 @@ assertExactArray(
   'Milestone 1 permits only tauri-plugin-single-instance.',
 );
 if (
-  /fido-(?:core|worker-protocol|worker|worker-fixture|libfido2|platform|native-ui)\s*=/.test(
+  /fido-(?:auth|core|worker-protocol|worker|worker-fixture|libfido2|platform|native-ui)\s*=/.test(
     cargoToml,
   )
 ) {

@@ -412,13 +412,6 @@ h1 {
   font-size: 0.8rem;
 }
 
-.session-tag {
-  display: inline-block;
-  margin-left: 0.75rem;
-  color: #aab5af;
-  font-size: 0.7rem;
-}
-
 .verification-tag {
   display: inline-block;
   margin-top: 0.4rem;
@@ -435,8 +428,7 @@ h1 {
 }
 
 .vidpid span,
-.detail span,
-.device-footer > span {
+.detail span {
   display: block;
   color: var(--faint);
   font-size: 0.62rem;
@@ -545,21 +537,6 @@ h1 {
   color: #8f9994;
   font-family: var(--mono);
   font-size: 0.62rem;
-}
-
-.device-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.68rem 1.35rem;
-  border-top: 1px solid var(--line);
-  background: #0f1311;
-}
-
-.device-footer code {
-  color: #69736e;
-  font-size: 0.64rem;
 }
 
 .empty-state {

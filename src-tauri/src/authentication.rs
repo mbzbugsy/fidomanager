@@ -11,19 +11,21 @@ pub struct NativeTarget {
     label: String,
 }
 impl NativeTarget {
-    pub fn new(handle: authentication::DeviceHandle, product: Option<&str>) -> Self {
-        let name: String = product
-            .unwrap_or("Security key")
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(80)
-            .collect();
+    pub fn new(
+        handle: authentication::DeviceHandle,
+        presentation: &fido_service::presentation::AuthenticatorPresentation,
+    ) -> Self {
         Self {
+            // Backend-owned event identity only; never displayed or accepted from the renderer.
             id: format!("validate-authentication-{:032x}", handle.as_raw()),
             handle,
-            label: format!("{name} — session {:08x}", handle.as_raw()),
+            label: presentation.label(),
         }
     }
+}
+
+fn select_target(targets: &[NativeTarget], id: &str) -> Option<NativeTarget> {
+    targets.iter().find(|target| target.id == id).cloned()
 }
 
 #[derive(Clone)]
@@ -77,12 +79,7 @@ impl AuthenticationMenu {
         });
     }
     fn select(&self, id: &str) -> Option<NativeTarget> {
-        self.targets
-            .lock()
-            .ok()?
-            .iter()
-            .find(|target| target.id == id)
-            .cloned()
+        select_target(&self.targets.lock().ok()?, id)
     }
 }
 
@@ -142,12 +139,19 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
                 return;
             }
         };
-        let Some(device) = snapshot.devices.iter().find(|d| d.handle == target.handle) else {
+        let Some(index) = snapshot
+            .devices
+            .iter()
+            .position(|d| d.handle == target.handle)
+        else {
             return;
         };
+        let device = &snapshot.devices[index];
         let handle = device.handle;
         let history_id = device.verification_history_id;
-        let target_label = NativeTarget::new(handle, device.product.as_deref()).label;
+        let target_label =
+            fido_service::presentation::authenticator_presentations(&snapshot.devices)[index]
+                .label();
         let presenter_app = app.clone();
         let result = authority.validate(
             &mut supervisor,
@@ -233,4 +237,41 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
         };
         notice(&app, message);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fido_service::presentation::AuthenticatorPresentation;
+
+    #[test]
+    fn native_labels_do_not_route_targets_and_stale_ids_fail_closed() {
+        let presentation = AuthenticatorPresentation {
+            name: "Security Key(F829)".to_owned(),
+            detail: "Thetis · USB".to_owned(),
+            transports: vec!["USB".to_owned()],
+        };
+        let first = NativeTarget::new(authentication::DeviceHandle::from_raw(9), &presentation);
+        let second = NativeTarget::new(authentication::DeviceHandle::from_raw(10), &presentation);
+        let targets = [first.clone(), second.clone()];
+        assert_eq!(first.label, "Security Key(F829) · Thetis · USB");
+        assert_eq!(first.label, second.label);
+        assert!(!format!("Authenticate {}…", first.label).contains("00000009"));
+        assert!(!format!("Authenticate {}…", second.label).contains("0000000a"));
+        assert_eq!(
+            select_target(&targets, &first.id).map(|t| t.handle),
+            Some(first.handle)
+        );
+        assert_eq!(
+            select_target(&targets, &second.id).map(|t| t.handle),
+            Some(second.handle)
+        );
+        assert!(select_target(&targets, &first.label).is_none());
+        let replacement = [NativeTarget::new(
+            authentication::DeviceHandle::from_raw(11),
+            &presentation,
+        )];
+        assert!(select_target(&replacement, &first.id).is_none());
+        assert!(select_target(&replacement, &second.id).is_none());
+    }
 }

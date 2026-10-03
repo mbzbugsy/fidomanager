@@ -17,6 +17,8 @@
   };
 
   type Authenticator = {
+    displayName: string;
+    displayDetail: string;
     handle: string;
     generation: string;
     vendorId: number;
@@ -242,7 +244,7 @@
                     ></span>
                     <span>{friendlyStatus(device.readStatus)}</span>
                   </div>
-                  <h3>{device.product ?? 'FIDO authenticator'}</h3>
+                  <h3>{device.displayName}</h3>
                   {#if device.pinCheckPassed}
                     <span
                       class="verification-tag"
@@ -250,13 +252,10 @@
                       >PIN check passed</span
                     >
                   {/if}
-                  <p>
-                    {device.manufacturer ?? 'Unknown manufacturer'}
-                    <code
-                      class="session-tag"
-                      title="Temporary identifier for this connected key"
-                      >Session {device.handle.slice(-8)}</code
-                    >
+                  <p
+                    title="Manufacturer and supported transports. Key numbers are temporary display labels."
+                  >
+                    {device.displayDetail}
                   </p>
                 </div>
 
@@ -281,12 +280,11 @@
 
               <div class="detail-grid">
                 <div class="detail wide">
-                  <span>AAGUID</span>
+                  <span
+                    title="Authenticator model/variant, not a unique physical key"
+                    >AAGUID</span
+                  >
                   <code>{device.aaguid ?? 'Not reported'}</code>
-                </div>
-                <div class="detail">
-                  <span>Generation</span>
-                  <strong>{device.generation}</strong>
                 </div>
                 <div class="detail">
                   <span>Freshness</span>
@@ -315,13 +313,6 @@
                   </div>
                 </div>
               {/if}
-
-              <footer class="device-footer">
-                <span>Handle</span>
-                <code
-                  >{device.handle.slice(0, 8)}…{device.handle.slice(-8)}</code
-                >
-              </footer>
             </article>
           {/each}
         </div>

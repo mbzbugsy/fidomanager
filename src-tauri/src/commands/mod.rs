@@ -24,6 +24,8 @@ pub struct AuthenticatorList {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AuthenticatorSummary {
+    display_name: String,
+    display_detail: String,
     handle: String,
     generation: String,
     vendor_id: u16,
@@ -88,6 +90,8 @@ pub async fn list_authenticators(
             .lock()
             .map_err(|_| "native discovery authority lock is poisoned".to_owned())?;
         let snapshot = coordinator.refresh().map_err(|error| error.to_string())?;
+        let presentations =
+            fido_service::presentation::authenticator_presentations(&snapshot.devices);
         // Keep history only for uniquely identified currently connected macOS IORegistry entries.
         // Markers remain backend-only: the renderer receives a historical boolean, never a path,
         // connection hash, acquisition or reusable approval.
@@ -117,11 +121,9 @@ pub async fn list_authenticators(
                 snapshot
                     .devices
                     .iter()
-                    .map(|device| {
-                        crate::authentication::NativeTarget::new(
-                            device.handle,
-                            device.product.as_deref(),
-                        )
+                    .zip(&presentations)
+                    .map(|(device, presentation)| {
+                        crate::authentication::NativeTarget::new(device.handle, presentation)
                     })
                     .collect(),
             );
@@ -130,7 +132,10 @@ pub async fn list_authenticators(
         let devices = snapshot
             .devices
             .into_iter()
-            .map(|device| AuthenticatorSummary {
+            .zip(presentations)
+            .map(|(device, presentation)| AuthenticatorSummary {
+                display_name: presentation.name,
+                display_detail: presentation.detail,
                 pin_check_passed: device
                     .verification_history_id
                     .is_some_and(|id| passed.contains(&id)),
@@ -145,7 +150,7 @@ pub async fn list_authenticators(
                     .map(|value| format!("{:032x}", u128::from_be_bytes(*value.as_bytes()))),
                 versions: device.versions,
                 extensions: device.extensions,
-                transports: device.transports,
+                transports: presentation.transports,
                 options: device
                     .options
                     .into_iter()

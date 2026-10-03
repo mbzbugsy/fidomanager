@@ -4,6 +4,7 @@
 pub mod native_ui_spike;
 
 pub mod authentication;
+pub mod presentation;
 
 mod discovery;
 mod process_worker;

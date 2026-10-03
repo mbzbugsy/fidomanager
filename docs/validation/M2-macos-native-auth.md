@@ -14,8 +14,8 @@ observations; [INFERENCE] conclusion from those sources; [UNRESOLVED] evidence s
 [SOURCE] `AuthenticationAuthority` reserves the existing global `SensitiveWorkflowGate` and
 `PromptController`, minting workflow, prompt and acquisition identities. The canonical discovery
 supervisor supplies the generation-bound device target. A native menu lists each discovered key
-using backend-owned opaque handles and product/session labels. The selected handle must survive
-a fresh registry refresh before preparation; stale selections are rejected, never rebound.
+using backend-owned opaque handles and product/manufacturer/transport labels. The selected handle
+must survive a fresh registry refresh before preparation; stale selections are rejected, never rebound.
 The PIN sheet identifies that selected key. The transaction exclusively borrows the supervisor
 for its entire lifetime; background refresh cannot interleave. Multiple connected keys are
 supported as separate sequential workflows, with no shared or cached authority.
@@ -192,8 +192,9 @@ multi-key/toast changes, the operator confirmed both keys were listed, selected-
 presentation worked, and toast dismissal/expiry worked. Only cancellation was requested for
 this final display check; no further PIN attempt was requested. A second supplied screenshot
 showed two Thetis keys with distinct AAGUIDs. Product/VID:PID and AAGUID are not per-unit identity;
-generation-bound opaque handles route the native selection. Matching temporary session tags
-are shown on cards and the native menu; they may change after restart/replug.
+generation-bound opaque handles route the native selection. The original build showed temporary
+session tags on cards and the native menu. The focused follow-up below removes that presentation;
+those values remain internal ephemeral routing identity and may change after restart/replug.
 
 [HARDWARE] With the per-key native menu active, two further explicit submissions returned
 `Validated`, `CredMan`, retries 8, attached-PUAT cleanup, worker quiescence and prompt teardown.
@@ -210,6 +211,81 @@ only on the selected key. Disconnect/reconnect tag clearing follows the inspecte
 correlation/pruning design and deterministic tests; it was not separately observed on hardware.
 
 [UNRESOLVED] Independent security/architecture review is required before merge.
+
+## Focused M2 presentation and identity follow-up
+
+Starting branch HEAD: `8557a41c5513be45de60a4c887b05390d60d77c1` (fetched and pulled before edits).
+The follow-up commit and validation results are recorded in PR #21, which remains Draft.
+
+[SOURCE] Cards now show product above manufacturer and a supported-transport summary. The native
+menu and PIN sheet use the same backend-formatted metadata. Transport ordering is USB, NFC,
+Bluetooth LE, Internal, Hybrid, then other names alphabetically; empty metadata has generic
+fallbacks. No vendor-specific product parsing exists. Normal presentation removes the session
+badge, raw-handle footer and generation field. AAGUID remains in technical details with its
+model/variant meaning; it cannot uniquely identify a physical unit. Supported transports may
+help distinguish variants; they do not assert the current connection or unique physical identity.
+
+[SOURCE] Labels that collide after product/manufacturer/transports are formatted receive `Key 1`,
+`Key 2`, etc. in snapshot enumeration order. These are explicitly temporary presentation numbers;
+they can change with discovery order or membership. They are neither persisted nor read for
+routing, authorization or history correlation. The exact backend-owned `NativeTarget` handle
+and event ID remain unchanged. Refresh before prompting still rejects stale handles, and worker
+retirement still invalidates them. The renderer gains only display strings through the existing
+read-only discovery DTO; the command and permission allowlists remain unchanged.
+
+### macOS stable-identifier investigation
+
+[SOURCE] Our native discovery adapter copies libfido2's path, VID/PID, manufacturer and product;
+there is no serial field. In the reviewed
+[libfido2 1.17.0 HID source](https://github.com/Yubico/libfido2/blob/1.17.0/src/hid_osx.c),
+`get_path` builds `ioreg://<entry ID>` from `IORegistryEntryGetRegistryEntryID` and `get_str`
+reads manufacturer/product only. That path identifies an IORegistry connection, not a persistent
+physical unit. The existing app-scoped history hash does not improve its persistence semantics.
+
+[SOURCE] Apple's
+[IOHIDDeviceKeys.h](https://github.com/apple-oss-distributions/IOHIDFamily/blob/main/IOHIDFamily/IOHIDDeviceKeys.h)
+defines `kIOHIDSerialNumberKey` as the string property `SerialNumber`. A future worker-side
+macOS lookup can resolve the current entry with `IORegistryEntryIDMatching`, create an
+`IOHIDDeviceRef`, and read `IOHIDDeviceGetProperty(..., CFSTR(kIOHIDSerialNumberKey))` without
+opening/authenticating or modifying the key. The corresponding USB device property is
+`USB Serial Number`; `iSerialNumber` is a descriptor index, not the serial itself. Availability
+of these APIs does not guarantee that a device supplies a nonempty, unique, stable serial.
+
+[MACOS] Read-only IOKit inventory found the two attached Thetis `Security Key(F829)` devices
+(`1ea8:f829`). Both HID entries lacked `SerialNumber`, `PhysicalDeviceUniqueID` and `UniqueID`.
+Both corresponding `IOUSBHostDevice` entries reported `iSerialNumber = 0` and no `USB Serial Number`.
+Only presence/types/zero-index results were reported; no raw serial was displayed or saved.
+No reconnect/reboot stability experiment or authenticator mutation was performed.
+
+[INFERENCE] No suitable stable per-unit identifier was established for these keys. Persistent
+aliases are intentionally deferred to M3. DeviceHandle, session/worker/device generation, AAGUID,
+VID/PID, manufacturer/product, transports, port/location and the temporary registry identifier
+are not alias keys. Other hardware may expose a serial, but its vendor semantics and uniqueness
+need verification across reconnect, port changes and restart before supporting persistence.
+If a proven serial is available, keep the bounded raw value backend-only and propose a versioned,
+length-delimited vendor/product/serial namespace hashed with HMAC under an installation-local
+persistent secret. The resulting opaque app-local alias key must never authorize a workflow;
+missing, ambiguous or duplicate serials must disable automatic alias association. This derivation
+is a future proposal, not implemented identity or an authenticity guarantee.
+
+[TEST] Follow-up coverage checks metadata-only labels, deterministic transports and temporary
+duplicate numbering. Native-target tests prove identical visible labels still select distinct
+handles and old event IDs fail closed after replacement. The real-child two-key test retains
+exact selection/grant-kind and retirement assertions with the new presentation, then rejects a
+retired handle as `StaleAcquisition` before PIN presentation despite identical rediscovered labels.
+The renderer boundary now denies direct `fido-auth` alongside the existing lower-level crates. Its regression
+script injects all eight denied dependencies and unexpected commands/permissions into isolated
+fixtures; the unchanged approved allowlists pass.
+
+[TEST] Follow-up validation passed: `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets --locked -- -D warnings`, and
+`cargo test --workspace --all-targets --locked` (232 tests). Renderer-boundary checks, including
+resolved generated ACL output and the negative fixtures, passed. Frontend Prettier, Svelte
+typecheck (zero errors/warnings) and production build passed using Node 24.19.0 / pnpm 10.17.1.
+The existing frontend test command passed with **no test files**; no frontend test coverage is
+claimed. `git diff --check` passed. These checks establish deterministic/source evidence for the
+label follow-up; no new native UI observation or hardware authentication workflow is claimed.
+The existing independent-review and real lock/sleep-delivery merge gates remain unresolved.
 
 ## Exact changed files
 
@@ -232,6 +308,7 @@ correlation/pruning design and deterministic tests; it was not separately observ
 - `crates/fido-service/src/authentication.rs`
 - `crates/fido-service/src/discovery.rs`
 - `crates/fido-service/src/lib.rs`
+- `crates/fido-service/src/presentation.rs`
 - `crates/fido-service/src/process_worker.rs`
 - `crates/fido-service/src/supervisor.rs`
 - `crates/fido-worker-fixture/Cargo.toml`
@@ -251,6 +328,7 @@ correlation/pruning design and deterministic tests; it was not separately observ
 - `docs/validation/M2-macos-native-auth.md`
 - `package.json`
 - `scripts/check-renderer-boundary.mjs`
+- `scripts/test-renderer-boundary.mjs`
 - `src-tauri/Cargo.toml`
 - `src-tauri/src/authentication.rs`
 - `src-tauri/src/commands/mod.rs`
