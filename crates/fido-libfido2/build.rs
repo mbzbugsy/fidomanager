@@ -1,44 +1,80 @@
-use std::{env, path::Path};
+use std::{env, path::PathBuf, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=LIBFIDO2_LIB_DIR");
-    println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
+    for variable in [
+        "PKG_CONFIG_PATH",
+        "PKG_CONFIG_LIBDIR",
+        "PKG_CONFIG_SYSROOT_DIR",
+        "SDKROOT",
+        "DEVELOPER_DIR",
+        "PATH",
+    ] {
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
     if env::var_os("CARGO_FEATURE_NATIVE_LIBFIDO2").is_none() {
         return;
     }
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    if target_os == "macos" {
-        // Pin the reviewed ABI on macOS; production links PUAT APIs by default.
-        // An older runtime dylib fails loading its required symbols.
-        assert!(
-            env::var_os("LIBFIDO2_LIB_DIR").is_none(),
-            "macOS M2 resolves the reviewed library through pkg-config, not a directory override"
-        );
-        assert!(
-            pkg_config("--modversion").trim() == "1.17.0",
-            "macOS M2 requires reviewed libfido2 1.17.0"
-        );
-        let directory = pkg_config("--variable=libdir");
-        let directory = Path::new(directory.trim());
-        assert!(
-            directory.is_absolute() && directory.is_dir(),
-            "invalid reviewed library directory"
-        );
-        println!("cargo:rustc-link-search=native={}", directory.display());
-    } else if let Some(directory) = env::var_os("LIBFIDO2_LIB_DIR") {
-        // Linux discovery only. No native PUAT enablement against distro 1.14.
-        println!(
-            "cargo:rustc-link-search=native={}",
-            Path::new(&directory).display()
-        );
+    if env::var("CARGO_CFG_TARGET_OS").unwrap_or_default() != "macos" {
+        // Linux discovery retains its existing system-library policy; native PUAT is macOS only.
+        if let Some(directory) = env::var_os("LIBFIDO2_LIB_DIR") {
+            println!(
+                "cargo:rustc-link-search=native={}",
+                PathBuf::from(directory).display()
+            );
+        }
+        return;
     }
-}
-
-fn pkg_config(option: &str) -> String {
-    let output = std::process::Command::new("pkg-config")
-        .args([option, "libfido2"])
+    assert!(
+        env::var_os("LIBFIDO2_LIB_DIR").is_none(),
+        "macOS production forbids system libfido2 directory overrides"
+    );
+    let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap_or_default())
+        .join("../..")
+        .canonicalize()
+        .unwrap_or_else(|_| panic!("workspace root unavailable"));
+    let output = PathBuf::from(env::var_os("OUT_DIR").unwrap_or_default()).join("private-libfido2");
+    for input in [
+        "scripts/build-libfido2.py",
+        "native/libfido2/source.lock.json",
+        "native/libfido2/credman-allocation-bound.patch",
+        "target/native-sources/b974e7cf2ee7392134cc12c08b76a068cf250dd8.tar.gz",
+    ] {
+        println!("cargo:rerun-if-changed={}", root.join(input).display());
+    }
+    let build = Command::new("python3")
+        .arg(root.join("scripts/build-libfido2.py"))
+        .args(["build", "--out-dir"])
+        .arg(&output)
+        .arg("--target")
+        .arg(env::var("TARGET").unwrap_or_default())
         .output()
-        .unwrap_or_else(|_| panic!("macOS M2 requires pkg-config and libfido2 1.17.0"));
-    assert!(output.status.success(), "reviewed libfido2 not found");
-    String::from_utf8(output.stdout).unwrap_or_else(|_| panic!("invalid pkg-config output"))
+        .unwrap_or_else(|_| panic!("private libfido2 builder unavailable; Python 3 is required"));
+    assert!(
+        build.status.success(),
+        "private libfido2 build failed (no system fallback):\n{}\n{}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+    println!("cargo:rustc-link-search=native={}", output.display());
+    // Keep the native archive separate from the Rust rlib so the final link map can prove the
+    // exact archive/object identity instead of hiding it inside an intermediate Rust archive.
+    println!("cargo:rustc-link-lib=static:-bundle=fidomanager_fido2_bounded");
+    // Only transitive crypto/CBOR dependencies use pkg-config; never query libfido2 here.
+    for package in ["libcrypto", "libcbor"] {
+        let directory = Command::new("pkg-config")
+            .args(["--variable=libdir", package])
+            .output()
+            .unwrap_or_else(|_| panic!("pkg-config is required for native dependencies"));
+        assert!(directory.status.success(), "native dependency unavailable");
+        let directory = String::from_utf8(directory.stdout)
+            .unwrap_or_else(|_| panic!("invalid dependency directory"));
+        println!("cargo:rustc-link-search=native={}", directory.trim());
+    }
+    for library in ["crypto", "cbor", "z"] {
+        println!("cargo:rustc-link-lib={library}");
+    }
+    for framework in ["CoreFoundation", "IOKit"] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
 }

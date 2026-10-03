@@ -1,0 +1,29 @@
+--- a/src/credman.c
++++ b/src/credman.c
+@@ -19,11 +19,26 @@
+ #define CMD_DELETE_CRED		0x06
+ #define CMD_UPDATE_CRED		0x07
+ 
++/* FidoManager production ceiling, shared by RP and resident-key arrays. */
++#define FIDOMANAGER_CREDMAN_MAX_ENTRIES 256
++
++/* Private static-link identity probe; not part of the upstream public API. */
++uint32_t fidomanager_libfido2_1_17_0_credman_limit(void);
++uint32_t
++fidomanager_libfido2_1_17_0_credman_limit(void)
++{
++	return (FIDOMANAGER_CREDMAN_MAX_ENTRIES);
++}
++
+ static int
+ credman_grow_array(void **ptr, size_t *n_alloc, const size_t *n_rx, size_t n,
+     size_t size)
+ {
+ 	void *new_ptr;
++
++	/* Reject device-controlled counts before any array allocation. */
++	if (n > FIDOMANAGER_CREDMAN_MAX_ENTRIES)
++		return (-1);
+ 
+ #ifdef FIDO_FUZZ
+ 	if (n > UINT8_MAX) {

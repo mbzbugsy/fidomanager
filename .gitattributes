@@ -1,0 +1,2 @@
+# Unified-diff context lines contain a marker space before source tabs and empty lines.
+native/libfido2/credman-allocation-bound.patch whitespace=-blank-at-eol,-space-before-tab
