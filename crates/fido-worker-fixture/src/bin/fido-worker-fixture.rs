@@ -64,6 +64,9 @@ fn parse_steps(raw: &str) -> VecDeque<Step> {
 struct ScriptedBackend {
     manifest: VecDeque<Step>,
     info: VecDeque<Step>,
+    cleanup_failed: bool,
+    wrong_pin: bool,
+    two_devices: bool,
 }
 
 fn apply(step: Step) {
@@ -81,19 +84,71 @@ fn apply(step: Step) {
     }
 }
 
+struct AuthFixture {
+    cleanup_failed: bool,
+    wrong_pin: bool,
+    kind: fido_auth::GrantKind,
+}
+impl fido_libfido2::NativeAuthenticationSession for AuthFixture {
+    fn kind(&self) -> fido_auth::GrantKind {
+        self.kind
+    }
+    fn pin_retries(&self) -> Option<u8> {
+        Some(8)
+    }
+    fn validate(
+        self: Box<Self>,
+        binding: fido_auth::AcquisitionBinding,
+        pin: fido_auth::PinSecret,
+        _deadline: NativeDeadline,
+    ) -> fido_auth::AuthenticationEvidence {
+        drop(pin);
+        fido_auth::AuthenticationEvidence {
+            binding,
+            kind: self.kind(),
+            status: if self.cleanup_failed {
+                fido_auth::AuthenticationStatus::CleanupFailed
+            } else if self.wrong_pin {
+                fido_auth::AuthenticationStatus::WrongPin
+            } else {
+                fido_auth::AuthenticationStatus::Validated
+            },
+            attached_puat_cleared: !self.cleanup_failed,
+        }
+    }
+}
 impl NativeDiscoveryBackend for ScriptedBackend {
+    fn prepare_authentication(
+        &mut self,
+        key: &NativeDeviceKey,
+        _: NativeDeadline,
+    ) -> Result<Box<dyn fido_libfido2::NativeAuthenticationSession>, NativeError> {
+        Ok(Box::new(AuthFixture {
+            cleanup_failed: self.cleanup_failed,
+            wrong_pin: self.wrong_pin,
+            kind: if key == &NativeDeviceKey::from_bytes(b"ioreg://101".to_vec())? {
+                fido_auth::GrantKind::CredManReadOnly
+            } else {
+                fido_auth::GrantKind::CredMan
+            },
+        }))
+    }
     fn manifest(
         &mut self,
         _deadline: NativeDeadline,
     ) -> Result<Vec<NativeDiscoveredDevice>, NativeError> {
         apply(self.manifest.pop_front().unwrap_or(Step::Ok));
-        Ok(vec![NativeDiscoveredDevice {
-            key: NativeDeviceKey::from_bytes(b"fake-0".to_vec())?,
-            vendor_id: 0x1234,
-            product_id: 0x5678,
-            manufacturer: Some("Fixture".to_owned()),
-            product: Some("Fake Authenticator".to_owned()),
-        }])
+        (0..if self.two_devices { 2 } else { 1 })
+            .map(|i| {
+                Ok(NativeDiscoveredDevice {
+                    key: NativeDeviceKey::from_bytes(format!("ioreg://{}", 100 + i).into_bytes())?,
+                    vendor_id: 0x1234,
+                    product_id: 0x5678,
+                    manufacturer: Some("Fixture".to_owned()),
+                    product: Some("Fake Authenticator".to_owned()),
+                })
+            })
+            .collect()
     }
 
     fn get_info(
@@ -115,11 +170,23 @@ impl NativeDiscoveryBackend for ScriptedBackend {
 }
 
 fn main() {
+    let mut authentication = false;
+    let mut cleanup_failed = false;
+    let mut wrong_pin = false;
+    let mut two_devices = false;
     let mut script = None;
     let mut info = None;
     let mut raw_mode = None;
     for argument in std::env::args().skip(1) {
-        if let Some(value) = argument.strip_prefix("--script=") {
+        if argument == "--authentication" {
+            authentication = true;
+        } else if argument == "--cleanup-failed" {
+            cleanup_failed = true;
+        } else if argument == "--wrong-pin" {
+            wrong_pin = true;
+        } else if argument == "--two-devices" {
+            two_devices = true;
+        } else if let Some(value) = argument.strip_prefix("--script=") {
             script = Some(value.to_owned());
         } else if let Some(value) = argument.strip_prefix("--info=") {
             info = Some(value.to_owned());
@@ -137,6 +204,32 @@ fn main() {
         report_descriptor_sweep();
     }
 
+    #[cfg(unix)]
+    if authentication {
+        if fido_platform::process::close_inherited_descriptors_except(Some(3)).is_err() {
+            exit_immediately(exit::OS);
+        }
+        if fido_platform::process::close_inherited_descriptors_except(Some(3)).unwrap_or(usize::MAX)
+            != 0
+        {
+            exit_immediately(exit::OS);
+        }
+        let channel = fido_platform::process::secret_channel::receive()
+            .unwrap_or_else(|_| exit_immediately(exit::CONFIG));
+        fido_worker::runtime::run_with_secret(
+            stdin(),
+            stdout(),
+            ScriptedBackend {
+                manifest: VecDeque::new(),
+                info: VecDeque::new(),
+                cleanup_failed,
+                wrong_pin,
+                two_devices,
+            },
+            RuntimeConfig::default(),
+            Some(Box::new(channel)),
+        );
+    }
     if let Err(code) = harden_process() {
         exit_immediately(code);
     }
@@ -149,6 +242,9 @@ fn main() {
             ScriptedBackend {
                 manifest: parse_steps(script.as_deref().unwrap_or("")),
                 info: parse_steps(info.as_deref().unwrap_or("")),
+                cleanup_failed,
+                wrong_pin,
+                two_devices,
             },
             RuntimeConfig::default(),
         ),

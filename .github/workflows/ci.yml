@@ -69,4 +69,23 @@ jobs:
         run: pnpm security:renderer-boundary
 
       - name: Rust tests
-        run: cargo test --workspace --locked
+        # Linux covers discovery and deterministic auth contracts, never native PUAT.
+        run: cargo test --workspace --all-targets --locked
+
+  macos-native-auth:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Reviewed native baseline
+        run: |
+          brew install pkg-config libfido2
+          test "$(pkg-config --modversion libfido2)" = "1.17.0"
+      - name: Setup pinned Rust
+        run: rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
+      - name: Compile production AppKit and PUAT path
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Deterministic macOS auth and process tests (no hardware claim)
+        run: cargo test --workspace --all-targets --locked

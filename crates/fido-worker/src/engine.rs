@@ -33,6 +33,13 @@ pub struct WorkerEngine<B> {
     generation: WorkerGeneration,
     slots: Vec<WorkerSlot>,
     next_device_id: u64,
+    secret: Option<Box<dyn std::io::Read + Send>>,
+    authentication: Option<(
+        fido_auth::AcquisitionBinding,
+        Box<dyn fido_libfido2::NativeAuthenticationSession>,
+    )>,
+    auth_used: bool,
+    verification_display_scope: Option<[u8; 32]>,
 }
 
 impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
@@ -42,6 +49,94 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
             generation,
             slots: Vec::new(),
             next_device_id: 1,
+            secret: None,
+            authentication: None,
+            auth_used: false,
+            verification_display_scope: None,
+        }
+    }
+
+    pub fn with_secret(mut self, secret: Option<Box<dyn std::io::Read + Send>>) -> Self {
+        self.secret = secret;
+        self
+    }
+
+    pub fn with_verification_display_scope(mut self, scope: Option<[u8; 32]>) -> Self {
+        self.verification_display_scope = scope;
+        self
+    }
+
+    fn prepare_authentication(
+        &mut self,
+        request: &WorkerRequestEnvelope,
+        device_id: WorkerDeviceId,
+        binding: fido_auth::AcquisitionBinding,
+        deadline: NativeDeadline,
+    ) -> WorkerResponse {
+        if self.auth_used
+            || self.secret.is_none()
+            || binding.worker_generation != self.generation.0
+            || Some(binding.device_generation) != request.device_generation
+            || binding.acquisition_id.0 == 0
+            || binding.workflow_id.as_raw() == 0
+            || binding.prompt_instance_id.as_raw() == 0
+        {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        }
+        self.auth_used = true;
+        let Some(slot) = self.slots.iter().find(|s| {
+            s.device_id == device_id && s.present && s.generation == binding.device_generation
+        }) else {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::DeviceAbsent,
+            };
+        };
+        match self.backend.prepare_authentication(&slot.key, deadline) {
+            Ok(session) => {
+                let response = WorkerResponse::AuthenticationPrepared {
+                    binding,
+                    grant_kind: session.kind(),
+                    pin_retries: session.pin_retries(),
+                };
+                self.authentication = Some((binding, session));
+                response
+            }
+            Err(_) => {
+                self.secret = None;
+                WorkerResponse::Error {
+                    code: WorkerErrorCode::UnsupportedDevice,
+                }
+            }
+        }
+    }
+
+    fn validate_authentication(
+        &mut self,
+        request: &WorkerRequestEnvelope,
+        binding: fido_auth::AcquisitionBinding,
+        deadline: NativeDeadline,
+    ) -> WorkerResponse {
+        let session = self.authentication.take();
+        let secret = self.secret.take();
+        let (Some((expected, session)), Some(secret)) = (session, secret) else {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        };
+        if binding != expected || Some(binding.device_generation) != request.device_generation {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        }
+        match fido_auth::receive_secret(secret, binding, request.request_id.0) {
+            Ok(pin) => WorkerResponse::AuthenticationValidated {
+                evidence: session.validate(binding, pin, deadline),
+            },
+            Err(_) => WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            },
         }
     }
 
@@ -49,6 +144,8 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
     /// shared by every native sub-call the request makes.
     pub fn handle(&mut self, request: WorkerRequestEnvelope) -> WorkerResponseEnvelope {
         if request.validate().is_err() || request.worker_generation != self.generation {
+            self.authentication = None;
+            self.secret = None;
             return self.response(
                 &request,
                 WorkerResponse::Error {
@@ -57,8 +154,29 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
             );
         }
 
+        if self.authentication.is_some()
+            && !matches!(
+                request.request,
+                WorkerRequest::ValidateAuthentication { .. }
+            )
+        {
+            self.authentication = None;
+            self.secret = None;
+            return self.response(
+                &request,
+                WorkerResponse::Error {
+                    code: WorkerErrorCode::ProtocolMismatch,
+                },
+            );
+        }
         let deadline = NativeDeadline::after(Duration::from_millis(request.budget_ms.0));
         let response = match &request.request {
+            WorkerRequest::PrepareAuthentication { device_id, binding } => {
+                self.prepare_authentication(&request, *device_id, *binding, deadline)
+            }
+            WorkerRequest::ValidateAuthentication { binding } => {
+                self.validate_authentication(&request, *binding, deadline)
+            }
             WorkerRequest::HealthCheck => WorkerResponse::Healthy,
             // The process worker implements cancellation by termination: the service kills the
             // process at its deadline. A `Cancel` only reaches here while the worker is idle.
@@ -124,6 +242,10 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
             .iter()
             .filter(|slot| slot.present)
             .map(|slot| fido_worker_protocol::WorkerDiscoveredDevice {
+                verification_history_id: self
+                    .verification_display_scope
+                    .as_ref()
+                    .and_then(|scope| slot.key.verification_history_id(scope)),
                 device_id: slot.device_id,
                 device_generation: slot.generation,
                 vendor_id: slot.vendor_id,

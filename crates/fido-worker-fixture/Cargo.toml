@@ -9,6 +9,8 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+fido-auth = { path = "../fido-auth" }
+fido-native-ui = { path = "../fido-native-ui" }
 fido-core = { path = "../fido-core" }
 fido-libfido2 = { path = "../fido-libfido2" }
 fido-platform = { path = "../fido-platform" }

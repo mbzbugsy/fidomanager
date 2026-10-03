@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/fido-auth",
     "crates/fido-core",
     "crates/fido-libfido2",
     "crates/fido-native-ui",

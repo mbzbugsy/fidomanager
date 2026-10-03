@@ -1,4 +1,4 @@
-//! Controlled safe-adapter boundary for libfido2 discovery/GetInfo.
+//! Controlled safe adapter for discovery/GetInfo and bounded macOS PUAT authentication.
 //!
 //! The public API deliberately exposes owned values only. Native paths remain opaque inside the
 //! worker and libfido2 pointers never cross this crate boundary.
@@ -15,6 +15,24 @@ pub const MAX_NATIVE_DISCOVERED_DEVICES: usize = 65;
 pub struct NativeDeviceKey(Vec<u8>);
 
 impl NativeDeviceKey {
+    /// App-scoped historical display correlation for reviewed macOS IORegistry connections.
+    /// Never an addressing/authorization identity; no raw path or registry ID is returned.
+    pub fn verification_history_id(&self, scope: &[u8; 32]) -> Option<[u8; 32]> {
+        use sha2::{Digest, Sha256};
+        let text = std::str::from_utf8(&self.0)
+            .ok()?
+            .strip_prefix("ioreg://")?;
+        let entry = text.parse::<u64>().ok().filter(|id| *id != 0)?;
+        if text != entry.to_string() {
+            return None;
+        }
+        let mut hash = Sha256::new();
+        hash.update(b"FidoManager PIN check display history v1");
+        hash.update(scope);
+        hash.update(entry.to_be_bytes());
+        Some(hash.finalize().into())
+    }
+
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, NativeError> {
         if bytes.is_empty() || bytes.len() > MAX_NATIVE_PATH_BYTES || bytes.contains(&0) {
             return Err(NativeError::new(NativeErrorKind::Malformed, None));
@@ -157,7 +175,25 @@ impl NativeDeadline {
 /// Implementations own all native identifiers and must never expose raw paths outside
 /// `NativeDeviceKey`. Every method receives the request's [`NativeDeadline`] and must split the
 /// remaining time across its native sub-calls instead of granting each one a fresh budget.
+pub trait NativeAuthenticationSession: Send {
+    fn kind(&self) -> fido_auth::GrantKind;
+    fn pin_retries(&self) -> Option<u8>;
+    fn validate(
+        self: Box<Self>,
+        binding: fido_auth::AcquisitionBinding,
+        pin: fido_auth::PinSecret,
+        deadline: NativeDeadline,
+    ) -> fido_auth::AuthenticationEvidence;
+}
+
 pub trait NativeDiscoveryBackend: Send {
+    fn prepare_authentication(
+        &mut self,
+        _key: &NativeDeviceKey,
+        _deadline: NativeDeadline,
+    ) -> Result<Box<dyn NativeAuthenticationSession>, NativeError> {
+        Err(NativeError::new(NativeErrorKind::Unavailable, None))
+    }
     fn manifest(
         &mut self,
         deadline: NativeDeadline,
@@ -181,6 +217,9 @@ mod native {
         NativeDeviceOption, NativeDiscoveredDevice, NativeDiscoveryBackend, NativeError,
         NativeErrorKind,
     };
+
+    #[cfg(target_os = "macos")]
+    mod authentication;
 
     const FIDO_OK: c_int = 0;
     const ERROR_NAME_BOUND: usize = 64;
@@ -240,6 +279,14 @@ mod native {
     }
 
     impl NativeDiscoveryBackend for LibFido2Adapter {
+        #[cfg(target_os = "macos")]
+        fn prepare_authentication(
+            &mut self,
+            key: &NativeDeviceKey,
+            deadline: NativeDeadline,
+        ) -> Result<Box<dyn super::NativeAuthenticationSession>, NativeError> {
+            authentication::prepare(key, deadline)
+        }
         fn manifest(
             &mut self,
             deadline: NativeDeadline,
@@ -657,6 +704,35 @@ pub use native::LibFido2Adapter;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn display_history_is_app_and_connection_scoped_not_model_identity() {
+        let a = super::NativeDeviceKey::from_bytes(b"ioreg://100".to_vec())
+            .unwrap_or_else(|_| panic!("fixture"));
+        let b = super::NativeDeviceKey::from_bytes(b"ioreg://101".to_vec())
+            .unwrap_or_else(|_| panic!("fixture"));
+        assert_eq!(
+            a.verification_history_id(&[1; 32]),
+            a.verification_history_id(&[1; 32])
+        );
+        assert_ne!(
+            a.verification_history_id(&[1; 32]),
+            b.verification_history_id(&[1; 32])
+        );
+        assert_ne!(
+            a.verification_history_id(&[1; 32]),
+            a.verification_history_id(&[2; 32])
+        );
+        for key in [
+            b"ioreg://0".as_slice(),
+            b"ioreg://0100",
+            b"/dev/hidraw0",
+            b"ioreg://bad",
+        ] {
+            let key = super::NativeDeviceKey::from_bytes(key.to_vec())
+                .unwrap_or_else(|_| panic!("fixture"));
+            assert!(key.verification_history_id(&[1; 32]).is_none());
+        }
+    }
     use super::*;
 
     #[test]

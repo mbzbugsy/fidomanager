@@ -47,6 +47,22 @@ Evidence is in `docs/spikes/M1.5-worker-containment.md`: a thread worker fails c
 - **No renderer influence on the worker:** the executable is resolved beside the running executable (the shape a Tauri sidecar takes) and never from `PATH`, the environment, or any renderer-influenced value; it must be a regular, executable, non-world-writable file. The command line is a compile-time constant (`&'static [&'static str]`), the production worker accepts none, and the child environment is cleared. Native device paths, native handles, and worker-local ids never cross to the renderer (unchanged).
 - **Descriptor hygiene:** the worker closes every inherited descriptor above stderr before doing anything else.
 
+### M2 macOS secret-channel exception
+
+The trusted launcher can select the compile-time `--authentication` mode. Only that child gets a
+CLOEXEC Unix socket duplicated to fixed descriptor 3 in `pre_exec`; every other descriptor above
+stderr is still closed at startup. Both original socket endpoints are CLOEXEC, so unrelated
+spawns cannot inherit them. The child validates the fixed descriptor as a stream socket and sets
+CLOEXEC again before use. Ordinary discovery launches still close descriptor 3 too.
+
+One non-serde PIN frame binds worker/device generation, workflow, prompt, acquisition and exact
+request ID. Bounds are checked before reading into fixed zeroizing storage, EOF seals the frame,
+and trailing data is rejected. Sender and receiver close the channel after one submission.
+JSON carries only non-secret correlation and typed status. There is no PIN in arguments,
+environment, files, events or renderer DTOs. The complete transaction owns one live native device
+until validation/cleanup, and retires the worker on every exit. Replacement still requires
+kill/reap proof and a newer worker generation. See [M2 validation](../validation/M2-macos-native-auth.md).
+
 ### Parent-death mechanism: why stdin EOF plus a pid watchdog
 
 The worker must not outlive the service even while its native thread is blocked inside libfido2, so the mechanism cannot run on the thread that makes native calls. Options considered:

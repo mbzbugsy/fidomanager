@@ -212,6 +212,15 @@ Mitigations:
 
 The exact production threshold/window/cooldown constants must be fixed and tested before Milestone 2 ships.
 
+The macOS M2 implementation accepts the existing backend policy as production constants: three
+cancellations/timeouts/rejections in 60 seconds cause a 30-second cooldown; there is no queue or
+override. PIN prompts expire after 30 seconds from reservation. Native auth exchanges have a
+5-second shared native budget plus a 100-ms transport margin; kill/reap has a 2-second bound.
+The child independently expires an authentication transaction after 40 seconds and a retired
+auth worker has a minimum 1-second settle interval before replacement. These are conservative
+initial production decisions, not measured authenticator cancellation guarantees. See
+[M2 validation](validation/M2-macos-native-auth.md).
+
 The sensitive-workflow exclusion lock is released only after native dialogs are closed, associated native execution is quiescent, and recovery admission has been evaluated.
 
 ## 8. Immutable operation intent, prompt binding, and approval

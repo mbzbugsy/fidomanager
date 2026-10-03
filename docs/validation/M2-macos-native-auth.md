@@ -1,0 +1,259 @@
+# M2 macOS native authentication validation
+
+Issue: #11. Branch: `feature/m2-production-auth`.
+Starting main/head: `aeba71a548ca2b935aa2eb53a740f3ea0879d6f2`.
+Validation date: 2026-10-03 (operator Europe/Stockholm context).
+Implementation commit: the commit containing this report; exact final SHA is recorded in the PR.
+
+Evidence labels: [SOURCE] inspected implementation/previous reviewed API contract; [TEST]
+deterministic checks; [MACOS] locally observed platform behavior; [HARDWARE] physical-key
+observations; [INFERENCE] conclusion from those sources; [UNRESOLVED] evidence still required.
+
+## Production path
+
+[SOURCE] `AuthenticationAuthority` reserves the existing global `SensitiveWorkflowGate` and
+`PromptController`, minting workflow, prompt and acquisition identities. The canonical discovery
+supervisor supplies the generation-bound device target. A native menu lists each discovered key
+using backend-owned opaque handles and product/session labels. The selected handle must survive
+a fresh registry refresh before preparation; stale selections are rejected, never rebound.
+The PIN sheet identifies that selected key. The transaction exclusively borrows the supervisor
+for its entire lifetime; background refresh cannot interleave. Multiple connected keys are
+supported as separate sequential workflows, with no shared or cached authority.
+
+[SOURCE] The worker opens a fresh native device, gets capabilities and PIN retries, and chooses
+`CredManReadOnly` only with permission tokens plus advertised `perCredMgmtRO`; ordinary supported
+credential management selects `CredMan`. Only explicit CTAP 2.0 preview evidence without scoped
+tokens selects `LegacyUnscoped`. Duplicate/contradictory/unsupported evidence fails closed. Native
+permission support is cross-checked before acquisition. There is no caller-selected scope.
+
+[SOURCE] A real main-window AppKit asynchronous sheet contains `NSSecureTextField`, fixed backend
+text, reported retries, a low-retry warning and an additional native checkbox on the last retry.
+Cancel is default. The controller rejects stale/double completions and retains admission until
+the sheet is detached, ordered out, its timer invalidated and observer removed. Failure to prove
+teardown retains the gate. No debug/modality-spike API is used by the production entry.
+
+[SOURCE] A dedicated Unix socket at fixed child fd 3 transports exactly one frame: magic/version,
+worker generation, device generation, workflow, prompt, acquisition, request ID, bounded length,
+then PIN. The maximum payload is 63 UTF-8 bytes; embedded NUL, invalid UTF-8, short/oversized
+frames, mismatched binding, EOF truncation and trailing/replayed payload fail closed. No normal
+JSON request contains PIN bytes. Both ends close after use; sender storage is consumed and
+worker storage is consumed after native use.
+
+[SOURCE] PIN storage is a fixed 64-byte `Zeroizing<Box<[u8]>>` allocation with no Clone, Debug, Display, or serde.
+NSString writes directly into that Rust buffer without an intermediate Rust String/CString.
+Ownership moves a pointer, not PIN bytes, through the Rust completion channel. The guarantee covers Rust-owned buffers on normal drop/error paths. It does not cover AppKit/input
+method copies, libfido2 internals, kernel socket buffers, paging, hibernation, crash dumps,
+forced process death, or authenticator-side token state. No PIN/token persistence or logging is
+implemented. `FIDO_DEBUG` presence is refused before native initialization; child environment is
+cleared.
+
+[SOURCE] PUAT bytes remain inside libfido2. An owned, non-clone, non-serde `AuthorizationGrant`
+binds exact acquisition, actual kind and both generations. Grant validation consumes that grant;
+the transaction allows one acquisition attempt. M2 validates only attached authority/correlation.
+It executes no credential metadata, RP or credential enumeration and no mutation. M3 can replace
+that named bounded validation slot with a named inspection operation inside the same acquisition,
+before cleanup; no generic authenticated CTAP interface or token cache exists.
+
+[SOURCE] `fido_dev_set_puat(NULL, 0)` must succeed and both native length/pointer must show absence.
+Cleanup failure overrides success as `CleanupFailed`; the native session is consumed/dropped and
+the worker is retired on every outcome. Successful evidence is returned only after native device
+drop. Failed/uncertain cleanup never permits reuse. Only proven kill/reap permits a replacement;
+the existing supervisor then advances worker generation and invalidates old handles. No old
+grant survives.
+
+## Timing and revocation
+
+[SOURCE] Production constants: prompt 30 s from reservation; native request 5 s shared among all
+subcalls; exchange margin 100 ms; reap 2 s; independent worker transaction expiry 40 s; minimum
+post-retirement settle 1 s. Admission policy: three cancellations/timeouts/rejections within
+60 s cause a 30 s cooldown. All are backend owned, finite and independent of renderer input.
+
+[SOURCE] App shutdown and main-window loss revoke the authority epoch. Whole-app-lifetime observers
+revoke on NSWorkspace sleep/session resignation and the macOS distributed screen-lock signal.
+Prompt polling and endpoint exchange polling check that epoch; the latter contains/reaps on
+revocation. Revocation after possible submission returns conservative uncertainty. A live native
+device handle fails closed on removal/I/O failure and is never reopened/rebound for another key.
+Worker restart invalidates registry handles and authorization bindings.
+
+[SOURCE] Host timeout is not evidence of CTAPHID_CANCEL. Kill/reap establishes host execution
+quiescence, not immediate authenticator cancellation or known retry state. No error, wrong PIN,
+blocked PIN, transport uncertainty or worker restart auto-retries authentication. Fresh authority
+requires a new workflow after settle/cooldown. Unproven prompt teardown or process reap keeps
+admission held; it does not fabricate successful recovery.
+
+## Platform/build boundary
+
+[MACOS] macOS 26.5.2, build 25F84; Rust 1.98.1. pkg-config reports libfido2 1.17.0; `otool -L`
+confirms the worker links `/opt/homebrew/opt/libfido2/lib/libfido2.1.dylib`, current version 1.17.0.
+The macOS build requires exactly the reviewed 1.17.0 pkg-config baseline and rejects an unverified
+library-directory override. Production required PUAT symbols also prevent binding an older ABI.
+
+[SOURCE] The Tauri command/permission/event allowlist is unchanged: only foundation status
+and discovery. Foundation status now uses framework-injected backend State to return fixed
+nonsecret text and a presentation-only revision for the last authentication attempt. The renderer
+polls it and shows a dismissible toast for 10 seconds, without occupying a permanent page section;
+that history is never consulted for approval/admission and is not a reusable authenticated
+session. Its timer/dismissal cannot change admission or native security deadlines. The revision
+distinguishes repeated identical outcomes only; it is not an acquisition/approval identity.
+No PIN, grant, acquisition ID or native path is in this DTO. The new native menu has no renderer-callable command and no credential DTO. The
+modality spike remains a separate debug feature; enabling it suppresses the production menu.
+
+[SOURCE] The per-key `PIN check passed` tag is historical display only. It is added only after
+`Validated` plus proven attached-PUAT cleanup, worker quiescence and prompt teardown. A fresh
+attempt removes the prior result when it finishes; only another fully proven success restores
+it. The tag is never consulted for admission, native selection, capability selection or grant
+validation. Immediate cleanup means there is no active reusable authentication to suppress;
+the existing global gate still rejects concurrent attempts.
+
+[SOURCE] History remains in app memory. A fresh OS-random app scope hashes the reviewed macOS
+`ioreg://` connection entry identifier with a domain separator. The same connected entry can
+retain display history across worker retirement while all old authorization handles become
+invalid. Distinct entries do not share tags even with identical product names/AAGUIDs. Only
+canonical nonzero IORegistry paths qualify; missing randomness or other path formats disable
+history. Raw registry identifiers, paths, hashes and the app scope never enter renderer DTOs;
+discovery exposes only a historical boolean. Discovery prunes absent or duplicate correlations,
+and restarting the app clears all history. Reconnecting through a new registry entry yields
+fresh history. This is connection correlation, not cryptographic per-unit identity.
+
+[SOURCE] The connection format is established by the reviewed
+[libfido2 1.17.0 macOS HID implementation](https://github.com/Yubico/libfido2/blob/1.17.0/src/hid_osx.c).
+Apple documents the registry identifier's system-wide lifetime in
+[IORegistryEntryGetRegistryEntryID](https://developer.apple.com/documentation/iokit/1514719-ioregistryentrygetregistryentryi).
+
+[SOURCE] Windows auth remains unavailable and #19/PR #20 remain separate. Linux production auth
+is unavailable: its native adapter has no PUAT implementation or linkage. Ubuntu 24.04's 1.14
+can cover discovery plus deterministic contracts only. Linux enablement requires packaging a
+reviewed >=1.17 release, matching runtime loading policy, and CI that compiles/executes that native
+path. A separate macOS CI job requires reviewed 1.17.0 and compiles the default native path;
+CI has no hardware claim. Signing/notarization/bundled library packaging remain later work.
+
+## Deterministic validation
+
+[TEST] Full Rust workspace/all-targets suite: 227 passing tests, including production
+debug-environment refusal and malformed/ambient native-authority rejection. Exact-acquisition/kind/generation rejection, capability choice, bounds/
+framing/replay, cleanup/poisoning, wrong-PIN typed semantics, prompt binding/teardown, real child
+retirement/restart, stale handles, kill/reap ordering and zero queue/cooldown are covered. New
+descriptor tests prove intended fd retention and no unrelated-child inheritance. A real-child
+two-key fixture selects different native sessions/grant kinds and invalidates both old handles
+after retirement while distinct display correlations remain stable. Hash tests distinguish
+connections/app scopes and refuse malformed/non-macOS paths. Authentication schemas reject
+injected history identifiers. Process tests
+require permission to inspect their own children; the sandbox-only process-counter run failed
+because process inventory was denied, and the permitted full run passed.
+
+[TEST] Rust formatting, workspace/all-targets locked clippy with warnings denied, renderer boundary,
+Svelte check, frontend tests/build, Prettier and whitespace checks passed. pnpm's test command
+reports no frontend test files (allowed by the existing script), not frontend test coverage.
+Final frontend verification used Node 24.19.0 with repository-pinned pnpm 10.17.1.
+
+## Native/hardware evidence
+
+[HARDWARE] The attached reference model was confirmed from the USB registry: manufacturer Thetis,
+product Security Key(F829), VID:PID `1ea8:f829`, matching M1.5. No serial number was recorded.
+Three initial explicit native workflows returned `Validated`, actual `CredMan`, retry count
+8 before submission, attached-PUAT-cleared=true, worker-quiescent=true, prompt-torn-down=true.
+Acquisition/worker/device generation tuples were `(1, 1, 1)`, `(2, 2, 1)` and `(3, 3, 1)`.
+The second and third demonstrate fresh acquisitions following retirement/restart; device slot
+generation is scoped by the strictly advancing worker generation. Exact binding is checked
+by the worker transaction and parent response validator before reporting success. No enumeration
+or mutation ran, and no automatic retry exists.
+
+[HARDWARE] The operator independently submitted two wrong PINs after those initial successes;
+the agent neither requested nor initiated them. They returned `WrongPin` with proven attached
+PUAT cleanup/quiescence/teardown. Pre-submission retries advanced 8 -> 7 -> 6. The next correct
+submission (acquisition 6 / worker generation 6) returned `Validated`; subsequent prompts
+reported retries 8. Two subsequent operator cancellations (acquisitions 7 and 8) returned
+`Cancelled` with quiescence/teardown, and no PIN submission. Their cleanup flag is false because
+no native acquisition/explicit attached-token clear was performed; their unopened-to-authority
+sessions and workers were discarded. This matches the reviewed Thetis behavior. No further
+wrong-PIN testing is needed.
+
+[MACOS] Each prompt logged main-thread presentation, secure control, window-modal association,
+Cancel as default, and detached teardown. The operator entered the PIN through the native UI.
+Only nonsecret binding IDs, retry counts, categories and booleans appeared in captured output;
+no PIN or PUAT bytes were exposed. Computer-use capture was denied by macOS TCC; no capture
+permission was changed. The operator's initial report of no dialog was subsequently resolved
+by the successful native workflows.
+
+[UNRESOLVED] Real workstation lock/sleep delivery must be distinguished from deterministic epoch
+revocation. The distributed screen-lock notification is platform-specific and is not a portable
+or cryptographic session-attestation API. No platform lifecycle success is claimed without
+observation. PerCredMgmtRO/legacy hardware and built-in UV remain outside this single-key evidence.
+
+[INFERENCE] The required macOS M2 hardware gate passed. This foundation is ready for independent
+review; it is not a merge approval. Native per-key selection and transient result presentation
+were compiled/checked after the initial hardware observations; secret transport, native
+acquisition/cleanup and exact-grant validation retain the same bounded transaction design.
+
+[MACOS] The operator reported visible cancellation feedback; a supplied screenshot independently
+showed successful validation feedback on the reference Thetis (AAGUID matching M1.5). The
+captured feedback build also returned `Validated` with cleanup/quiescence/teardown. After the
+multi-key/toast changes, the operator confirmed both keys were listed, selected-target
+presentation worked, and toast dismissal/expiry worked. Only cancellation was requested for
+this final display check; no further PIN attempt was requested. A second supplied screenshot
+showed two Thetis keys with distinct AAGUIDs. Product/VID:PID and AAGUID are not per-unit identity;
+generation-bound opaque handles route the native selection. Matching temporary session tags
+are shown on cards and the native menu; they may change after restart/replug.
+
+[HARDWARE] With the per-key native menu active, two further explicit submissions returned
+`Validated`, `CredMan`, retries 8, attached-PUAT cleanup, worker quiescence and prompt teardown.
+Acquisition/worker/device generation tuples were `(1, 1, 1)` and `(2, 2, 1)` in the relaunched
+application. This repeats successful fresh acquisition after restart through the final
+multi-key entry path. Native authority was cleared/discarded after those results. The subsequent
+historical-tag addition retains no authenticated session.
+
+[HARDWARE] The final historical-tag build completed two more native workflows with
+`Validated`, `CredMan`, pre-submission retries 8, attached-PUAT-cleared=true,
+worker-quiescent=true and prompt-torn-down=true. Their acquisition/worker/device tuples
+were `(1, 1, 1)` and `(2, 2, 1)`. The operator confirmed that `PIN check passed` appeared
+only on the selected key. Disconnect/reconnect tag clearing follows the inspected registry
+correlation/pruning design and deterministic tests; it was not separately observed on hardware.
+
+[UNRESOLVED] Independent security/architecture review is required before merge.
+
+## Exact changed files
+
+- `.github/workflows/ci.yml`
+- `Cargo.lock`
+- `Cargo.toml`
+- `crates/fido-auth/Cargo.toml`
+- `crates/fido-auth/src/lib.rs`
+- `crates/fido-core/src/lib.rs`
+- `crates/fido-libfido2/Cargo.toml`
+- `crates/fido-libfido2/build.rs`
+- `crates/fido-libfido2/src/lib.rs`
+- `crates/fido-libfido2/src/native/authentication.rs`
+- `crates/fido-native-ui/Cargo.toml`
+- `crates/fido-native-ui/src/lib.rs`
+- `crates/fido-native-ui/src/macos_pin.rs`
+- `crates/fido-platform/Cargo.toml`
+- `crates/fido-platform/src/process.rs`
+- `crates/fido-service/Cargo.toml`
+- `crates/fido-service/src/authentication.rs`
+- `crates/fido-service/src/discovery.rs`
+- `crates/fido-service/src/lib.rs`
+- `crates/fido-service/src/process_worker.rs`
+- `crates/fido-service/src/supervisor.rs`
+- `crates/fido-worker-fixture/Cargo.toml`
+- `crates/fido-worker-fixture/src/bin/fido-worker-fixture.rs`
+- `crates/fido-worker-fixture/tests/authentication.rs`
+- `crates/fido-worker-fixture/tests/descriptor_hygiene.rs`
+- `crates/fido-worker-protocol/Cargo.toml`
+- `crates/fido-worker-protocol/src/handshake.rs`
+- `crates/fido-worker-protocol/src/lib.rs`
+- `crates/fido-worker/Cargo.toml`
+- `crates/fido-worker/src/engine.rs`
+- `crates/fido-worker/src/main.rs`
+- `crates/fido-worker/src/runtime.rs`
+- `crates/fido-worker/tests/production_binary.rs`
+- `docs/SECURITY_MODEL.md`
+- `docs/adr/ADR-009-WORKER-BOUNDARY.md`
+- `docs/validation/M2-macos-native-auth.md`
+- `package.json`
+- `scripts/check-renderer-boundary.mjs`
+- `src-tauri/Cargo.toml`
+- `src-tauri/src/authentication.rs`
+- `src-tauri/src/commands/mod.rs`
+- `src-tauri/src/lib.rs`
+- `src/App.svelte`
+- `src/styles.css`

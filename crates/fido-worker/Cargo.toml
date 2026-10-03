@@ -14,6 +14,7 @@ default = ["native-libfido2"]
 native-libfido2 = ["fido-libfido2/native-libfido2"]
 
 [dependencies]
+fido-auth = { path = "../fido-auth" }
 fido-core = { path = "../fido-core" }
 fido-libfido2 = { path = "../fido-libfido2" }
 fido-platform = { path = "../fido-platform" }

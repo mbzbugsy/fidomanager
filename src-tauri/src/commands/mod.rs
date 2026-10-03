@@ -10,6 +10,8 @@ pub struct FoundationStatus {
     phase: &'static str,
     worker_protocol_version: u16,
     reviewed_libfido2_baseline: &'static str,
+    authentication_notice: Option<&'static str>,
+    authentication_notice_revision: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -37,6 +39,7 @@ struct AuthenticatorSummary {
     firmware_version: Option<String>,
     read_status: String,
     freshness: String,
+    pin_check_passed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -47,12 +50,19 @@ struct AuthenticatorOption {
 }
 
 #[tauri::command]
-pub fn foundation_status() -> FoundationStatus {
+pub fn foundation_status(state: tauri::State<'_, AppState>) -> FoundationStatus {
     let info = fido_service::foundation_info();
+    let (revision, notice) = state
+        .authentication_notice
+        .lock()
+        .map(|n| *n)
+        .unwrap_or((0, None));
     FoundationStatus {
         phase: info.phase,
         worker_protocol_version: info.worker_protocol_version,
         reviewed_libfido2_baseline: info.reviewed_libfido2_baseline,
+        authentication_notice: notice,
+        authentication_notice_revision: revision.to_string(),
     }
 }
 
@@ -61,17 +71,69 @@ pub async fn list_authenticators(
     state: tauri::State<'_, AppState>,
 ) -> Result<AuthenticatorList, String> {
     let discovery = Arc::clone(&state.discovery);
+    let verification_history = Arc::clone(&state.verification_history);
+    #[cfg(all(
+        feature = "native-pin",
+        not(feature = "native-ui-spike"),
+        target_os = "macos"
+    ))]
+    let native_menu = state
+        .authentication_menu
+        .lock()
+        .ok()
+        .and_then(|m| m.clone());
 
     tauri::async_runtime::spawn_blocking(move || {
         let mut coordinator = discovery
             .lock()
             .map_err(|_| "native discovery authority lock is poisoned".to_owned())?;
         let snapshot = coordinator.refresh().map_err(|error| error.to_string())?;
+        // Keep history only for uniquely identified currently connected macOS IORegistry entries.
+        // Markers remain backend-only: the renderer receives a historical boolean, never a path,
+        // connection hash, acquisition or reusable approval.
+        let mut present = std::collections::BTreeMap::new();
+        for id in snapshot
+            .devices
+            .iter()
+            .filter_map(|d| d.verification_history_id)
+        {
+            *present.entry(id).or_insert(0usize) += 1;
+        }
+        let passed = verification_history
+            .lock()
+            .map(|mut history| {
+                history.retain(|id| present.get(id) == Some(&1));
+                history.clone()
+            })
+            .unwrap_or_default();
+
+        #[cfg(all(
+            feature = "native-pin",
+            not(feature = "native-ui-spike"),
+            target_os = "macos"
+        ))]
+        if let Some(menu) = native_menu {
+            menu.update(
+                snapshot
+                    .devices
+                    .iter()
+                    .map(|device| {
+                        crate::authentication::NativeTarget::new(
+                            device.handle,
+                            device.product.as_deref(),
+                        )
+                    })
+                    .collect(),
+            );
+        }
 
         let devices = snapshot
             .devices
             .into_iter()
             .map(|device| AuthenticatorSummary {
+                pin_check_passed: device
+                    .verification_history_id
+                    .is_some_and(|id| passed.contains(&id)),
                 handle: format!("{:032x}", device.handle.as_raw()),
                 generation: device.generation.0.to_string(),
                 vendor_id: device.vendor_id,

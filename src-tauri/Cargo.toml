@@ -14,7 +14,8 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build = "=2.7.0"
 
 [features]
-default = []
+default = ["native-pin"]
+native-pin = ["fido-service/native-pin"]
 native-ui-spike = ["fido-service/native-ui-spike"]
 
 [dependencies]

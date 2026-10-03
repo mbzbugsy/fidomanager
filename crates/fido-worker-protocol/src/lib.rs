@@ -13,10 +13,11 @@ pub use framing::{
 };
 pub use handshake::{ChildHello, HandshakeError, ParentHello};
 
+use fido_auth::{AcquisitionBinding, AuthenticationEvidence, GrantKind};
 use fido_core::{Aaguid, DeviceGeneration, ExecutionQuiescence, MutationOutcome};
 use serde::{Deserialize, Serialize};
 
-pub const WORKER_PROTOCOL_VERSION: u16 = 1;
+pub const WORKER_PROTOCOL_VERSION: u16 = 2;
 /// Largest frame the service accepts from a worker (responses). Transport implementations must
 /// reject larger frames before deserialization, and before allocating their payload.
 pub const MAX_WORKER_FRAME_BYTES: usize = 1_048_576;
@@ -110,7 +111,9 @@ impl WorkerRequestEnvelope {
         }
 
         let generation_is_valid = match &self.request {
-            WorkerRequest::GetDeviceInfo { .. } => self.device_generation.is_some(),
+            WorkerRequest::GetDeviceInfo { .. }
+            | WorkerRequest::PrepareAuthentication { .. }
+            | WorkerRequest::ValidateAuthentication { .. } => self.device_generation.is_some(),
             WorkerRequest::HealthCheck
             | WorkerRequest::Cancel { .. }
             | WorkerRequest::ListDevices => self.device_generation.is_none(),
@@ -149,11 +152,21 @@ pub enum WorkerRequest {
     GetDeviceInfo {
         device_id: WorkerDeviceId,
     },
+    PrepareAuthentication {
+        device_id: WorkerDeviceId,
+        binding: AcquisitionBinding,
+    },
+    ValidateAuthentication {
+        binding: AcquisitionBinding,
+    },
 }
 
 impl WorkerRequest {
     pub const fn operation_class(&self) -> WorkerOperationClass {
         match self {
+            Self::PrepareAuthentication { .. } | Self::ValidateAuthentication { .. } => {
+                WorkerOperationClass::SensitiveRead
+            }
             Self::HealthCheck | Self::Cancel { .. } => WorkerOperationClass::Control,
             Self::ListDevices | Self::GetDeviceInfo { .. } => WorkerOperationClass::ReadOnly,
         }
@@ -169,6 +182,9 @@ impl WorkerRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkerDiscoveredDevice {
+    /// Display history only; never accepted in any authentication request/binding.
+    #[serde(default)]
+    pub verification_history_id: Option<[u8; 32]>,
     pub device_id: WorkerDeviceId,
     pub device_generation: DeviceGeneration,
     pub vendor_id: u16,
@@ -219,6 +235,14 @@ pub struct WorkerResponseEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkerResponse {
+    AuthenticationPrepared {
+        binding: AcquisitionBinding,
+        grant_kind: GrantKind,
+        pin_retries: Option<u8>,
+    },
+    AuthenticationValidated {
+        evidence: AuthenticationEvidence,
+    },
     Healthy,
     CancellationAccepted,
     DevicesListed {
@@ -250,6 +274,50 @@ pub enum WorkerErrorCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authentication_round_trip_and_hostile_secret_fields()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let binding = AcquisitionBinding {
+            worker_generation: 3,
+            device_generation: DeviceGeneration(1),
+            workflow_id: fido_core::WorkflowId::from_raw(u128::MAX - 1),
+            prompt_instance_id: fido_core::PromptInstanceId::from_raw(u128::MAX),
+            acquisition_id: fido_auth::AcquisitionId(7),
+        };
+        for request in [
+            WorkerRequest::PrepareAuthentication {
+                device_id: WorkerDeviceId(1),
+                binding,
+            },
+            WorkerRequest::ValidateAuthentication { binding },
+        ] {
+            let envelope = request_envelope(request, Some(DeviceGeneration(1)));
+            let encoded = serde_json::to_string(&envelope)?;
+            assert_eq!(
+                serde_json::from_str::<WorkerRequestEnvelope>(&encoded)?,
+                envelope
+            );
+            let mut value = serde_json::to_value(&envelope)?;
+            for field in [
+                "pin",
+                "token",
+                "approved",
+                "path",
+                "permissions",
+                "deadline",
+                "verification_history_id",
+            ] {
+                value["request"][field] = serde_json::json!("hostile-value");
+                assert!(serde_json::from_value::<WorkerRequestEnvelope>(value.clone()).is_err());
+                value["request"]
+                    .as_object_mut()
+                    .ok_or("object")?
+                    .remove(field);
+            }
+        }
+        Ok(())
+    }
 
     fn request_envelope(
         request: WorkerRequest,

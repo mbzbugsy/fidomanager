@@ -107,7 +107,11 @@ assertExactArray(
 const foundation = discoveredCommands.find(
   ({ name }) => name === 'foundation_status',
 );
-if (!foundation || foundation.parameters !== '') {
+if (
+  !foundation ||
+  foundation.parameters.replace(/\s+/g, '').replace(/,$/, '') !==
+    "state:tauri::State<'_,AppState>"
+) {
   throw new Error(
     'foundation_status must not accept renderer-controlled parameters.',
   );

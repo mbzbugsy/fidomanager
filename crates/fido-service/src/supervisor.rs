@@ -251,7 +251,7 @@ pub struct DiscoverySupervisor<L: WorkerLauncher, C = SystemMonotonicClock> {
     launcher: L,
     clock: C,
     discovery_policy: DiscoveryPolicy,
-    coordinator: Option<DiscoveryCoordinator<L::Endpoint, C>>,
+    pub(crate) coordinator: Option<DiscoveryCoordinator<L::Endpoint, C>>,
     ledger: FailureLedger,
     next_generation: u64,
     launches: u64,
@@ -337,6 +337,19 @@ where
             Some(coordinator) => coordinator.contain_worker(),
             None => ExecutionQuiescence::Quiescent,
         }
+    }
+
+    pub(crate) fn retire_authentication(&mut self) -> ExecutionQuiescence {
+        let quiescence = match self.coordinator.as_mut() {
+            Some(c) => c.contain_worker(),
+            None => ExecutionQuiescence::Quiescent,
+        };
+        // Backend-owned minimum device settle interval, never an automatic authentication retry.
+        self.ledger.next_attempt_at_ms = self
+            .ledger
+            .next_attempt_at_ms
+            .max(self.clock.now().as_millis().saturating_add(1_000));
+        quiescence
     }
 
     pub fn status(&self) -> SupervisorStatus {
@@ -483,6 +496,7 @@ mod tests {
             let response = match &request.request {
                 WorkerRequest::ListDevices => WorkerResponse::DevicesListed {
                     devices: vec![WorkerDiscoveredDevice {
+                        verification_history_id: None,
                         device_id,
                         device_generation: DeviceGeneration(1),
                         vendor_id: 1,
