@@ -69,10 +69,23 @@ struct Record {
     resolution: Option<Resolution>,
 }
 
+/// The durable dispatch receipt is not an externally constructible or importable capability.
+///
+/// ```compile_fail
+/// let _ = fido_service::recovery::DurablePinDispatch {};
+/// ```
 pub struct RecoveryJournal {
     storage: Box<dyn JournalStorage>,
     record: Option<Record>,
     poisoned: bool,
+}
+
+/// Opaque proof of one successfully synced DispatchCapable incident. Only this module can
+/// construct it; callers cannot manufacture authority from a phase or a successful write alone.
+/// No Clone/Copy, formatting or serialization: the receipt travels inside the one-shot permit.
+pub(super) struct DurablePinDispatch {
+    incident: String,
+    operation: PinOperation,
 }
 
 impl RecoveryJournal {
@@ -157,13 +170,31 @@ impl RecoveryJournal {
         })
     }
 
-    pub(crate) fn dispatch_capable(&mut self, operation: PinOperation) -> Result<(), JournalError> {
+    pub(super) fn dispatch_capable(
+        &mut self,
+        operation: PinOperation,
+    ) -> Result<DurablePinDispatch, JournalError> {
         let mut record = self.record.clone().ok_or(JournalError::InvalidTransition)?;
         if record.phase != JournalPhase::Pending || record.operation != operation {
             return Err(JournalError::InvalidTransition);
         }
         record.phase = JournalPhase::DispatchCapable;
-        self.persist(record)
+        let incident = record.incident.clone();
+        self.persist(record)?;
+        Ok(DurablePinDispatch {
+            incident,
+            operation,
+        })
+    }
+
+    pub(super) fn matches_dispatch(&self, receipt: &DurablePinDispatch) -> bool {
+        !self.poisoned
+            && self.record.as_ref().is_some_and(|record| {
+                record.phase == JournalPhase::DispatchCapable
+                    && record.resolution.is_none()
+                    && record.incident == receipt.incident
+                    && record.operation == receipt.operation
+            })
     }
 
     pub(crate) fn resolve(&mut self, resolution: Resolution) -> Result<(), JournalError> {
@@ -347,13 +378,28 @@ pub(crate) mod tests {
             let mut j = RecoveryJournal::load(Box::new(disk.clone()));
             j.pending(PinOperation::SetPin, 1)?;
             disk.0.lock().unwrap_or_else(|_| panic!("disk")).failure = failure;
-            assert_eq!(
+            assert!(matches!(
                 j.dispatch_capable(PinOperation::SetPin),
                 Err(JournalError::Unavailable)
-            );
+            ));
             assert_eq!(j.phase(), Some(JournalPhase::Pending));
             assert_eq!(j.admission(), RecoveryAdmission::Barrier);
             assert!(j.resolve(Resolution::NotDispatched).is_err());
+        }
+        Ok(())
+    }
+    #[test]
+    fn durable_receipt_fails_closed_after_poisoned_resolution() -> Result<(), JournalError> {
+        for failure in [1, 2] {
+            let disk = MemoryStorage::default();
+            let mut j = RecoveryJournal::load(Box::new(disk.clone()));
+            j.pending(PinOperation::ChangePin, 1)?;
+            let receipt = j.dispatch_capable(PinOperation::ChangePin)?;
+            assert!(j.matches_dispatch(&receipt));
+            disk.0.lock().unwrap_or_else(|_| panic!("disk")).failure = failure;
+            assert!(j.resolve(Resolution::Rejected).is_err());
+            assert!(!j.matches_dispatch(&receipt));
+            assert_eq!(j.admission(), RecoveryAdmission::Barrier);
         }
         Ok(())
     }

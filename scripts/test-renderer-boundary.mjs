@@ -313,13 +313,16 @@ try {
     ['crates/fido-auth/src/mutation.rs', 'PinMutationSecrets'],
     ['crates/fido-service/src/mutation.rs', 'OperationPermit'],
     ['crates/fido-service/src/mutation.rs', 'PinMutationDispatchPermit'],
+    ['crates/fido-service/src/recovery.rs', 'DurablePinDispatch'],
   ]) {
     for (const trait of ['Serialize', 'Clone', 'Debug']) {
       mutate(
         path,
         (text) =>
           text.replace(
-            new RegExp('((?:pub )?(?:struct|enum) ' + type + ')'),
+            new RegExp(
+              '((?:pub(?:\\([^)]*\\))? )?(?:struct|enum) ' + type + ')',
+            ),
             `#[derive(${trait})]\n$1`,
           ),
         /secret\/permit traits must remain forbidden/,
@@ -346,6 +349,39 @@ try {
       ),
     /requires durable Pending and DispatchCapable ordering/,
     'dispatch before durable acknowledgement',
+  );
+  mutate(
+    'crates/fido-service/src/mutation.rs',
+    (text) =>
+      text.replace(
+        'fn mark_dispatch_capable<',
+        'pub fn mark_dispatch_capable<',
+      ),
+    /dispatch transition must remain private/,
+    'public dispatch transition',
+  );
+  mutate(
+    'crates/fido-service/src/mutation.rs',
+    (text) =>
+      text.replace(
+        'permit: PinMutationDispatchPermit,',
+        'permit: &PinMutationDispatchPermit,',
+      ),
+    /dispatch must consume its capability by value/,
+    'borrowed reusable dispatch capability',
+  );
+  mutate(
+    'crates/fido-service/src/mutation.rs',
+    (text) => text.replace('durable: crate::recovery::DurablePinDispatch,', ''),
+    /dispatch capability must own a durable journal receipt/,
+    'dispatch capability without durable receipt',
+  );
+  mutate(
+    'crates/fido-service/src/recovery.rs',
+    (text) =>
+      text.replace('self.persist(record)?;', 'let _ = self.persist(record);'),
+    /durable receipt requires successful journal persistence/,
+    'receipt despite failed journal persistence',
   );
   mutate(
     'crates/fido-auth/src/mutation.rs',

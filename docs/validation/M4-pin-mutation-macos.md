@@ -67,9 +67,14 @@ The production order is shared gate reservation → exact intent → non-mutatin
 preparation → exact native sheet/secrets → native teardown → one-use permit →
 durable Pending → final exact target/generation/epoch/expiry validation and permit
 consumption → durable DispatchCapable → private consumed dispatch permit → bound
-secret and execution request → one native high-level call. The original public
-foundation transition still returns no executable authority. The private handoff
-cannot be serialized, cloned, persisted or used for another intent. A lifecycle
+secret and execution request → one native high-level call. The transition is now
+private and returns the one-shot dispatch capability. Its required opaque journal
+receipt can only be minted after successful durable DispatchCapable persistence;
+write/sync failure returns no receipt or capability. Dispatch consumes the capability
+by value and rechecks the active consumed reservation, exact incident/phase, target,
+full session/intent binding, generations, authority epoch, teardown and deadlines
+before sending secrets or an execution request. The private handoff cannot be
+serialized, cloned, persisted or used for another intent. A lifecycle
 change during marker sync or any later host failure retains the marker/barrier.
 
 Worker protocol **4** adds only PreparePinMutation (SensitiveRead) and
@@ -149,8 +154,8 @@ its trusted label. Unrelated connected device cards/issues are retained.
 
 ## Deterministic and boundary coverage
 
-The full macOS Rust suite passes **335 tests**, with zero failures or ignored tests,
-plus **3 compile-fail permit doctests**. This adds 16 tests over the 319-test merged
+The initial full macOS Rust suite passed **335 tests**, with zero failures or ignored tests,
+plus **3 compile-fail permit doctests**. That added 16 tests over the 319-test merged
 foundation baseline; many new tests iterate both operations and multiple faults.
 
 | Area | Evidence |
@@ -164,7 +169,7 @@ foundation baseline; many new tests iterate both operations and multiple faults.
 | Quiescence/recovery | Child retirement and handle invalidation on every tested path; ordinary work blocked before acknowledgement; restart barrier; durable AcknowledgedUnknown with no secret/probes; corrupt storage never presents acknowledgement. Existing reap-before-replacement tests remain intact. |
 | Native UI/presentation | Exact target/operation/persistent text, confirmation equality and current-PIN structural policy, four-scalar minimum, last-retry acknowledgement, teardown-bound approval and stale callbacks; static hostile controls reject unsafe Cancel default. Other-key issue/card preservation is retained. |
 
-The real renderer checker runs **73 times**: 70 hostile fixtures and 3 valid/restored
+The initial renderer checker ran **73 times**: 70 hostile fixtures and 3 valid/restored
 baselines. It freezes the three parameterless renderer commands and their resolved
 ACL, denies direct native/worker/secret dependencies in Tauri, freezes the manual
 spike, forbids unreviewed mutation/reset/deletion routes and permits only the one
@@ -173,7 +178,7 @@ serde/Clone/Debug traits (including manual serialization), public dispatch autho
 marker bypass, renderer secret/permit fields and unsafe native sheet default.
 Static guards are regression evidence, not a formal proof of arbitrary source edits.
 
-## Commands and local results
+## Initial commands and local results
 
 Environment: macOS 26.5.2 (25F84), arm64, Rust 1.98.1 (Homebrew), Node 22.19.0,
 pnpm 11.25.0. CI retains pinned Node 24.21.0/pnpm 10.17.1. No frontend dependency
@@ -205,6 +210,55 @@ link-map output and a cached build may not relink it. CI forces that fresh link.
 A mismatched map fails closed; it is not accepted as attribution evidence.
 Remote feature-branch CI is evaluated after upload; its exact head/run/result is
 recorded in the Draft PR. This committed report does not claim an unobserved run.
+
+## Review hardening F2/F5: deterministic validation only
+
+Starting reviewed head: `b7d344a2f94c83a827774d974c138b60be1df760` on the existing
+`feature/m4-pin-mutation` branch. The exact new review head and its CI URL/result
+are recorded in Draft PR #27, containing this report. No new branch or PR is created.
+
+The opaque `DurablePinDispatch` receipt has private fields in the journal module
+and is returned only after `persist` acknowledges the DispatchCapable write/sync.
+The private `mark_dispatch_capable` transition returns a `PinMutationDispatchPermit`
+that must own this receipt; `mutate_pin` no longer separately constructs authority.
+`dispatch_pin` consumes it by value and checks the consumed active reservation and
+the receipt's exact unresolved journal incident before sending secrets/execution.
+Both types lack Clone, Copy, Debug, Display and serde traits. Existing OperationPermit,
+target/generation/session/intent/lifecycle/deadline and teardown checks are retained.
+The expiry check also includes time spent acquiring the authoritative state locks.
+
+Five focused tests add compiler-enforced forbidden-trait and owned-dispatch contracts,
+missing Pending and write/sync failure checks, post-mint revocation/expiry/generation/
+session checks, stale reservation/resolved or replaced incident checks, and poisoned
+journal receipt rejection. Three new compile-fail doctests deny access to the private
+dispatch type/transition and durable receipt. Seven new hostile boundary fixtures
+cover receipt traits, public transition, borrowed dispatch, missing receipt and ignored
+durability errors; source checks remain defense in depth. Existing process fixtures
+still prove zero dispatch on durability/revocation failure and unchanged conservative
+OutcomeUnknown/recovery behavior after the marker, including pre-entry worker failure.
+No entered=false reconciliation, broader PIN-policy UX or blocked-state copy change
+is implemented. The F5 hardware wording below distinguishes inference from observation.
+
+| Check | Current hardening result |
+| --- | --- |
+| `cargo fmt --all --check` | PASS |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | PASS |
+| `cargo test --workspace --all-targets --locked` | PASS: 343 tests across 24 binaries; zero failures/ignored |
+| `cargo test -p fido-service --doc --locked` | PASS: 6 compile-fail doctests |
+| `pnpm security:renderer-boundary` | PASS: 80 checker executions (77 hostile, 3 valid/restored) |
+| `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build` | PASS: zero typecheck errors/warnings; 74 frontend tests; production build |
+| `python3 scripts/test-libfido2.py --rebuild` | PASS: bounds, source/patch, negative linkage and byte-identical private rebuilds |
+| Fresh `cargo build -p fido-worker --locked` after package clean | PASS: production worker link |
+| `python3 scripts/test-credman-linkage.py` | PASS: credential and PIN missing/unresolved/wrong-object/wrong-archive/dead-stripped controls |
+| `python3 scripts/verify-libfido2-linkage.py target/debug/fido-worker` | PASS: all 16 credential symbols and live `fido_dev_set_pin` from the exact pinned/private archive; no libfido2 dylib |
+| `git diff --check` | PASS |
+
+The first sandboxed full-suite attempt stopped at the pre-existing BooGooCypher
+loopback-bind test. The authorized run outside the sandbox passed the entire suite
+without changing that test. No hardware operation, PIN submission, app launch,
+restoration, wrong-PIN test or live fault/recovery test occurred during this hardening.
+Earlier hardware results belong to the explicitly identified earlier source revision;
+this hardening revision has deterministic validation only. PR #27 remains Draft.
 
 ## Hardware evidence and operator gate
 
@@ -299,7 +353,9 @@ Change PIN hardware session at
   owner/mode/schema-checked categorical read confirmed the saved Change PIN
   incident is `Resolved` with `Resolution::Rejected`. Intermediate journal phases
   were not separately sampled on hardware. No persistent recovery barrier remains.
-- That first rejection did not change the PIN. The operator then independently
+- The inference that the first rejection did not change the PIN follows from the
+  definitive PinPolicy rejection semantics; the PIN was not independently read back.
+  The operator then independently
   initiated another Change PIN in the native app and reported success. Native logs
   independently recorded `MutationOutcome::ConfirmedSuccessful`,
   `worker_quiescent=true`, `prompt_torn_down=true` and `recovery_required=false`.
@@ -317,7 +373,9 @@ Change PIN hardware session at
   hardware operations, that reopened app logged another `ConfirmedSuccessful`
   Change PIN followed by a separate `Rejected` Change PIN; both independently
   proved native teardown, worker quiescence and no recovery requirement. The
-  latter rejection reason was not captured. Subsequent operator-initiated
+  latter rejection reason was not captured. Teardown/quiescence and the absence
+  of a recovery requirement do not establish that this later operation was harmless
+  or that retry counters were unchanged. Subsequent operator-initiated
   inspections were also logged as `Validated` with complete cleanup.
 - At final evidence collection, the current categorical journal snapshot is
   Change PIN / `Resolved` / `Rejected`, reflecting the most recent workflow. It

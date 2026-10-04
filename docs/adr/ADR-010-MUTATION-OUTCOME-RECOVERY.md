@@ -127,12 +127,15 @@ rejects replay. Epoch changes during sync and expiry before acknowledgement fail
 closed with the durable marker retained. Lock/sleep/session-switch/shutdown use
 the existing M2 epoch; disconnect/worker replacement invalidate exact targets.
 
-`mark_dispatch_capable` still returns only a policy result. The production
-`mutate_pin` continuation holds the canonical supervisor exclusively and constructs
-a private, non-clone/non-serde `PinMutationDispatchPermit` only after successful
-durable acknowledgement. Its only consumer rechecks exact target/generations,
-intent digest, lifecycle epoch and expiry, then sends the one-use secret frame and
-typed execution request. A host failure or revocation after the marker retains
+`mark_dispatch_capable` is private and returns a non-clone/non-serde
+`PinMutationDispatchPermit` containing an opaque journal receipt. Only successful
+durable DispatchCapable persistence can mint that receipt; failed write/sync
+cannot produce dispatch authority. The production `mutate_pin` continuation holds
+the canonical supervisor exclusively. Dispatch consumes the capability by value
+and rechecks the active consumed reservation, matching incident and journal phase,
+exact target/generations, full session/intent binding, teardown, lifecycle epoch
+and expiry before sending the one-use secret frame and typed execution request.
+A host failure or revocation after the marker retains
 uncertainty and the barrier even if the native call was never reached. No public
 API turns the foundation transition into reusable execution authority.
 

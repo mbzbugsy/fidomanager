@@ -91,6 +91,19 @@ pub struct OperationPermit {
     expires_at: Instant,
 }
 
+/// Dispatch authority is backend-private, including the durable transition entry point.
+///
+/// ```compile_fail
+/// use fido_service::mutation::PinMutationDispatchPermit;
+/// ```
+/// ```compile_fail
+/// use fido_service::{authentication::AuthenticationAuthority, mutation::*};
+/// fn bypass(a: &AuthenticationAuthority,
+///           s: &mut fido_service::DiscoverySupervisor<fido_service::ProcessWorkerLauncher>,
+///           r: &mut MutationReservation, p: OperationPermit) {
+///     let _ = a.mark_dispatch_capable(s, r, p);
+/// }
+/// ```
 pub struct MutationReservation {
     reservation: AuthenticationReservation,
     intent: OperationIntent,
@@ -133,6 +146,7 @@ pub enum MutationError {
 
 /// Produced only after the durable marker, consumed only by dispatch below. No public constructor.
 struct PinMutationDispatchPermit {
+    durable: crate::recovery::DurablePinDispatch,
     binding: fido_auth::mutation::PinMutationBinding,
     epoch: u64,
     expires_at: Instant,
@@ -163,20 +177,9 @@ impl AuthenticationAuthority {
             u64,
         ) -> Result<(), &'static str>,
     ) -> PinWorkflowResult {
-        use fido_auth::{AcquisitionBinding, mutation::PinMutationBinding};
         use fido_core::MutationOutcome;
         use fido_worker_protocol::{WorkerRequest, WorkerResponse};
-        let binding = PinMutationBinding {
-            operation: r.intent.operation,
-            session: AcquisitionBinding {
-                worker_generation: r.intent.worker.0,
-                device_generation: r.intent.target.device_generation,
-                workflow_id: r.intent.binding.workflow_id,
-                prompt_instance_id: r.intent.binding.prompt_instance_id,
-                acquisition_id: r.reservation.acquisition,
-            },
-            intent_digest: r.intent.digest(),
-        };
+        let binding = pin_binding(&r);
         let mut result = PinWorkflowResult {
             outcome: MutationOutcome::NotDispatched,
             rejection: None,
@@ -257,15 +260,9 @@ impl AuthenticationAuthority {
                 return Err(MutationError::InvalidPermit);
             }
             let permit = self.approve_pin_intent(&mut r)?;
-            let dispatch_expiry = permit.expires_at;
             self.write_pending(&mut r, &permit)?;
-            self.mark_dispatch_capable(supervisor, &mut r, permit)?;
+            let dispatch = self.mark_dispatch_capable(supervisor, &mut r, permit)?;
             result.outcome = MutationOutcome::OutcomeUnknown;
-            let dispatch = PinMutationDispatchPermit {
-                binding,
-                epoch: r.intent.epoch,
-                expires_at: dispatch_expiry,
-            };
             let native = self.dispatch_pin(supervisor, &r, dispatch, secrets)?;
             // No post-marker host path is advertised as NotDispatched; retain recovery protection.
             if native.outcome != MutationOutcome::NotDispatched {
@@ -327,14 +324,13 @@ impl AuthenticationAuthority {
         use fido_worker_protocol::{WorkerRequest, WorkerResponse};
         // Ownership consumes the handoff on every attempt. Target/generation remains under the
         // exclusive supervisor borrow; endpoint revocation also guards transport and waiting.
-        if self.epoch.load(Ordering::SeqCst) != permit.epoch
-            || Instant::now() >= permit.expires_at
-            || permit.binding.intent_digest != r.intent.digest()
-            || supervisor.resolve_handle(r.intent.handle) != Some(r.intent.target)
-            || supervisor.status().worker_generation != Some(r.intent.worker)
-        {
-            return Err(MutationError::InvalidPermit);
-        }
+        self.validate_dispatch(
+            r,
+            &permit,
+            supervisor.resolve_handle(r.intent.handle),
+            supervisor.status().worker_generation,
+            Instant::now(),
+        )?;
         let c = supervisor
             .coordinator
             .as_mut()
@@ -373,6 +369,49 @@ impl AuthenticationAuthority {
             }
             _ => Err(MutationError::InvalidPermit),
         }
+    }
+    fn validate_dispatch(
+        &self,
+        r: &MutationReservation,
+        permit: &PinMutationDispatchPermit,
+        target: Option<RegisteredDeviceTarget>,
+        worker: Option<WorkerGeneration>,
+        now: Instant,
+    ) -> Result<(), MutationError> {
+        let gate = self.gate.lock().map_err(|_| MutationError::InvalidPermit)?;
+        let slot = self
+            .recovery
+            .lock()
+            .map_err(|_| JournalError::Unavailable)?;
+        let journal = slot.as_ref().ok_or(JournalError::Unavailable)?;
+        // Lock acquisition must not turn an expired capability into a valid handoff.
+        let now = now.max(Instant::now());
+        if !gate.matches(&r.reservation.admission)
+            || gate.recovery_admission() != RecoveryAdmission::Barrier
+            || !r.pending
+            || !r.consumed
+            || r.approved.is_some()
+            || !journal.matches_dispatch(&permit.durable)
+            || journal.operation() != Some(r.intent.operation)
+            || r.intent.binding != r.reservation.prompt.binding()
+            || r.intent.binding.workflow_id != r.reservation.admission.workflow_id()
+            || self
+                .controller
+                .lock()
+                .map_err(|_| MutationError::InvalidPermit)?
+                .is_active()
+            || !Arc::ptr_eq(&self.epoch, &r.intent.authority_epoch)
+            || self.epoch.load(Ordering::SeqCst) != permit.epoch
+            || permit.epoch != r.intent.epoch
+            || now >= permit.expires_at
+            || now >= r.intent.expires_at
+            || permit.binding != pin_binding(r)
+            || target != Some(r.intent.target)
+            || worker != Some(r.intent.worker)
+        {
+            return Err(MutationError::InvalidPermit);
+        }
+        Ok(())
     }
     fn resolve_pin_result(
         &self,
@@ -604,15 +643,14 @@ impl AuthenticationAuthority {
     }
 
     /// Final exact target validation, single-use consumption and durable journal transition share
-    /// the global gate lock and exclusive supervisor borrow. Returns no worker request, dispatch
-    /// permit, callback or executable operation. Only mutate_pin's private typed continuation
-    /// preserves the exclusive supervisor ownership and epoch/expiry checks through handoff.
-    pub fn mark_dispatch_capable<C: MonotonicClock + Clone>(
+    /// the global gate lock and exclusive supervisor borrow. The private continuation receives
+    /// authority only with an opaque receipt minted by the successfully synced journal transition.
+    fn mark_dispatch_capable<C: MonotonicClock + Clone>(
         &self,
         supervisor: &mut DiscoverySupervisor<ProcessWorkerLauncher, C>,
         r: &mut MutationReservation,
         permit: OperationPermit,
-    ) -> Result<(), MutationError> {
+    ) -> Result<PinMutationDispatchPermit, MutationError> {
         let target = supervisor.resolve_handle(r.intent.handle);
         let worker = supervisor.status().worker_generation;
         self.consume_at(r, permit, target, worker, Instant::now())
@@ -624,7 +662,7 @@ impl AuthenticationAuthority {
         target: Option<RegisteredDeviceTarget>,
         worker: Option<WorkerGeneration>,
         now: Instant,
-    ) -> Result<(), MutationError> {
+    ) -> Result<PinMutationDispatchPermit, MutationError> {
         let mut gate = self.gate.lock().map_err(|_| MutationError::InvalidPermit)?;
         // On ANY attempt the owned permit is lost. The reservation cannot mint or consume another.
         let valid = self.validate_permit(&gate, r, &permit, now).is_ok()
@@ -643,14 +681,19 @@ impl AuthenticationAuthority {
         let journal = slot.as_mut().ok_or(JournalError::Unavailable)?;
         let result = journal.dispatch_capable(r.intent.operation);
         gate.set_persistent_barrier(journal.admission() == RecoveryAdmission::Barrier);
-        result?;
+        let durable = result?;
         // Lifecycle can change during disk sync; retain the marker/barrier but return no authority.
         if self.epoch.load(Ordering::SeqCst) != r.intent.epoch
             || Instant::now() >= permit.expires_at
         {
             return Err(MutationError::InvalidPermit);
         }
-        Ok(())
+        Ok(PinMutationDispatchPermit {
+            durable,
+            binding: pin_binding(r),
+            epoch: r.intent.epoch,
+            expires_at: permit.expires_at,
+        })
     }
     fn validate_permit(
         &self,
@@ -804,6 +847,20 @@ impl AuthenticationAuthority {
     }
 }
 
+fn pin_binding(r: &MutationReservation) -> fido_auth::mutation::PinMutationBinding {
+    fido_auth::mutation::PinMutationBinding {
+        operation: r.intent.operation,
+        session: fido_auth::AcquisitionBinding {
+            worker_generation: r.intent.worker.0,
+            device_generation: r.intent.target.device_generation,
+            workflow_id: r.intent.binding.workflow_id,
+            prompt_instance_id: r.intent.binding.prompt_instance_id,
+            acquisition_id: r.reservation.acquisition,
+        },
+        intent_digest: r.intent.digest(),
+    }
+}
+
 fn mutation_envelope(
     binding: fido_auth::mutation::PinMutationBinding,
     id: u64,
@@ -951,10 +1008,198 @@ mod tests {
         a: &AuthenticationAuthority,
         r: &mut MutationReservation,
         p: OperationPermit,
-    ) -> Result<(), MutationError> {
+    ) -> Result<PinMutationDispatchPermit, MutationError> {
         let target = r.intent.target;
         let worker = r.intent.worker;
         a.consume_at(r, p, Some(target), Some(worker), Instant::now())
+    }
+    fn check_dispatch(
+        a: &AuthenticationAuthority,
+        r: &MutationReservation,
+        p: &PinMutationDispatchPermit,
+    ) -> Result<(), MutationError> {
+        a.validate_dispatch(
+            r,
+            p,
+            Some(r.intent.target),
+            Some(r.intent.worker),
+            Instant::now(),
+        )
+    }
+
+    #[test]
+    fn dispatch_capability_is_owned_and_has_no_duplicating_or_exporting_traits() {
+        // Ambiguous implementations make this fail to compile if an authority type gains a
+        // forbidden trait. These assertions examine the actual types, not source spelling.
+        macro_rules! forbidden {
+            ($trait:path) => {{
+                trait AmbiguousIfImpl<A> {
+                    fn check() {}
+                }
+                impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+                impl<T: ?Sized + $trait> AmbiguousIfImpl<u8> for T {}
+                let _ = <PinMutationDispatchPermit as AmbiguousIfImpl<_>>::check;
+                let _ = <crate::recovery::DurablePinDispatch as AmbiguousIfImpl<_>>::check;
+            }};
+        }
+        forbidden!(Clone);
+        forbidden!(Copy);
+        forbidden!(std::fmt::Debug);
+        forbidden!(std::fmt::Display);
+        forbidden!(serde::Serialize);
+        forbidden!(serde::de::DeserializeOwned);
+        // Changing dispatch to borrow the capability breaks this compile-time contract.
+        type OwnedDispatch = fn(
+            &AuthenticationAuthority,
+            &mut DiscoverySupervisor<ProcessWorkerLauncher>,
+            &MutationReservation,
+            PinMutationDispatchPermit,
+            fido_auth::mutation::PinMutationSecrets,
+        )
+            -> Result<fido_auth::mutation::PinMutationResult, MutationError>;
+        let _: OwnedDispatch = AuthenticationAuthority::dispatch_pin;
+    }
+
+    #[test]
+    fn dispatch_capability_requires_pending_then_acknowledged_durability() -> TestResult {
+        let a = authority();
+        let mut r = reserve(&a, PinOperation::ChangePin)?;
+        native_teardown(&a, r.intent.binding, true);
+        let p = a.approve_pin_intent(&mut r)?;
+        assert!(matches!(
+            consume(&a, &mut r, p),
+            Err(MutationError::InvalidPermit)
+        ));
+        assert_eq!(
+            a.recovery
+                .lock()
+                .map_err(|_| "journal")?
+                .as_ref()
+                .ok_or("journal")?
+                .phase(),
+            None
+        );
+
+        for failure in [0, 1, 2] {
+            let disk = MemoryStorage::default();
+            let a = AuthenticationAuthority::awaiting_recovery_startup();
+            a.initialize_recovery(Box::new(disk.clone()))?;
+            let (mut r, p) = ready(&a)?;
+            disk.0.lock().map_err(|_| "disk")?.failure = failure;
+            let result = consume(&a, &mut r, p);
+            if failure == 0 {
+                let dispatch = result?;
+                let bytes = disk
+                    .0
+                    .lock()
+                    .map_err(|_| "disk")?
+                    .bytes
+                    .clone()
+                    .ok_or("record")?;
+                let record: serde_json::Value = serde_json::from_slice(&bytes)?;
+                assert_eq!(record["phase"], "dispatch_capable");
+                check_dispatch(&a, &r, &dispatch)?;
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(MutationError::Journal(JournalError::Unavailable))
+                ));
+            }
+            assert!(r.consumed && r.approved.is_none());
+            assert!(a.approve_pin_intent(&mut r).is_err());
+            assert_eq!(a.recovery_admission(), RecoveryAdmission::Barrier);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn minted_dispatch_rechecks_revocation_expiry_target_and_full_binding() -> TestResult {
+        for field in 0..12 {
+            let a = authority();
+            let (mut r, p) = ready(&a)?;
+            let dispatch = consume(&a, &mut r, p)?;
+            check_dispatch(&a, &r, &dispatch)?;
+            let mut target = Some(r.intent.target);
+            let mut worker = Some(r.intent.worker);
+            let mut now = Instant::now();
+            match field {
+                0 => a.revoke(),
+                1 => now = dispatch.expires_at,
+                2 => target.as_mut().ok_or("target")?.device_generation = DeviceGeneration(99),
+                3 => target.as_mut().ok_or("target")?.worker_device_id = WorkerDeviceId(99),
+                4 => worker = Some(WorkerGeneration(99)),
+                5 => target = None,
+                6 => worker = None,
+                7 => r.intent.nonce[0] ^= 1,
+                8 => r.reservation.acquisition = fido_auth::AcquisitionId(99),
+                9 => r.intent.binding.prompt_instance_id = PromptInstanceId::from_raw(99),
+                10 => r.intent.operation = PinOperation::SetPin,
+                _ => r.intent.epoch += 1,
+            }
+            assert!(
+                a.validate_dispatch(&r, &dispatch, target, worker, now)
+                    .is_err()
+            );
+            assert_eq!(a.recovery_admission(), RecoveryAdmission::Barrier);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn minted_dispatch_requires_consumed_active_reservation_and_exact_journal() -> TestResult {
+        for state in 0..8 {
+            let a = authority();
+            let (mut r, p) = ready(&a)?;
+            let dispatch = consume(&a, &mut r, p)?;
+            match state {
+                0 => r.pending = false,
+                1 => r.consumed = false,
+                2 => r.approved = Some(r.intent.digest()),
+                3 => r.reservation.admission.workflow_id = WorkflowId::from_raw(99),
+                4 => a
+                    .recovery
+                    .lock()
+                    .map_err(|_| "journal")?
+                    .as_mut()
+                    .ok_or("journal")?
+                    .resolve(Resolution::Rejected)?,
+                5 => {
+                    let mut slot = a.recovery.lock().map_err(|_| "journal")?;
+                    let journal = slot.as_mut().ok_or("journal")?;
+                    journal.resolve(Resolution::Rejected)?;
+                    journal.pending(r.intent.operation, 1)?;
+                    let _other_incident = journal.dispatch_capable(r.intent.operation)?;
+                }
+                6 => a
+                    .gate
+                    .lock()
+                    .map_err(|_| "gate")?
+                    .set_persistent_barrier(false),
+                _ => {
+                    a.controller.lock().map_err(|_| "controller")?.request(
+                        r.intent.binding.workflow_id,
+                        Instant::now(),
+                        Duration::from_secs(30),
+                    )?;
+                }
+            }
+            assert!(check_dispatch(&a, &r, &dispatch).is_err());
+        }
+        let a = authority();
+        let b = authority();
+        let (mut r, p) = ready(&a)?;
+        let dispatch = consume(&a, &mut r, p)?;
+        assert!(check_dispatch(&b, &r, &dispatch).is_err());
+        a.finish_pin_foundation(
+            r,
+            WorkflowCompletion::Failed,
+            ExecutionQuiescence::Quiescent,
+        )?;
+        // Dropped/failed dispatch cannot turn the already durable marker into NotDispatched.
+        let recovery = a.reserve_recovery()?;
+        assert_eq!(a.recovery_admission(), RecoveryAdmission::Barrier);
+        drop(recovery);
+        Ok(())
     }
     #[test]
     fn one_gate_and_prompt_domain_across_inspection_set_change_and_recovery() -> TestResult {

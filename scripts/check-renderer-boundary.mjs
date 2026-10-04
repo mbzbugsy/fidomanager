@@ -586,10 +586,11 @@ for (const [file, name] of [
   ['crates/fido-auth/src/mutation.rs', 'PinMutationSecrets'],
   ['crates/fido-service/src/mutation.rs', 'OperationPermit'],
   ['crates/fido-service/src/mutation.rs', 'PinMutationDispatchPermit'],
+  ['crates/fido-service/src/recovery.rs', 'DurablePinDispatch'],
 ]) {
   const text = readFileSync(file, 'utf8');
   const unsafeDerive = new RegExp(
-    '#\\[derive\\([^)]*(?:Serialize|Deserialize|Clone|Copy|Debug|Display)[^)]*\\)\\]\\s*(?:pub )?(?:struct|enum) ' +
+    '#\\[derive\\([^)]*(?:Serialize|Deserialize|Clone|Copy|Debug|Display)[^)]*\\)\\]\\s*(?:pub(?:\\([^)]*\\))? )?(?:struct|enum) ' +
       name +
       '\\b',
   );
@@ -628,13 +629,29 @@ const mutationService = readFileSync(
 );
 if (/pub (?:struct|enum) PinMutationDispatchPermit/.test(mutationService))
   throw new Error('M4 dispatch authority must remain private.');
+if (/pub(?:\([^)]*\))? fn mark_dispatch_capable/.test(mutationService))
+  throw new Error('M4 dispatch transition must remain private.');
+if (!/permit: PinMutationDispatchPermit,/.test(mutationService))
+  throw new Error('M4 dispatch must consume its capability by value.');
+if (!/durable: crate::recovery::DurablePinDispatch,/.test(mutationService))
+  throw new Error('M4 dispatch capability must own a durable journal receipt.');
 if (
-  !/self\.write_pending\(&mut r, &permit\)\?;[\s\S]*?self\.mark_dispatch_capable\(supervisor, &mut r, permit\)\?;[\s\S]*?let dispatch = PinMutationDispatchPermit/.test(
+  !/self\.write_pending\(&mut r, &permit\)\?;\s*let dispatch = self\.mark_dispatch_capable\(supervisor, &mut r, permit\)\?;/.test(
     mutationService,
   )
 )
   throw new Error(
     'M4 dispatch capability requires durable Pending and DispatchCapable ordering.',
+  );
+const recoveryService = readFileSync(
+  'crates/fido-service/src/recovery.rs',
+  'utf8',
+);
+if (
+  !/self\.persist\(record\)\?;\s*Ok\(DurablePinDispatch/.test(recoveryService)
+)
+  throw new Error(
+    'M4 durable receipt requires successful journal persistence.',
   );
 console.log(
   'Renderer boundary check passed; only reviewed backend PIN mutation path.',
