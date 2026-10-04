@@ -57,7 +57,7 @@ pub struct DeviceIssue {
 pub struct ActivityNotice {
     pub revision: String,
     pub tone: NoticeTone,
-    pub message: &'static str,
+    pub message: String,
 }
 
 /// The whole renderer-facing shape. Only display handles and connected generations (already in
@@ -75,6 +75,7 @@ pub struct ActivityView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivityOutcome {
     Refreshed,
+    Success(&'static str),
     /// The user dismissed the native prompt. Intentionally silent.
     Cancelled,
     Issue(&'static str),
@@ -87,7 +88,7 @@ struct State {
     target_invalidated: bool,
     phase: Option<ActivityPhase>,
     issue: Option<(InventoryDevice, &'static str)>,
-    notice: Option<(u64, NoticeTone, &'static str)>,
+    notice: Option<(u64, NoticeTone, String)>,
     revision: u64,
 }
 
@@ -156,10 +157,11 @@ impl ActivityTracker {
             }),
             notice: state
                 .notice
+                .as_ref()
                 .map(|(revision, tone, message)| ActivityNotice {
                     revision: revision.to_string(),
-                    tone,
-                    message,
+                    tone: *tone,
+                    message: message.clone(),
                 }),
         }
     }
@@ -191,6 +193,13 @@ impl StartClaim {
     /// Record the outcome (problems attach to the targeted key, or become a transient notice when
     /// no key was resolved yet) and free the slot.
     pub fn finish(self, outcome: ActivityOutcome) {
+        self.finish_labeled(None, outcome);
+    }
+    /// Presentation-only trusted label: success remains attributable after worker retirement.
+    pub fn finish_pin(self, label: &str, outcome: ActivityOutcome) {
+        self.finish_labeled(Some(label), outcome);
+    }
+    fn finish_labeled(self, label: Option<&str>, outcome: ActivityOutcome) {
         let mut state = self.tracker.lock();
         // A late result for an invalidated generation must not become a global notice or attach
         // to its replacement card. The claim still releases normally; no authority is affected.
@@ -201,7 +210,15 @@ impl StartClaim {
         match (outcome, target) {
             (ActivityOutcome::Refreshed, _) => {
                 state.revision = state.revision.saturating_add(1);
-                state.notice = Some((state.revision, NoticeTone::Success, REFRESHED));
+                state.notice = Some((state.revision, NoticeTone::Success, REFRESHED.to_owned()));
+            }
+            (ActivityOutcome::Success(message), _) => {
+                state.revision = state.revision.saturating_add(1);
+                state.notice = Some((
+                    state.revision,
+                    NoticeTone::Success,
+                    label.map_or_else(|| message.to_owned(), |label| format!("{label}: {message}")),
+                ));
             }
             (ActivityOutcome::Cancelled, _) => {}
             (ActivityOutcome::Issue(message), Some(device)) => {
@@ -209,7 +226,7 @@ impl StartClaim {
             }
             (ActivityOutcome::Issue(message), None) => {
                 state.revision = state.revision.saturating_add(1);
-                state.notice = Some((state.revision, NoticeTone::Problem, message));
+                state.notice = Some((state.revision, NoticeTone::Problem, message.to_owned()));
             }
         }
         // Dropping `self` releases the slot after the outcome is visible.
@@ -231,7 +248,10 @@ pub const fn admission_message(error: AdmissionError) -> &'static str {
     match error {
         AdmissionError::OperationInProgress => STILL_FINISHING,
         AdmissionError::CoolingDown => TOO_MANY_ATTEMPTS,
-        AdmissionError::RecoveryBarrier | AdmissionError::WorkflowIdExhausted => RESTART_NEEDED,
+        AdmissionError::RecoveryBarrier => {
+            "Security key operations are blocked. Review the Security key menu before continuing."
+        }
+        AdmissionError::WorkflowIdExhausted => RESTART_NEEDED,
     }
 }
 
@@ -388,6 +408,22 @@ mod tests {
     }
 
     #[test]
+    fn pin_success_names_only_its_trusted_target_and_preserves_other_issue() {
+        let tracker = Arc::new(ActivityTracker::default());
+        let claim = tracker.try_claim().unwrap_or_else(|| panic!("claim"));
+        claim.target(device(8));
+        claim.finish(ActivityOutcome::Issue("Other key problem"));
+        let issue = tracker.view().issue;
+        let claim = tracker.try_claim().unwrap_or_else(|| panic!("claim"));
+        claim.target(device(7));
+        claim.finish_pin("Trusted key 1", ActivityOutcome::Success("PIN was set."));
+        assert_eq!(tracker.view().issue, issue);
+        assert_eq!(
+            tracker.view().notice.map(|n| n.message),
+            Some("Trusted key 1: PIN was set.".to_owned())
+        );
+    }
+    #[test]
     fn a_second_start_is_suppressed_until_the_first_ends() {
         let tracker = Arc::new(ActivityTracker::default());
         let first = tracker.try_claim();
@@ -452,7 +488,7 @@ mod tests {
         let notice = view.notice;
         assert_eq!(
             notice.map(|n| (n.tone, n.message)),
-            Some((NoticeTone::Success, REFRESHED))
+            Some((NoticeTone::Success, REFRESHED.to_owned()))
         );
         assert!(!tracker.is_busy());
     }
@@ -595,7 +631,7 @@ mod tests {
         let view = tracker.view();
         assert_eq!(
             view.notice.map(|n| (n.tone, n.message)),
-            Some((NoticeTone::Problem, KEY_UNAVAILABLE))
+            Some((NoticeTone::Problem, KEY_UNAVAILABLE.to_owned()))
         );
         assert!(view.issue.is_none());
     }

@@ -39,6 +39,10 @@ pub struct WorkerEngine<B> {
         Box<dyn fido_libfido2::NativeAuthenticationSession>,
     )>,
     auth_used: bool,
+    mutation: Option<(
+        fido_auth::mutation::PinMutationBinding,
+        Box<dyn fido_libfido2::NativePinMutationSession>,
+    )>,
     prepared_request_id: u64,
     verification_display_scope: Option<[u8; 32]>,
 }
@@ -53,6 +57,7 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
             secret: None,
             authentication: None,
             auth_used: false,
+            mutation: None,
             prepared_request_id: 0,
             verification_display_scope: None,
         }
@@ -202,10 +207,95 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
         }
     }
 
+    fn prepare_pin_mutation(
+        &mut self,
+        request: &WorkerRequestEnvelope,
+        device_id: WorkerDeviceId,
+        binding: fido_auth::mutation::PinMutationBinding,
+        deadline: NativeDeadline,
+    ) -> WorkerResponse {
+        let session = binding.session;
+        if self.auth_used
+            || self.secret.is_none()
+            || session.worker_generation != self.generation.0
+            || Some(session.device_generation) != request.device_generation
+            || session.acquisition_id.0 == 0
+            || session.workflow_id.as_raw() == 0
+            || session.prompt_instance_id.as_raw() == 0
+            || binding.intent_digest == [0; 32]
+        {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        }
+        self.auth_used = true;
+        self.prepared_request_id = request.request_id.0;
+        let Some(slot) = self.slots.iter().find(|s| {
+            s.device_id == device_id && s.present && s.generation == session.device_generation
+        }) else {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::DeviceAbsent,
+            };
+        };
+        match self
+            .backend
+            .prepare_pin_mutation(&slot.key, binding.operation, deadline)
+        {
+            Ok(native) if native.operation() == binding.operation => {
+                let retries = native.pin_retries();
+                self.mutation = Some((binding, native));
+                WorkerResponse::PinMutationPrepared {
+                    binding,
+                    pin_retries: retries,
+                }
+            }
+            _ => {
+                self.secret = None;
+                WorkerResponse::Error {
+                    code: WorkerErrorCode::UnsupportedDevice,
+                }
+            }
+        }
+    }
+    fn execute_pin_mutation(
+        &mut self,
+        request: &WorkerRequestEnvelope,
+        binding: fido_auth::mutation::PinMutationBinding,
+        deadline: NativeDeadline,
+    ) -> WorkerResponse {
+        let session = self.mutation.take();
+        let secret = self.secret.take();
+        let (Some((expected, native)), Some(secret)) = (session, secret) else {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        };
+        if binding != expected
+            || Some(binding.session.device_generation) != request.device_generation
+            || request.request_id.0 <= self.prepared_request_id
+        {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        }
+        let Ok(secrets) =
+            fido_auth::mutation::receive_mutation_secret(secret, binding, request.request_id.0)
+        else {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        };
+        WorkerResponse::PinMutationCompleted {
+            binding,
+            result: native.execute(secrets, deadline),
+        }
+    }
+
     /// Handles one request. The request's budget becomes **one** deadline, started here, that is
     /// shared by every native sub-call the request makes.
     pub fn handle(&mut self, request: WorkerRequestEnvelope) -> WorkerResponseEnvelope {
         if request.validate().is_err() || request.worker_generation != self.generation {
+            self.mutation = None;
             self.authentication = None;
             self.secret = None;
             return self.response(
@@ -223,7 +313,20 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
                     | WorkerRequest::InspectCredentials { .. }
             )
         {
+            self.mutation = None;
             self.authentication = None;
+            self.secret = None;
+            return self.response(
+                &request,
+                WorkerResponse::Error {
+                    code: WorkerErrorCode::ProtocolMismatch,
+                },
+            );
+        }
+        if self.mutation.is_some()
+            && !matches!(request.request, WorkerRequest::ExecutePinMutation { .. })
+        {
+            self.mutation = None;
             self.secret = None;
             return self.response(
                 &request,
@@ -234,6 +337,12 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
         }
         let deadline = NativeDeadline::after(Duration::from_millis(request.budget_ms.0));
         let response = match &request.request {
+            WorkerRequest::PreparePinMutation { device_id, binding } => {
+                self.prepare_pin_mutation(&request, *device_id, *binding, deadline)
+            }
+            WorkerRequest::ExecutePinMutation { binding } => {
+                self.execute_pin_mutation(&request, *binding, deadline)
+            }
             WorkerRequest::PrepareAuthentication { device_id, binding } => {
                 self.prepare_authentication(&request, *device_id, *binding, deadline)
             }
@@ -282,7 +391,13 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
             device_generation: request.device_generation,
             evidence: WorkerResponseEvidence {
                 execution_quiescence: ExecutionQuiescence::Quiescent,
-                mutation_outcome: None,
+                mutation_outcome: if let WorkerResponse::PinMutationCompleted { result, .. } =
+                    &response
+                {
+                    Some(result.outcome)
+                } else {
+                    None
+                },
             },
             response,
         }
@@ -968,6 +1083,186 @@ mod tests {
                 calls.load(Ordering::SeqCst),
                 usize::from(scenario == 0 || scenario == 6)
             );
+        }
+        Ok(())
+    }
+    struct MutationBackend {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        compatible: bool,
+    }
+    struct MutationSession {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        operation: fido_auth::mutation::PinOperation,
+    }
+    impl fido_libfido2::NativePinMutationSession for MutationSession {
+        fn operation(&self) -> fido_auth::mutation::PinOperation {
+            self.operation
+        }
+        fn pin_retries(&self) -> Option<u8> {
+            Some(8)
+        }
+        fn execute(
+            self: Box<Self>,
+            secrets: fido_auth::mutation::PinMutationSecrets,
+            _: NativeDeadline,
+        ) -> fido_auth::mutation::PinMutationResult {
+            assert_eq!(secrets.operation(), self.operation);
+            drop(secrets);
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            fido_auth::mutation::PinMutationResult::from_code(self.operation, true, 0, true)
+        }
+    }
+    impl NativeDiscoveryBackend for MutationBackend {
+        fn manifest(
+            &mut self,
+            _: NativeDeadline,
+        ) -> Result<Vec<NativeDiscoveredDevice>, NativeError> {
+            Ok(vec![native_device(1)?])
+        }
+        fn get_info(
+            &mut self,
+            _: &NativeDeviceKey,
+            _: NativeDeadline,
+        ) -> Result<NativeDeviceInfo, NativeError> {
+            Ok(native_info())
+        }
+        fn prepare_pin_mutation(
+            &mut self,
+            _: &NativeDeviceKey,
+            operation: fido_auth::mutation::PinOperation,
+            _: NativeDeadline,
+        ) -> Result<Box<dyn fido_libfido2::NativePinMutationSession>, NativeError> {
+            Ok(Box::new(MutationSession {
+                calls: self.calls.clone(),
+                operation: if self.compatible {
+                    operation
+                } else {
+                    fido_auth::mutation::PinOperation::SetPin
+                },
+            }))
+        }
+    }
+    #[test]
+    fn mutation_requires_exact_one_use_preparation_and_secret_binding()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use fido_auth::mutation::{PinMutationBinding, PinMutationSecrets, PinOperation};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let binding = PinMutationBinding {
+            operation: PinOperation::ChangePin,
+            session: fido_auth::AcquisitionBinding {
+                worker_generation: 1,
+                device_generation: DeviceGeneration(1),
+                workflow_id: fido_core::WorkflowId::from_raw(1),
+                prompt_instance_id: fido_core::PromptInstanceId::from_raw(1),
+                acquisition_id: fido_auth::AcquisitionId(1),
+            },
+            intent_digest: [7; 32],
+        };
+        for scenario in 0..13 {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let pin = || {
+                fido_auth::PinSecret::collect(|b| {
+                    b[..4].copy_from_slice(b"fake");
+                    Some(4)
+                })
+                .map_err(|_| "synthetic PIN")
+            };
+            let mut bytes = Vec::new();
+            fido_auth::mutation::send_mutation_secret(
+                &mut bytes,
+                binding,
+                3,
+                PinMutationSecrets::Change {
+                    current: pin()?,
+                    new: pin()?,
+                },
+            )
+            .map_err(|_| "frame")?;
+            if scenario == 9 {
+                bytes.pop();
+            }
+            if scenario == 10 {
+                bytes.push(1);
+            }
+            let mut engine = WorkerEngine::new(
+                MutationBackend {
+                    calls: calls.clone(),
+                    compatible: scenario != 11,
+                },
+                WorkerGeneration(1),
+            )
+            .with_secret(Some(Box::new(std::io::Cursor::new(bytes))));
+            engine.handle(request(
+                WorkerGeneration(1),
+                1,
+                WorkerRequest::ListDevices,
+                None,
+            ));
+            if scenario != 1 {
+                engine.handle(request(
+                    WorkerGeneration(1),
+                    2,
+                    WorkerRequest::PreparePinMutation {
+                        device_id: WorkerDeviceId(1),
+                        binding,
+                    },
+                    Some(DeviceGeneration(1)),
+                ));
+            }
+            if scenario == 12 {
+                engine.handle(request(
+                    WorkerGeneration(1),
+                    4,
+                    WorkerRequest::HealthCheck,
+                    None,
+                ));
+            }
+            let mut submitted = binding;
+            let mut worker = WorkerGeneration(1);
+            let mut id = 3;
+            match scenario {
+                2 => submitted.operation = PinOperation::SetPin,
+                3 => submitted.session.device_generation = DeviceGeneration(2),
+                4 => submitted.session.workflow_id = fido_core::WorkflowId::from_raw(2),
+                5 => {
+                    submitted.session.prompt_instance_id = fido_core::PromptInstanceId::from_raw(2)
+                }
+                6 => submitted.session.acquisition_id = fido_auth::AcquisitionId(2),
+                7 => worker = WorkerGeneration(2),
+                8 => id = 2,
+                _ => {}
+            }
+            let response = engine.handle(request(
+                worker,
+                id,
+                WorkerRequest::ExecutePinMutation { binding: submitted },
+                Some(submitted.session.device_generation),
+            ));
+            if scenario == 0 {
+                assert!(matches!(
+                    response.response,
+                    WorkerResponse::PinMutationCompleted { .. }
+                ));
+                assert_eq!(
+                    response.evidence.mutation_outcome,
+                    Some(fido_core::MutationOutcome::ConfirmedSuccessful)
+                );
+            } else {
+                assert!(matches!(response.response, WorkerResponse::Error { .. }));
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), usize::from(scenario == 0));
+            let replay = engine.handle(request(
+                WorkerGeneration(1),
+                8,
+                WorkerRequest::ExecutePinMutation { binding },
+                Some(DeviceGeneration(1)),
+            ));
+            assert!(matches!(replay.response, WorkerResponse::Error { .. }));
+            assert!(engine.mutation.is_none() && engine.secret.is_none());
+            assert_eq!(calls.load(Ordering::SeqCst), usize::from(scenario == 0));
         }
         Ok(())
     }

@@ -835,6 +835,27 @@ Requirements:
 
 Native PIN dialogs themselves can serve as final authorization when they display the exact target device and operation and require an explicit action button; avoid redundant generic confirmation dialogs.
 
+The macOS M4 runtime selects Set PIN only from explicit `clientPin=false` and
+Change PIN only from explicit `clientPin=true` on a validated supported device.
+Missing/contradictory evidence offers neither. Native menu events build immutable
+intents; there is no renderer mutation command. The worker independently prepares
+and revalidates the same unique native object. Change PIN obtains passive retries
+before the sheet and requires a last-retry acknowledgement when exactly one remains.
+
+The shared gate admits one workflow with no queue. Native sheet teardown precedes
+permit creation; durable Pending precedes exact permit consumption and durable
+DispatchCapable. Only then can a private one-shot handoff send FMPIN003 secrets
+and ExecutePinMutation (worker protocol 4), reaching one `fido_dev_set_pin` call.
+Execution shares a five-second deadline across passive revalidation and the
+multi-exchange call. Every path retires and reaps the worker before gate release.
+Definitive outcomes survive cleanup/storage failures; uncertainty retains a global
+barrier. The native recovery sheet can persist AcknowledgedUnknown after deliberate
+acknowledgement, with zero PIN probes and no reconnected-key identity claim. It
+cannot clear corrupt/poisoned storage. See
+[ADR-010](adr/ADR-010-MUTATION-OUTCOME-RECOVERY.md) and
+[M4 macOS evidence](validation/M4-pin-mutation-macos.md).
+
+
 ## 24. Credential deletion workflow
 
 Deletion uses an immutable operation intent bound to:
@@ -1477,10 +1498,12 @@ Before shipping/using production authentication:
 - operation-specific adapter evidence table;
 - uncertainty handling.
 
-The non-dispatching M4 foundation is described in
-[ADR-010](adr/ADR-010-MUTATION-OUTCOME-RECOVERY.md) and
-[M4 foundation validation](validation/M4-mutation-foundation.md). Native PIN
-mutation execution, its presenter and final recovery UI remain gated future work.
+The merged [M4 foundation](validation/M4-mutation-foundation.md) now has a
+production macOS native PIN execution and recovery acknowledgement path described
+in [ADR-010](adr/ADR-010-MUTATION-OUTCOME-RECOVERY.md) and
+[M4 macOS validation](validation/M4-pin-mutation-macos.md). Runtime phase reporting
+is M4 on macOS; hardware validation is a separate explicit operator gate. This
+does not enable M4 on Linux/Windows or establish packaging/release readiness.
 
 ### Milestone 5 — credential deletion
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic negative controls for M3 symbol attribution; no hardware."""
+"""Deterministic negative controls for credential/PIN symbol attribution; no hardware."""
 import importlib.util
 from pathlib import Path
 
@@ -23,3 +23,22 @@ for bad_symbols, bad_map in (
     else:
         raise AssertionError("invalid M3 attribution passed")
 print("PASS: all M3 symbols; missing, unresolved, other-object and dead-stripped controls rejected")
+
+pin_archive = "/cargo/private-libfido2/libfidomanager_fido2_bounded.a"
+pin_symbols = "000 T _fido_dev_set_pin"
+pin_map = "[ 12] " + pin_archive + "(pin.c.o)\n000 0 [ 12] _fido_dev_set_pin"
+verifier.verify_pin_symbol(pin_symbols, pin_map, pin_archive)
+for bad_symbols, bad_map in (
+    (pin_symbols.replace("T _", "U _"), pin_map),
+    (pin_symbols, pin_map.replace("[ 12] _", "[ 13] _")),
+    (pin_symbols, pin_map.replace(pin_archive, "/opt/homebrew/lib/libfido2.a")),
+    (pin_symbols, "[ 12] " + pin_archive + "(pin.c.o)\n# Dead Stripped Symbols:\n000 0 [ 12] _fido_dev_set_pin"),
+    (pin_symbols, pin_map.replace("pin.c.o", "unrelated.c.o")),
+):
+    try:
+        verifier.verify_pin_symbol(bad_symbols, bad_map, pin_archive)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("invalid PIN attribution passed")
+print("PASS: PIN symbol unresolved, wrong object/archive and dead-stripped controls rejected")

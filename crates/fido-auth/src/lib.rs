@@ -1,6 +1,8 @@
 //! Backend/worker authentication contracts. This crate has no renderer API.
 //! Host cleanup is not authenticator-side revocation or CTAPHID_CANCEL evidence.
 
+pub mod mutation;
+
 use fido_core::{DeviceGeneration, PromptInstanceId, WorkflowId};
 use serde::{Deserialize, Serialize};
 use std::ffi::{CStr, c_char};
@@ -337,7 +339,7 @@ mod tests {
     static_assertions::assert_impl_all!(Zeroizing<Box<[u8]>>: zeroize::ZeroizeOnDrop);
     assert_not_impl_any!(AuthorizationGrant: Clone, Copy, Serialize, serde::de::DeserializeOwned);
 
-    fn binding() -> AcquisitionBinding {
+    pub(super) fn binding() -> AcquisitionBinding {
         AcquisitionBinding {
             worker_generation: 1,
             device_generation: DeviceGeneration(1),
@@ -346,7 +348,7 @@ mod tests {
             acquisition_id: AcquisitionId(1),
         }
     }
-    fn pin() -> PinSecret {
+    pub(super) fn pin() -> PinSecret {
         PinSecret::collect(|b| {
             b[..4].copy_from_slice(b"fake");
             Some(4)

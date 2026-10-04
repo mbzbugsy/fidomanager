@@ -4,6 +4,8 @@
 //! worker and libfido2 pointers never cross this crate boundary.
 
 pub mod inspection;
+#[cfg(any(test, all(feature = "native-libfido2", target_os = "macos")))]
+mod mutation;
 
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -196,7 +198,25 @@ pub trait NativeAuthenticationSession: Send {
     ) -> fido_auth::AuthenticationEvidence;
 }
 
+pub trait NativePinMutationSession: Send {
+    fn operation(&self) -> fido_auth::mutation::PinOperation;
+    fn pin_retries(&self) -> Option<u8>;
+    fn execute(
+        self: Box<Self>,
+        secrets: fido_auth::mutation::PinMutationSecrets,
+        deadline: NativeDeadline,
+    ) -> fido_auth::mutation::PinMutationResult;
+}
+
 pub trait NativeDiscoveryBackend: Send {
+    fn prepare_pin_mutation(
+        &mut self,
+        _key: &NativeDeviceKey,
+        _operation: fido_auth::mutation::PinOperation,
+        _deadline: NativeDeadline,
+    ) -> Result<Box<dyn NativePinMutationSession>, NativeError> {
+        Err(NativeError::new(NativeErrorKind::Unsupported, None))
+    }
     fn prepare_authentication(
         &mut self,
         _key: &NativeDeviceKey,
@@ -232,6 +252,8 @@ mod native {
     mod authentication;
     #[cfg(target_os = "macos")]
     mod inspection;
+    #[cfg(target_os = "macos")]
+    mod mutation;
 
     const FIDO_OK: c_int = 0;
     const ERROR_NAME_BOUND: usize = 64;
@@ -297,6 +319,15 @@ mod native {
     }
 
     impl NativeDiscoveryBackend for LibFido2Adapter {
+        #[cfg(target_os = "macos")]
+        fn prepare_pin_mutation(
+            &mut self,
+            key: &NativeDeviceKey,
+            operation: fido_auth::mutation::PinOperation,
+            deadline: NativeDeadline,
+        ) -> Result<Box<dyn super::NativePinMutationSession>, NativeError> {
+            mutation::prepare(key, operation, deadline)
+        }
         #[cfg(target_os = "macos")]
         fn prepare_authentication(
             &mut self,

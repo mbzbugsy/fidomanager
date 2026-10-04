@@ -76,6 +76,12 @@ pub async fn list_authenticators(
         not(feature = "native-ui-spike"),
         target_os = "macos"
     ))]
+    let authority = Arc::clone(&state.authentication);
+    #[cfg(all(
+        feature = "native-pin",
+        not(feature = "native-ui-spike"),
+        target_os = "macos"
+    ))]
     let native_menu = state
         .authentication_menu
         .lock()
@@ -132,10 +138,11 @@ pub async fn list_authenticators(
                     .devices
                     .iter()
                     .zip(&presentations)
-                    .map(|(device, presentation)| {
-                        crate::authentication::NativeTarget::new(device.handle, presentation)
+                    .flat_map(|(device, presentation)| {
+                        crate::authentication::NativeTarget::for_device(device, presentation)
                     })
                     .collect(),
+                &authority,
             );
         }
 

@@ -19,7 +19,7 @@ use fido_auth::{AcquisitionBinding, AuthenticationEvidence, GrantKind};
 use fido_core::{Aaguid, DeviceGeneration, ExecutionQuiescence, MutationOutcome};
 use serde::{Deserialize, Serialize};
 
-pub const WORKER_PROTOCOL_VERSION: u16 = 3;
+pub const WORKER_PROTOCOL_VERSION: u16 = 4;
 /// Largest frame the service accepts from a worker (responses). Transport implementations must
 /// reject larger frames before deserialization, and before allocating their payload.
 pub const MAX_WORKER_FRAME_BYTES: usize = 1_048_576;
@@ -116,7 +116,9 @@ impl WorkerRequestEnvelope {
             WorkerRequest::GetDeviceInfo { .. }
             | WorkerRequest::PrepareAuthentication { .. }
             | WorkerRequest::ValidateAuthentication { .. }
-            | WorkerRequest::InspectCredentials { .. } => self.device_generation.is_some(),
+            | WorkerRequest::InspectCredentials { .. }
+            | WorkerRequest::PreparePinMutation { .. }
+            | WorkerRequest::ExecutePinMutation { .. } => self.device_generation.is_some(),
             WorkerRequest::HealthCheck
             | WorkerRequest::Cancel { .. }
             | WorkerRequest::ListDevices => self.device_generation.is_none(),
@@ -146,6 +148,13 @@ impl WorkerRequestEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkerRequest {
+    PreparePinMutation {
+        device_id: WorkerDeviceId,
+        binding: fido_auth::mutation::PinMutationBinding,
+    },
+    ExecutePinMutation {
+        binding: fido_auth::mutation::PinMutationBinding,
+    },
     HealthCheck,
     Cancel {
         target_request_id: WorkerRequestId,
@@ -170,6 +179,8 @@ pub enum WorkerRequest {
 impl WorkerRequest {
     pub const fn operation_class(&self) -> WorkerOperationClass {
         match self {
+            Self::PreparePinMutation { .. } => WorkerOperationClass::SensitiveRead,
+            Self::ExecutePinMutation { .. } => WorkerOperationClass::Mutation,
             Self::PrepareAuthentication { .. }
             | Self::ValidateAuthentication { .. }
             | Self::InspectCredentials { .. } => WorkerOperationClass::SensitiveRead,
@@ -241,6 +252,14 @@ pub struct WorkerResponseEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkerResponse {
+    PinMutationPrepared {
+        binding: fido_auth::mutation::PinMutationBinding,
+        pin_retries: Option<u8>,
+    },
+    PinMutationCompleted {
+        binding: fido_auth::mutation::PinMutationBinding,
+        result: fido_auth::mutation::PinMutationResult,
+    },
     AuthenticationPrepared {
         binding: AcquisitionBinding,
         grant_kind: GrantKind,
@@ -287,7 +306,73 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mutation_messages_are_not_protocol_requests() -> Result<(), Box<dyn std::error::Error>> {
+    fn pin_protocol_is_typed_classified_secret_free_and_strict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let binding = fido_auth::mutation::PinMutationBinding {
+            operation: fido_auth::mutation::PinOperation::ChangePin,
+            session: AcquisitionBinding {
+                worker_generation: 1,
+                device_generation: DeviceGeneration(1),
+                workflow_id: fido_core::WorkflowId::from_raw(1),
+                prompt_instance_id: fido_core::PromptInstanceId::from_raw(1),
+                acquisition_id: fido_auth::AcquisitionId(1),
+            },
+            intent_digest: [1; 32],
+        };
+        for request in [
+            WorkerRequest::PreparePinMutation {
+                device_id: WorkerDeviceId(1),
+                binding,
+            },
+            WorkerRequest::ExecutePinMutation { binding },
+        ] {
+            let mutation = matches!(request, WorkerRequest::ExecutePinMutation { .. });
+            let env = request_envelope(request, Some(DeviceGeneration(1)));
+            assert_eq!(
+                env.operation_class,
+                if mutation {
+                    WorkerOperationClass::Mutation
+                } else {
+                    WorkerOperationClass::SensitiveRead
+                }
+            );
+            assert!(env.validate().is_ok());
+            let value = serde_json::to_value(&env)?;
+            assert_eq!(
+                serde_json::from_value::<WorkerRequestEnvelope>(value.clone())?,
+                env
+            );
+            for field in [
+                "pin",
+                "new_pin",
+                "current_pin",
+                "confirm_pin",
+                "approval",
+                "permit",
+                "raw_ctap",
+            ] {
+                let mut v = value.clone();
+                v["request"][field] = serde_json::json!("hostile");
+                assert!(serde_json::from_value::<WorkerRequestEnvelope>(v).is_err());
+                let mut v = value.clone();
+                v["request"]["binding"][field] = serde_json::json!("hostile");
+                assert!(serde_json::from_value::<WorkerRequestEnvelope>(v).is_err());
+            }
+            let mut bad = env.clone();
+            bad.device_generation = None;
+            assert!(bad.validate().is_err());
+            bad = env.clone();
+            bad.operation_class = WorkerOperationClass::Reset;
+            assert!(bad.validate().is_err());
+            bad = env;
+            bad.protocol_version = 3;
+            assert!(bad.validate().is_err());
+        }
+        Ok(())
+    }
+    #[test]
+    fn generic_mutation_messages_are_not_protocol_requests()
+    -> Result<(), Box<dyn std::error::Error>> {
         for kind in ["set_pin", "change_pin", "reset", "delete_credential"] {
             let encoded = serde_json::json!({ "kind": kind });
             assert!(serde_json::from_value::<WorkerRequest>(encoded).is_err());

@@ -5,7 +5,7 @@ use crate::{
     WorkflowCompletion, WorkflowReleaseEvidence,
 };
 use fido_auth::{AcquisitionBinding, AcquisitionId, AuthenticationEvidence, GrantKind};
-pub use fido_core::DeviceHandle;
+pub use fido_core::{DeviceHandle, DeviceSnapshot as NativeDeviceSnapshot};
 use fido_core::{ExecutionQuiescence, RecoveryAdmission, SensitiveWorkflowKind};
 use fido_native_ui::{PinCompletion, PromptController, PromptOutcome, PromptRequest};
 use fido_worker_protocol::{
@@ -60,7 +60,7 @@ pub struct AuthenticationReservation {
     pub(crate) admission: WorkflowAdmission,
     pub(crate) prompt: PromptRequest,
     pub(crate) prompt_outcome: mpsc::Receiver<PromptOutcome>,
-    acquisition: AcquisitionId,
+    pub(crate) acquisition: AcquisitionId,
     pub(crate) epoch: u64,
 }
 

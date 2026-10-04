@@ -50,7 +50,7 @@ pub struct FoundationInfo {
 pub const fn foundation_info() -> FoundationInfo {
     FoundationInfo {
         phase: if cfg!(target_os = "macos") {
-            "milestone-3-credential-inspection"
+            "milestone-4-native-pin-mutation"
         } else {
             "milestone-1-read-only-discovery"
         },

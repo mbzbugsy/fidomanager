@@ -499,8 +499,7 @@ if (existsSync(generatedCapabilitiesPath) || existsSync(generatedAclPath)) {
   }
 }
 
-// M4 foundation has no executable mutation variant or native mutation entry point. This check
-// runs in ordinary CI and rejects even a newly declared FFI symbol before it can become callable.
+// M4 permits only the reviewed typed PIN path; reset, deletion and generic mutation stay forbidden.
 const workerProtocol = readFileSync(
   'crates/fido-worker-protocol/src/lib.rs',
   'utf8',
@@ -512,6 +511,8 @@ assertExactArray(
     (m) => m[1],
   ),
   [
+    'PreparePinMutation',
+    'ExecutePinMutation',
     'HealthCheck',
     'Cancel',
     'ListDevices',
@@ -520,7 +521,7 @@ assertExactArray(
     'InspectCredentials',
     'ValidateAuthentication',
   ],
-  'M4 foundation must not add an executable mutation worker request.',
+  'M4 must not add an unreviewed executable mutation worker request.',
 );
 for (const file of [
   ...listFiles('crates', (path) => path.endsWith('.rs')),
@@ -540,7 +541,9 @@ for (const file of [
     );
   }
   if (
-    /\b(?:fido_dev_set_pin|fido_dev_reset)\s*\(/.test(source) ||
+    /\bfido_dev_reset\s*\(/.test(source) ||
+    (file !== 'crates/fido-libfido2/src/native/mutation.rs' &&
+      /\bfido_dev_set_pin\s*\(/.test(source)) ||
     (!manualSpike && /\bfido_credman_del_dev_rk\s*\(/.test(source))
   ) {
     throw new Error(
@@ -550,7 +553,7 @@ for (const file of [
 }
 for (const file of rendererFiles) {
   if (
-    /\b(?:OperationPermit|OperationIntent|WorkflowId|PromptInstanceId|recovery_journal|journal_path|dispatch_capable)\b/.test(
+    /\b(?:OperationPermit|OperationIntent|PinMutationSecrets|PinMutationDispatchPermit|MutationCompletion|WorkflowId|PromptInstanceId|recovery_journal|journal_path|dispatch_capable|current_pin|new_pin|confirm_pin)\b/.test(
       readFileSync(file, 'utf8'),
     )
   ) {
@@ -579,4 +582,77 @@ if (
   throw new Error('M4 must leave the manual spike opt-in and non-shipping.');
 }
 
-console.log('Renderer boundary check passed; no production mutation path.');
+for (const [file, name] of [
+  ['crates/fido-auth/src/mutation.rs', 'PinMutationSecrets'],
+  ['crates/fido-service/src/mutation.rs', 'OperationPermit'],
+  ['crates/fido-service/src/mutation.rs', 'PinMutationDispatchPermit'],
+  ['crates/fido-service/src/recovery.rs', 'DurablePinDispatch'],
+]) {
+  const text = readFileSync(file, 'utf8');
+  const unsafeDerive = new RegExp(
+    '#\\[derive\\([^)]*(?:Serialize|Deserialize|Clone|Copy|Debug|Display)[^)]*\\)\\]\\s*(?:pub(?:\\([^)]*\\))? )?(?:struct|enum) ' +
+      name +
+      '\\b',
+  );
+  const unsafeImpl = new RegExp(
+    '\\bimpl(?:<[^>]*>)?\\s+(?:[A-Za-z_][A-Za-z0-9_]*::)*(?:Serialize|Deserialize(?:<[^>]*>)?|Clone|Copy|Debug|Display)\\s+for\\s+' +
+      name +
+      '\\b',
+  );
+  if (unsafeDerive.test(text) || unsafeImpl.test(text))
+    throw new Error(`M4 secret/permit traits must remain forbidden: ${name}`);
+}
+const nativeSheet = readFileSync(
+  'crates/fido-native-ui/src/macos_pin.rs',
+  'utf8',
+);
+if (
+  !nativeSheet.includes(
+    'cancel.setKeyEquivalent(&NSString::from_str("\\r"))',
+  ) ||
+  !nativeSheet.includes('makeFirstResponder(Some(&cancel))') ||
+  !nativeSheet.includes('defaultButtonCell()') ||
+  !nativeSheet.includes('!default_cancel')
+)
+  throw new Error('M4 native sheets must prove Cancel is the safe default.');
+const pinAdapter = readFileSync(
+  'crates/fido-libfido2/src/native/mutation.rs',
+  'utf8',
+);
+if ([...pinAdapter.matchAll(/\bfido_dev_set_pin\s*\(/g)].length !== 2)
+  throw new Error(
+    'M4 requires exactly one private PIN declaration and one execution call.',
+  );
+const mutationService = readFileSync(
+  'crates/fido-service/src/mutation.rs',
+  'utf8',
+);
+if (/pub (?:struct|enum) PinMutationDispatchPermit/.test(mutationService))
+  throw new Error('M4 dispatch authority must remain private.');
+if (/pub(?:\([^)]*\))? fn mark_dispatch_capable/.test(mutationService))
+  throw new Error('M4 dispatch transition must remain private.');
+if (!/permit: PinMutationDispatchPermit,/.test(mutationService))
+  throw new Error('M4 dispatch must consume its capability by value.');
+if (!/durable: crate::recovery::DurablePinDispatch,/.test(mutationService))
+  throw new Error('M4 dispatch capability must own a durable journal receipt.');
+if (
+  !/self\.write_pending\(&mut r, &permit\)\?;\s*let dispatch = self\.mark_dispatch_capable\(supervisor, &mut r, permit\)\?;/.test(
+    mutationService,
+  )
+)
+  throw new Error(
+    'M4 dispatch capability requires durable Pending and DispatchCapable ordering.',
+  );
+const recoveryService = readFileSync(
+  'crates/fido-service/src/recovery.rs',
+  'utf8',
+);
+if (
+  !/self\.persist\(record\)\?;\s*Ok\(DurablePinDispatch/.test(recoveryService)
+)
+  throw new Error(
+    'M4 durable receipt requires successful journal persistence.',
+  );
+console.log(
+  'Renderer boundary check passed; only reviewed backend PIN mutation path.',
+);

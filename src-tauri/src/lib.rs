@@ -7,6 +7,12 @@ mod authentication;
 mod commands;
 #[cfg(all(feature = "native-ui-spike", target_os = "macos"))]
 mod native_ui_spike;
+#[cfg(all(
+    feature = "native-pin",
+    not(feature = "native-ui-spike"),
+    target_os = "macos"
+))]
+mod pin_mutation;
 
 use std::sync::{Arc, Mutex};
 
@@ -148,7 +154,10 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| {
-            if event.id().as_ref().starts_with("inspect-credentials-") {
+            if event.id().as_ref().starts_with("inspect-credentials-")
+                || event.id().as_ref().starts_with("pin-mutation-")
+                || event.id().as_ref() == "recover-pin"
+            {
                 authentication::start(app, event.id().as_ref());
             }
         })

@@ -94,12 +94,14 @@ jobs:
         run: rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
       - name: Native parser bounds, negative linkage and reproducible build
         run: python3 scripts/test-libfido2.py --rebuild
-      - name: Compile production AppKit and PUAT path
+      - name: Compile production AppKit, PIN mutation and PUAT paths
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Deterministic macOS auth and process tests (no hardware claim)
         run: cargo test --workspace --all-targets --locked
-      - name: Verify M3 credman call sites against exact private archive link map
+      - name: Verify credential and PIN mutation symbols against exact private archive link map
         run: |
+          # Bin test harnesses share the link-map output; force a fresh production link.
+          cargo clean -p fido-worker
           cargo build -p fido-worker --locked
           python3 scripts/test-credman-linkage.py
           python3 scripts/verify-libfido2-linkage.py target/debug/fido-worker

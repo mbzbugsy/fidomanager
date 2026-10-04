@@ -1,6 +1,8 @@
 //! Secret-free, authority-wide crash recovery policy. Storage acknowledges durability, not just
 //! a successful write. No method in this module can send a worker request.
-use fido_core::{MutationOutcome, RecoveryAdmission};
+#[cfg(test)]
+use fido_core::MutationOutcome;
+use fido_core::RecoveryAdmission;
 use serde::{Deserialize, Serialize};
 use std::io;
 use thiserror::Error;
@@ -33,12 +35,7 @@ pub enum JournalError {
     InvalidTransition,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PinOperation {
-    SetPin,
-    ChangePin,
-}
+pub use fido_auth::mutation::{PinOperation, pin_call_outcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -72,10 +69,23 @@ struct Record {
     resolution: Option<Resolution>,
 }
 
+/// The durable dispatch receipt is not an externally constructible or importable capability.
+///
+/// ```compile_fail
+/// let _ = fido_service::recovery::DurablePinDispatch {};
+/// ```
 pub struct RecoveryJournal {
     storage: Box<dyn JournalStorage>,
     record: Option<Record>,
     poisoned: bool,
+}
+
+/// Opaque proof of one successfully synced DispatchCapable incident. Only this module can
+/// construct it; callers cannot manufacture authority from a phase or a successful write alone.
+/// No Clone/Copy, formatting or serialization: the receipt travels inside the one-shot permit.
+pub(super) struct DurablePinDispatch {
+    incident: String,
+    operation: PinOperation,
 }
 
 impl RecoveryJournal {
@@ -119,6 +129,9 @@ impl RecoveryJournal {
             RecoveryAdmission::Open
         }
     }
+    pub(crate) fn can_acknowledge(&self) -> bool {
+        !self.poisoned && self.phase() == Some(JournalPhase::DispatchCapable)
+    }
     pub fn phase(&self) -> Option<JournalPhase> {
         self.record.as_ref().map(|r| r.phase)
     }
@@ -131,6 +144,11 @@ impl RecoveryJournal {
         operation: PinOperation,
         created_unix_secs: u64,
     ) -> Result<(), JournalError> {
+        // A valid Pending-only prior incident proves no dispatch-capable acknowledgement.
+        // Preserve its NotDispatched tombstone durably before admitting a new incident.
+        if !self.poisoned && self.phase() == Some(JournalPhase::Pending) {
+            self.resolve(Resolution::NotDispatched)?;
+        }
         if self.poisoned
             || self
                 .record
@@ -152,13 +170,31 @@ impl RecoveryJournal {
         })
     }
 
-    pub(crate) fn dispatch_capable(&mut self, operation: PinOperation) -> Result<(), JournalError> {
+    pub(super) fn dispatch_capable(
+        &mut self,
+        operation: PinOperation,
+    ) -> Result<DurablePinDispatch, JournalError> {
         let mut record = self.record.clone().ok_or(JournalError::InvalidTransition)?;
         if record.phase != JournalPhase::Pending || record.operation != operation {
             return Err(JournalError::InvalidTransition);
         }
         record.phase = JournalPhase::DispatchCapable;
-        self.persist(record)
+        let incident = record.incident.clone();
+        self.persist(record)?;
+        Ok(DurablePinDispatch {
+            incident,
+            operation,
+        })
+    }
+
+    pub(super) fn matches_dispatch(&self, receipt: &DurablePinDispatch) -> bool {
+        !self.poisoned
+            && self.record.as_ref().is_some_and(|record| {
+                record.phase == JournalPhase::DispatchCapable
+                    && record.resolution.is_none()
+                    && record.incident == receipt.incident
+                    && record.operation == receipt.operation
+            })
     }
 
     pub(crate) fn resolve(&mut self, resolution: Resolution) -> Result<(), JournalError> {
@@ -190,45 +226,7 @@ impl RecoveryJournal {
     }
 }
 
-/// Contract for a future Recovery workflow, not an implementation of read-back or probing.
-#[derive(Debug, PartialEq, Eq)]
-pub struct PinRecoveryPolicy {
-    pub passive_client_pin_after_quiescence: bool,
-    pub configured_state_proves_exact_pin: bool,
-    pub automatic_old_new_probing: bool,
-    pub ordinary_retry_consuming_authentication: bool,
-    pub verification_requires_recovery_and_visible_retries: bool,
-}
-impl PinOperation {
-    pub const fn recovery_policy(self) -> PinRecoveryPolicy {
-        PinRecoveryPolicy {
-            passive_client_pin_after_quiescence: matches!(self, Self::SetPin),
-            configured_state_proves_exact_pin: false,
-            automatic_old_new_probing: false,
-            ordinary_retry_consuming_authentication: false,
-            verification_requires_recovery_and_visible_retries: true,
-        }
-    }
-}
-
-/// ADR-010 conservative classifier for the exact pinned high-level API. No native call here.
-/// Internal negatives lose phase evidence; even INTERNAL can occur after successful transmit.
-pub fn pin_call_outcome(
-    operation: PinOperation,
-    entered_high_level_call: bool,
-    code: i32,
-) -> MutationOutcome {
-    if !entered_high_level_call {
-        return MutationOutcome::NotDispatched;
-    }
-    match code {
-        0 => MutationOutcome::ConfirmedSuccessful,
-        // Definitive PIN rejection statuses under CTAP 2.0/2.1 clientPIN algorithms.
-        0x02 | 0x14 | 0x33 | 0x37 => MutationOutcome::Rejected,
-        0x31 | 0x32 | 0x34 if operation == PinOperation::ChangePin => MutationOutcome::Rejected,
-        _ => MutationOutcome::OutcomeUnknown,
-    }
-}
+pub use fido_auth::mutation::PinRecoveryPolicy;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -262,6 +260,21 @@ pub(crate) mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn pending_restart_can_begin_fresh_only_after_durable_abort() -> Result<(), JournalError> {
+        let disk = MemoryStorage::default();
+        let mut j = RecoveryJournal::load(Box::new(disk.clone()));
+        j.pending(PinOperation::SetPin, 1)?;
+        let mut restarted = RecoveryJournal::load(Box::new(disk.clone()));
+        restarted.pending(PinOperation::ChangePin, 2)?;
+        assert_eq!(restarted.operation(), Some(PinOperation::ChangePin));
+        assert_eq!(restarted.phase(), Some(JournalPhase::Pending));
+        disk.0.lock().unwrap_or_else(|_| panic!("disk")).failure = 2;
+        assert!(restarted.pending(PinOperation::SetPin, 3).is_err());
+        assert_eq!(restarted.admission(), RecoveryAdmission::Barrier);
+        Ok(())
     }
     #[test]
     fn pending_dispatch_resolved_restart_contract() -> Result<(), JournalError> {
@@ -365,13 +378,28 @@ pub(crate) mod tests {
             let mut j = RecoveryJournal::load(Box::new(disk.clone()));
             j.pending(PinOperation::SetPin, 1)?;
             disk.0.lock().unwrap_or_else(|_| panic!("disk")).failure = failure;
-            assert_eq!(
+            assert!(matches!(
                 j.dispatch_capable(PinOperation::SetPin),
                 Err(JournalError::Unavailable)
-            );
+            ));
             assert_eq!(j.phase(), Some(JournalPhase::Pending));
             assert_eq!(j.admission(), RecoveryAdmission::Barrier);
             assert!(j.resolve(Resolution::NotDispatched).is_err());
+        }
+        Ok(())
+    }
+    #[test]
+    fn durable_receipt_fails_closed_after_poisoned_resolution() -> Result<(), JournalError> {
+        for failure in [1, 2] {
+            let disk = MemoryStorage::default();
+            let mut j = RecoveryJournal::load(Box::new(disk.clone()));
+            j.pending(PinOperation::ChangePin, 1)?;
+            let receipt = j.dispatch_capable(PinOperation::ChangePin)?;
+            assert!(j.matches_dispatch(&receipt));
+            disk.0.lock().unwrap_or_else(|_| panic!("disk")).failure = failure;
+            assert!(j.resolve(Resolution::Rejected).is_err());
+            assert!(!j.matches_dispatch(&receipt));
+            assert_eq!(j.admission(), RecoveryAdmission::Barrier);
         }
         Ok(())
     }

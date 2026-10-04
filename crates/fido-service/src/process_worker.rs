@@ -571,6 +571,22 @@ impl ProcessWorkerEndpoint {
         result.map_err(|_| self.abandon(WorkerEndpointError::TransportFailure))
     }
 
+    #[cfg(unix)]
+    pub(crate) fn submit_mutation_secret(
+        &mut self,
+        binding: fido_auth::mutation::PinMutationBinding,
+        request: u64,
+        secrets: fido_auth::mutation::PinMutationSecrets,
+    ) -> Result<(), WorkerEndpointError> {
+        if self.revoked() {
+            return Err(self.abandon(WorkerEndpointError::Unavailable));
+        }
+        let secret = self.secret.take().ok_or(WorkerEndpointError::Unavailable)?;
+        let result = fido_auth::mutation::send_mutation_secret(&secret, binding, request, secrets);
+        drop(secret);
+        result.map_err(|_| self.abandon(WorkerEndpointError::TransportFailure))
+    }
+
     fn abandon(&mut self, error: WorkerEndpointError) -> WorkerEndpointError {
         // Terminate before reporting: by the time the caller sees the failure the worker is
         // already stopped (or the endpoint holds an honest `Active`).

@@ -6,11 +6,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum NativeAction {
+    Inspect,
+    Pin(fido_service::recovery::PinOperation),
+    Recovery,
+}
 #[derive(Clone, PartialEq, Eq)]
 pub struct NativeTarget {
     id: String,
-    handle: authentication::DeviceHandle,
-    label: String,
+    pub(super) handle: authentication::DeviceHandle,
+    pub(super) label: String,
+    pub(super) action: NativeAction,
 }
 impl NativeTarget {
     pub fn new(
@@ -22,8 +29,89 @@ impl NativeTarget {
             id: format!("inspect-credentials-{:032x}", handle.as_raw()),
             handle,
             label: presentation.label(),
+            action: NativeAction::Inspect,
         }
     }
+}
+
+impl NativeTarget {
+    pub fn for_device(
+        device: &authentication::NativeDeviceSnapshot,
+        presentation: &fido_service::presentation::AuthenticatorPresentation,
+    ) -> Vec<Self> {
+        let mut targets = vec![Self::new(device.handle, presentation)];
+        if let Some(op) = fido_service::mutation::native_pin_operation(device) {
+            targets.push(Self {
+                id: format!("pin-mutation-{op:?}-{:032x}", device.handle.as_raw()),
+                handle: device.handle,
+                label: presentation.label(),
+                action: NativeAction::Pin(op),
+            });
+        }
+        targets
+    }
+    fn title(&self) -> String {
+        match self.action {
+            NativeAction::Inspect => "Inspect credentials…".into(),
+            NativeAction::Pin(op) => format!("{}…", op.title()),
+            NativeAction::Recovery => "Review uncertain PIN operation…".into(),
+        }
+    }
+}
+
+/// Presentation only. Group by the exact backend handle, never by a possibly duplicate label.
+enum MenuGroup<'a> {
+    Device {
+        handle: authentication::DeviceHandle,
+        title: String,
+        targets: Vec<&'a NativeTarget>,
+    },
+    // Recovery has no connected physical-key identity; keep it at the top level.
+    Recovery(&'a NativeTarget),
+}
+
+fn group_targets(targets: &[NativeTarget]) -> Vec<MenuGroup<'_>> {
+    let mut groups = Vec::new();
+    for target in targets {
+        if target.action == NativeAction::Recovery {
+            groups.push(MenuGroup::Recovery(target));
+            continue;
+        }
+        if let Some(MenuGroup::Device { targets, .. }) = groups.iter_mut().find(
+            |group| matches!(group, MenuGroup::Device { handle, .. } if *handle == target.handle),
+        ) {
+            targets.push(target);
+        } else {
+            let mut title = String::new();
+            for c in target.label.chars() {
+                if c == '(' && title.chars().last().is_some_and(|c| !c.is_whitespace()) {
+                    title.push(' ');
+                }
+                title.push(c);
+            }
+            groups.push(MenuGroup::Device {
+                handle: target.handle,
+                title,
+                targets: vec![target],
+            });
+        }
+    }
+    groups
+}
+
+fn set_menu_enabled(
+    submenu: &tauri::menu::Submenu<tauri::Wry>,
+    enabled: bool,
+) -> tauri::Result<()> {
+    for item in submenu.items()? {
+        if let Some(child) = item.as_submenu() {
+            set_menu_enabled(child, enabled)?;
+            child.set_enabled(enabled)?;
+        } else if let Some(item) = item.as_menuitem() {
+            item.set_enabled(enabled)?;
+        }
+    }
+    Ok(())
 }
 
 fn select_target(targets: &[NativeTarget], id: &str) -> Option<NativeTarget> {
@@ -34,7 +122,7 @@ fn select_target(targets: &[NativeTarget], id: &str) -> Option<NativeTarget> {
 pub struct AuthenticationMenu {
     submenu: tauri::menu::Submenu<tauri::Wry>,
     targets: Arc<Mutex<Vec<NativeTarget>>>,
-    // Presentation only: the inspect items are greyed while an inspection runs. The backend gate
+    // Presentation only: all sensitive items are greyed while a workflow runs. The backend gate
     // stays the authority, and a selection that still arrives is suppressed or refused there.
     enabled: Arc<AtomicBool>,
 }
@@ -51,16 +139,28 @@ impl AuthenticationMenu {
         let owned = self.clone();
         let _ = self.submenu.app_handle().run_on_main_thread(move || {
             let has_targets = owned.targets.lock().is_ok_and(|t| !t.is_empty());
-            if let Ok(items) = owned.submenu.items() {
-                for item in items {
-                    if let Some(item) = item.as_menuitem() {
-                        let _ = item.set_enabled(enabled && has_targets);
-                    }
-                }
-            }
+            let _ = set_menu_enabled(&owned.submenu, enabled && has_targets);
         });
     }
-    pub fn update(&self, targets: Vec<NativeTarget>) {
+    pub fn update(
+        &self,
+        mut targets: Vec<NativeTarget>,
+        authority: &fido_service::authentication::AuthenticationAuthority,
+    ) {
+        let barrier = authority.sensitive_blocked();
+        let recoverable = authority.recoverable_pin_operation().is_some();
+        if barrier {
+            targets = if recoverable {
+                vec![NativeTarget {
+                    id: "recover-pin".into(),
+                    handle: authentication::DeviceHandle::from_raw(0),
+                    label: String::new(),
+                    action: NativeAction::Recovery,
+                }]
+            } else {
+                Vec::new()
+            };
+        }
         let owned = self.clone();
         let app = self.submenu.app_handle().clone();
         let callback_app = app.clone();
@@ -73,21 +173,45 @@ impl AuthenticationMenu {
                 if targets.is_empty() {
                     let item = tauri::menu::MenuItem::new(
                         &callback_app,
-                        "No security key available",
+                        if barrier {
+                            "Security key operations blocked: recovery storage needs review"
+                        } else {
+                            "No security key available"
+                        },
                         false,
                         None::<&str>,
                     )?;
                     owned.submenu.append(&item)?;
                 } else {
-                    for target in &targets {
-                        let item = tauri::menu::MenuItem::with_id(
-                            &callback_app,
-                            &target.id,
-                            format!("Inspect credentials on {}…", target.label),
-                            owned.enabled.load(Ordering::SeqCst),
-                            None::<&str>,
-                        )?;
-                        owned.submenu.append(&item)?;
+                    let enabled = owned.enabled.load(Ordering::SeqCst);
+                    for group in group_targets(&targets) {
+                        match group {
+                            MenuGroup::Device { title, targets, .. } => {
+                                let device_menu =
+                                    tauri::menu::Submenu::new(&callback_app, title, enabled)?;
+                                for target in targets {
+                                    let item = tauri::menu::MenuItem::with_id(
+                                        &callback_app,
+                                        &target.id,
+                                        target.title(),
+                                        enabled,
+                                        None::<&str>,
+                                    )?;
+                                    device_menu.append(&item)?;
+                                }
+                                owned.submenu.append(&device_menu)?;
+                            }
+                            MenuGroup::Recovery(target) => {
+                                let item = tauri::menu::MenuItem::with_id(
+                                    &callback_app,
+                                    &target.id,
+                                    target.title(),
+                                    enabled,
+                                    None::<&str>,
+                                )?;
+                                owned.submenu.append(&item)?;
+                            }
+                        }
                     }
                 }
                 Ok(())
@@ -103,10 +227,10 @@ impl AuthenticationMenu {
     }
 }
 
-/// Greys the native inspect items for exactly the lifetime of one start attempt.
-struct MenuBusy(Option<AuthenticationMenu>);
+/// Greys all native sensitive items for exactly the lifetime of one start attempt.
+pub(super) struct MenuBusy(Option<AuthenticationMenu>);
 impl MenuBusy {
-    fn new(menu: Option<AuthenticationMenu>) -> Self {
+    pub(super) fn new(menu: Option<AuthenticationMenu>) -> Self {
         if let Some(menu) = &menu {
             menu.set_enabled(false);
         }
@@ -131,6 +255,10 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
     let Some(target) = menu.as_ref().and_then(|menu| menu.select(id)) else {
         return;
     };
+    if target.action != NativeAction::Inspect {
+        crate::pin_mutation::start(app, target, menu);
+        return;
+    }
     // Presentation-level reentrancy guard. A duplicate or reentrant menu event while one start is
     // running is dropped silently; it would only be refused by the gate below anyway. This guard
     // authorizes nothing: every start that is not dropped here still needs gate admission.
@@ -343,8 +471,8 @@ mod tests {
         let targets = [first.clone(), second.clone()];
         assert_eq!(first.label, "Security Key(F829) · Thetis · USB");
         assert_eq!(first.label, second.label);
-        assert!(!format!("Inspect credentials on {}…", first.label).contains("00000009"));
-        assert!(!format!("Inspect credentials on {}…", second.label).contains("0000000a"));
+        assert_eq!(first.title(), "Inspect credentials…");
+        assert_eq!(second.title(), first.title());
         assert_eq!(
             select_target(&targets, &first.id).map(|t| t.handle),
             Some(first.handle)
@@ -360,5 +488,134 @@ mod tests {
         )];
         assert!(select_target(&replacement, &first.id).is_none());
         assert!(select_target(&replacement, &second.id).is_none());
+    }
+
+    #[test]
+    fn device_groups_keep_colliding_labels_and_interleaved_actions_bound_to_exact_handles() {
+        let presentation = AuthenticatorPresentation {
+            name: "Security Key(F829)".into(),
+            detail: "Thetis · USB".into(),
+            transports: vec!["USB".into()],
+        };
+        let first = NativeTarget::new(authentication::DeviceHandle::from_raw(9), &presentation);
+        let second = NativeTarget::new(authentication::DeviceHandle::from_raw(10), &presentation);
+        let pin = NativeTarget {
+            id: "pin-mutation-ChangePin-00000000000000000000000000000009".into(),
+            action: NativeAction::Pin(fido_service::recovery::PinOperation::ChangePin),
+            ..first.clone()
+        };
+        let targets = [first.clone(), second.clone(), pin.clone()];
+        let groups = group_targets(&targets);
+        assert_eq!(groups.len(), 2);
+        for (group, expected_handle, ids) in [
+            (&groups[0], first.handle, vec![&first.id, &pin.id]),
+            (&groups[1], second.handle, vec![&second.id]),
+        ] {
+            let MenuGroup::Device {
+                handle,
+                title,
+                targets: actions,
+            } = group
+            else {
+                panic!("expected authenticator submenu");
+            };
+            assert_eq!(*handle, expected_handle);
+            assert_eq!(title, "Security Key (F829) · Thetis · USB");
+            assert_eq!(actions.iter().map(|t| &t.id).collect::<Vec<_>>(), ids);
+            for action in actions {
+                assert_eq!(action.handle, expected_handle);
+                assert!(!action.title().contains("Thetis"));
+                assert!(!action.title().contains("USB"));
+                assert_eq!(
+                    select_target(&targets, &action.id).map(|t| t.handle),
+                    Some(expected_handle)
+                );
+            }
+        }
+        assert_eq!(pin.title(), "Change PIN…");
+        assert!(select_target(&targets, "Security Key (F829) · Thetis · USB").is_none());
+        assert!(select_target(&targets, "Inspect credentials…").is_none());
+        assert!(group_targets(&[]).is_empty());
+    }
+
+    #[test]
+    fn device_submenu_actions_remain_capability_driven() -> Result<(), serde_json::Error> {
+        let presentation = AuthenticatorPresentation {
+            name: "Security Key (F829)".into(),
+            detail: "Thetis · USB".into(),
+            transports: vec!["USB".into()],
+        };
+        for (options, versions, expected) in [
+            (
+                serde_json::json!([{"name":"clientPin","enabled":false}]),
+                vec!["FIDO_2_0"],
+                Some("Set PIN…"),
+            ),
+            (
+                serde_json::json!([{"name":"clientPin","enabled":true}]),
+                vec!["FIDO_2_1"],
+                Some("Change PIN…"),
+            ),
+            (serde_json::json!([]), vec!["FIDO_2_0"], None),
+            (
+                serde_json::json!([{"name":"clientPin","enabled":true},{"name":"clientPin","enabled":false}]),
+                vec!["FIDO_2_0"],
+                None,
+            ),
+            (
+                serde_json::json!([{"name":"clientPin","enabled":true}]),
+                vec!["U2F_V2"],
+                None,
+            ),
+        ] {
+            let device: authentication::NativeDeviceSnapshot = serde_json::from_value(
+                serde_json::json!({
+                    "handle":"00000000000000000000000000000009", "generation":1,
+                    "vendorId":7848,"productId":63529,"manufacturer":"Thetis",
+                    "product":"Security Key(F829)","aaguid":null,"versions":versions,
+                    "extensions":[],"transports":["usb"],"options":options,
+                    "maxMessageSize":null,"firmwareVersion":null,"readStatus":"ready","freshness":"fresh"
+                }),
+            )?;
+            let targets = NativeTarget::for_device(&device, &presentation);
+            let groups = group_targets(&targets);
+            let [
+                MenuGroup::Device {
+                    title,
+                    targets: actions,
+                    ..
+                },
+            ] = groups.as_slice()
+            else {
+                panic!("expected one authenticator submenu");
+            };
+            assert_eq!(title, "Security Key (F829) · Thetis · USB");
+            assert_eq!(actions[0].title(), "Inspect credentials…");
+            assert_eq!(actions.len(), if expected.is_some() { 2 } else { 1 });
+            assert_eq!(
+                actions.get(1).map(|t| t.title()),
+                expected.map(str::to_owned)
+            );
+            assert!(actions.iter().all(|t| t.handle == device.handle));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_stays_at_the_top_level_without_a_device_identity() {
+        let target = NativeTarget {
+            id: "recover-pin".into(),
+            handle: authentication::DeviceHandle::from_raw(0),
+            label: String::new(),
+            action: NativeAction::Recovery,
+        };
+        let targets = [target];
+        let groups = group_targets(&targets);
+        let [MenuGroup::Recovery(action)] = groups.as_slice() else {
+            panic!("expected top-level recovery");
+        };
+        assert_eq!(action.id, "recover-pin");
+        assert_eq!(action.title(), "Review uncertain PIN operation…");
+        assert!(select_target(&targets, &action.title()).is_none());
     }
 }
