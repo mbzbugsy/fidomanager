@@ -30,8 +30,10 @@ indicator, not the warning color) and does not mean FidoManager or any security 
 A refresh is performed by exactly one caller (single flight). Concurrent callers return at once
 with the last settled result, or Checking if there has been none; a cancelled leader releases the
 in-flight marker. While a refresh is running after expiry, the previous result is still reported
-(at most TTL + timeout old), which avoids flicker. No new request is issued while a result is fresh,
-so renderer polling never causes network traffic by itself; Offline can take up to the TTL to recover.
+(at most TTL + timeout old), which avoids flicker. Renderer polling performs no network request
+itself: the backend serves the cached state, and a call after the 30 s TTL expires may cause the backend to
+start the one fixed readiness request. No request is issued while a result is fresh, and Offline can take
+up to the TTL to recover.
 
 ## Trust boundary
 

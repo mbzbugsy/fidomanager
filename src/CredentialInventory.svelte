@@ -20,8 +20,12 @@
   function inventorySummary(assessment: Assessment) {
     const { total } = assessment;
     if (total.kind === 'exact') return countLabel(total.value ?? 0);
-    if (total.kind === 'at_least')
-      return `At least ${countLabel(total.value ?? 0)}`;
+    if (total.kind === 'at_least') {
+      // A zero lower bound says nothing useful; the domain value (AtLeast(0)) is unchanged.
+      return total.value
+        ? `At least ${countLabel(total.value)}`
+        : 'Credential count incomplete';
+    }
     return 'Credential count unavailable';
   }
   function inventoryWarning(assessment: Assessment) {

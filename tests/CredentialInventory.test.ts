@@ -250,13 +250,18 @@ describe('connected-key credential display', () => {
     expect(result).not.toContain('No resident credentials');
     expect(result).not.toContain('Inventory complete');
   });
-  it('incomplete AtLeast(0) never claims zero', () => {
+  it('incomplete AtLeast(0) reads as an incomplete count, never zero', () => {
     const result = html(
       build('incomplete', { kind: 'at_least', value: 0 }, [
         rp(null, [], 'text_unavailable' as never),
       ]),
     );
-    expect(result).toContain('At least 0 credentials');
+    expect(result).toContain('Credential count incomplete');
+    expect(result).not.toContain('At least 0');
+    expect(result).not.toMatch(/\b0 credentials/);
+    expect(result).toContain(
+      'Some credentials could not be read. The actual total may be higher.',
+    );
     expect(result).not.toContain('No resident credentials');
   });
   it('inconsistent Unknown shows no count', () => {

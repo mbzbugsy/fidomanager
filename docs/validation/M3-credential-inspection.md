@@ -196,6 +196,7 @@ tokens and type hierarchy as AAGUID/Capabilities), not a standalone outlined box
 | Complete + Exact(n) | `n credentials` | “Inventory complete” (secondary) |
 | Complete + Exact(0) | `0 credentials` | “No resident credentials were reported.” (the only state that may show zero) |
 | Incomplete + AtLeast(n) | `At least n credentials` | “Some credentials could not be read. The actual total may be higher.” |
+| Incomplete + AtLeast(0) | `Credential count incomplete` (never “At least 0”, never zero) | Same warning; the backend AtLeast(0) value is unchanged |
 | Inconsistent + Unknown | `Credential count unavailable` | “The authenticator returned conflicting inventory information.” |
 | Not inspected | `Not inspected` | Inspection is started from the native Security key menu; never implies zero |
 
