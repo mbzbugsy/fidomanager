@@ -222,9 +222,29 @@ Operator preparation at `5df83d5fbaaac29ed3e5b242a7c1c97b9fbd9940`:
 - The operator also reported the generic Dock icon. The icon assets/configuration
   are unchanged; the test executable used `tauri/custom-protocol` without an app
   bundle. Tauri 2.12.0 installs its embedded Dock icon only in development mode.
-  The next operator launch will use the normal development build and local Vite
-  server; no icon asset or packaging change is needed. Visual confirmation of
-  the corrected layout/focus and restored icon remains pending.
+  No icon asset or packaging change is needed.
+
+Normal Tauri development validation at
+`568c79627a71f966829ebcce4d6794b80cee1225`, following green
+[CI run 37221765175](https://github.com/mbzbugsy/fidomanager/actions/runs/37221765175):
+
+- `pnpm tauri dev --no-watch` started the local Vite server and the ordinary
+  `native-pin` application, without `custom-protocol` or `native-ui-spike`.
+  The operator confirmed the correct Dock icon and the corrected top-to-bottom
+  Change PIN field order. Initial input focus was not separately confirmed.
+- The operator kept the fields empty and reported the sheet closed. Native
+  runtime logs independently confirmed main-thread secure controls, window
+  modality, Cancel default, detached teardown, `NotDispatched`, worker quiescence,
+  prompt teardown and `recovery_required=false`. Both recorded empty-sheet
+  workflows had these categories. No saved mutation incident record was present.
+- No PIN mutation was submitted or entered; no Pending/DispatchCapable transition
+  or authenticator mutation outcome is claimed. The operator explicitly placed
+  mutation on hold. The earlier authorization is not being exercised.
+
+The Tauri CLI rewrote the `tauri-build` dependency into equivalent explicit empty
+features syntax during launch; that generated manifest edit was reverted. The
+application source, icon assets, packaging settings and dependency versions did
+not change during this visual validation.
 
 No real mutation success/rejection/uncertainty is claimed. Native runtime
 compilation, exact-symbol attribution and synthetic fixtures are software evidence
