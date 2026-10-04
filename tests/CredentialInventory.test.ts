@@ -47,6 +47,10 @@ const appSource = readFileSync(
   .replace(
     'let snapshot: AuthenticatorList | null = null;',
     'export let snapshot: AuthenticatorList | null = null;',
+  )
+  .replace(
+    "let boogoocypher: BooGooCypherStatus = 'checking';",
+    "export let boogoocypher: BooGooCypherStatus = 'checking';",
   );
 const appCode = compile(appSource, {
   generate: 'server',
@@ -61,9 +65,13 @@ const App = (
     `data:text/javascript;base64,${Buffer.from(appCode).toString('base64')}`
   )
 ).default;
-const appHtml = (inspections: InspectionDisplay[]) =>
+const appHtml = (
+  inspections: InspectionDisplay[],
+  boogoocypher?: 'checking' | 'online' | 'offline',
+) =>
   render(App, {
     props: {
+      ...(boogoocypher ? { boogoocypher } : {}),
       snapshot: {
         enumerationEpoch: '1',
         devices: inspections.map((inspection, i) => ({
@@ -304,5 +312,30 @@ describe('connected-key credential display', () => {
     expect(result).toContain('<h4 class="credential-label">Credentials</h4>');
     expect(result).toContain('<h5>example.com</h5>');
     expect(result).toContain('<ul class="credential-list">');
+  });
+});
+
+describe('BooGooCypher readiness chip', () => {
+  const chip = (status?: 'checking' | 'online' | 'offline') =>
+    appHtml([], status)
+      .replace(/<!--.*?-->/g, '')
+      .replace(/\s+/g, ' ');
+  it('starts as checking before the backend answers', () => {
+    expect(chip()).toMatch(/BooGooCypher <strong>checking…<\/strong>/);
+  });
+  it('shows online and offline from the typed backend status only', () => {
+    expect(chip('online')).toMatch(/BooGooCypher <strong>online<\/strong>/);
+    const offline = chip('offline');
+    expect(offline).toMatch(/BooGooCypher <strong>offline<\/strong>/);
+    // Informational: the offline chip uses the neutral dot, never the warning style.
+    expect(offline).toMatch(/<i[^>]*class="neutral"[^>]*><\/i> BooGooCypher/);
+    expect(offline).not.toMatch(/class="warning"[^>]*><\/i> BooGooCypher/);
+  });
+  it('sits with the native service and libfido2 system status', () => {
+    const result = chip('online');
+    expect(result).toMatch(/Native service.*BooGooCypher.*libfido2/);
+  });
+  it('states that it is readiness only', () => {
+    expect(chip('online')).toContain('Readiness status only');
   });
 });

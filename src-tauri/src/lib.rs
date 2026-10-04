@@ -19,6 +19,9 @@ type DiscoveryAuthority = fido_service::DiscoverySupervisor<fido_service::Proces
 pub(crate) struct AppState {
     discovery: Arc<Mutex<DiscoveryAuthority>>,
     inspection: Arc<Mutex<fido_service::inspection::InspectionStore>>,
+    // Status only. Isolated from every FIDO type; nothing here is consulted by any local
+    // operation, and no value from it is ever an input to authentication.
+    boogoocypher: Arc<boogoocypher_status::ReadinessService<boogoocypher_status::ReqwestTransport>>,
     // Presentation history only; never consulted for authorization or workflow admission.
     authentication_notice: Arc<Mutex<(u64, Option<&'static str>)>>,
     // Historical display facts only; not grants and never checked by authentication admission.
@@ -83,6 +86,9 @@ pub fn run() {
             inspection: Arc::new(Mutex::new(
                 fido_service::inspection::InspectionStore::default(),
             )),
+            boogoocypher: Arc::new(boogoocypher_status::ReadinessService::new(
+                boogoocypher_status::ReqwestTransport::new(),
+            )),
             authentication_notice: Arc::new(Mutex::new((0, None))),
             verification_history: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
             #[cfg(all(
@@ -101,6 +107,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::foundation_status,
             commands::list_authenticators,
+            commands::boogoocypher_status,
         ]);
     #[cfg(all(
         feature = "native-pin",

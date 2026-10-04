@@ -204,3 +204,13 @@ pub async fn list_authenticators(
     .await
     .map_err(|error| format!("native discovery task failed: {error}"))?
 }
+
+/// BooGooCypher readiness status only. Takes no renderer input, reads no FIDO state and returns
+/// a bare typed status. The backend serves a cached result and bounds any network request.
+#[tauri::command]
+pub async fn boogoocypher_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<boogoocypher_status::ReadinessStatus, String> {
+    let readiness = Arc::clone(&state.boogoocypher);
+    Ok(readiness.status().await)
+}

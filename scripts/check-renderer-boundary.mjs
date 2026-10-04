@@ -2,10 +2,15 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 const EXPECTED_CAPABILITY = 'main';
-const EXPECTED_COMMANDS = ['foundation_status', 'list_authenticators'];
+const EXPECTED_COMMANDS = [
+  'foundation_status',
+  'list_authenticators',
+  'boogoocypher_status',
+];
 const EXPECTED_PERMISSIONS = [
   'allow-foundation-status',
   'allow-list-authenticators',
+  'allow-boogoocypher-status',
 ];
 
 function listFiles(root, predicate) {
@@ -126,6 +131,19 @@ if (
 ) {
   throw new Error(
     'list_authenticators may accept only authority-owned Tauri State.',
+  );
+}
+
+const readiness = discoveredCommands.find(
+  ({ name }) => name === 'boogoocypher_status',
+);
+if (
+  !readiness ||
+  readiness.parameters.replace(/\s+/g, '').replace(/,$/, '') !==
+    "state:tauri::State<'_,AppState>"
+) {
+  throw new Error(
+    'boogoocypher_status may accept only authority-owned Tauri State.',
   );
 }
 
@@ -256,6 +274,138 @@ assertExactArray(
   [...EXPECTED_COMMANDS].sort(),
   'Renderer invoke surface does not match the approved Milestone 1 command allowlist.',
 );
+
+// BooGooCypher readiness is status only and is structurally separated from every FIDO path.
+const READINESS_URL = 'https://boogoocypher.foladigroup.com/health/ready';
+const statusCrate = 'crates/boogoocypher-status';
+const statusManifest = readFileSync(`${statusCrate}/Cargo.toml`, 'utf8')
+  .split('\n')
+  .filter((line) => !line.trim().startsWith('#'))
+  .join('\n');
+if (/path\s*=/.test(statusManifest) || /fido/i.test(statusManifest)) {
+  throw new Error(
+    'BooGooCypher status crate must not depend on any project or FIDO crate.',
+  );
+}
+const statusSources = listFiles(`${statusCrate}/src`, (path) =>
+  path.endsWith('.rs'),
+);
+const forbiddenIdentifiers =
+  /\b(?:pin|puat|credentials?|rp_?hash|user_?id|acquisition\w*|workflow\w*|prompt\w*|device_?handle|fido\w*|authenticat\w*)\b/i;
+let urlLiterals = 0;
+for (const file of statusSources) {
+  const source = readFileSync(file, 'utf8');
+  const hit = source.match(forbiddenIdentifiers);
+  if (hit) {
+    throw new Error(
+      `BooGooCypher status code must not reference FIDO/secret state (${hit[0]}): ${file}`,
+    );
+  }
+  if (file.endsWith('tests.rs')) continue;
+  for (const match of source.matchAll(/https?:\/\/[^\s"')]+/g)) {
+    urlLiterals += 1;
+    if (match[0] !== READINESS_URL && !file.endsWith('lib.rs')) {
+      throw new Error(`Unexpected URL in BooGooCypher status code: ${file}`);
+    }
+  }
+}
+const statusLib = readFileSync(`${statusCrate}/src/lib.rs`, 'utf8');
+if (
+  !statusLib.includes(`pub const READINESS_URL: &str = "${READINESS_URL}";`)
+) {
+  throw new Error(
+    'BooGooCypher readiness endpoint must be the fixed constant.',
+  );
+}
+if (urlLiterals !== 1) {
+  throw new Error('BooGooCypher status code must contain exactly one URL.');
+}
+const statusEnum =
+  statusLib.match(/pub enum ReadinessStatus \{([^}]+)\}/s)?.[1] ?? '';
+assertExactArray(
+  [...statusEnum.matchAll(/^\s*([A-Za-z]+),/gm)].map((m) => m[1]),
+  ['Checking', 'Online', 'Offline'],
+  'BooGooCypher renderer status must be exactly Checking/Online/Offline.',
+);
+// Test-only helpers (#[cfg(test)]) are not part of the production surface.
+const requestImpl = (
+  statusLib.match(/impl HealthRequest \{([\s\S]*?)\n\}/)?.[1] ?? ''
+).replace(/#\[cfg\(test\)\][\s\S]*?\n    \}(?:\n|$)/g, '');
+const requestConstructors = [
+  ...requestImpl.matchAll(
+    /pub(?:\(crate\))?\s+(?:const\s+)?fn\s+(\w+)\(([^)]*)\)/g,
+  ),
+].filter(([, , args]) => !/self/.test(args));
+assertExactArray(
+  requestConstructors.map(([, name, args]) => `${name}(${args.trim()})`),
+  ['fixed()'],
+  'HealthRequest must have no input-accepting public constructor.',
+);
+if (
+  !commandSource.includes(
+    ') -> Result<boogoocypher_status::ReadinessStatus, String>',
+  )
+) {
+  throw new Error('boogoocypher_status may return only the typed status.');
+}
+const readinessFn =
+  commandSource.match(
+    /(?:\/\/\/[^\n]*\n)*#\[tauri::command\]\npub async fn boogoocypher_status[\s\S]*?\n}\n/,
+  )?.[0] ?? '';
+if (!readinessFn) {
+  throw new Error('boogoocypher_status command definition not found.');
+}
+const otherCommandSource = commandSource.replace(readinessFn, '');
+if (/boogoocypher/i.test(otherCommandSource)) {
+  throw new Error(
+    'BooGooCypher must not be referenced by discovery, inspection or authentication commands.',
+  );
+}
+if (/state\.(?!boogoocypher\b)\w+/.test(readinessFn)) {
+  throw new Error('boogoocypher_status may read only the readiness service.');
+}
+for (const file of rustFiles) {
+  if (file.endsWith('lib.rs') || file.endsWith('commands/mod.rs')) continue;
+  if (/boogoocypher/i.test(readFileSync(file, 'utf8'))) {
+    throw new Error(`BooGooCypher must not appear in ${file}.`);
+  }
+}
+for (const file of listFiles('crates', (path) => path.endsWith('Cargo.toml'))) {
+  if (file.startsWith(statusCrate)) continue;
+  if (/boogoocypher/i.test(readFileSync(file, 'utf8'))) {
+    throw new Error(
+      `No other crate may depend on BooGooCypher status: ${file}`,
+    );
+  }
+}
+for (const file of listFiles('crates', (path) => path.endsWith('.rs'))) {
+  if (file.startsWith(statusCrate)) continue;
+  if (/boogoocypher/i.test(readFileSync(file, 'utf8'))) {
+    throw new Error(`FIDO crates must not reference BooGooCypher: ${file}`);
+  }
+}
+const csp = tauriConfig?.app?.security?.csp ?? '';
+if (
+  !/connect-src ipc: http:\/\/ipc\.localhost;/.test(csp) ||
+  /boogoocypher/i.test(csp)
+) {
+  throw new Error(
+    'Renderer CSP must not allow network or BooGooCypher access.',
+  );
+}
+for (const file of rendererFiles) {
+  const source = readFileSync(file, 'utf8');
+  if (/boogoocypher\.foladigroup/i.test(source)) {
+    throw new Error(
+      `Renderer must not know the BooGooCypher endpoint: ${file}`,
+    );
+  }
+  if (
+    /\b(?:fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon)\b/.test(source)
+  ) {
+    throw new Error(`Renderer network APIs are not approved: ${file}`);
+  }
+}
 
 const generatedCapabilitiesPath = 'src-tauri/gen/schemas/capabilities.json';
 const generatedAclPath = 'src-tauri/gen/schemas/acl-manifests.json';

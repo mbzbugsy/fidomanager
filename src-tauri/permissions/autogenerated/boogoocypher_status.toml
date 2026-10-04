@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-boogoocypher-status"
+description = "Enables the boogoocypher_status command without any pre-configured scope."
+commands.allow = ["boogoocypher_status"]
+
+[[permission]]
+identifier = "deny-boogoocypher-status"
+description = "Denies the boogoocypher_status command without any pre-configured scope."
+commands.deny = ["boogoocypher_status"]

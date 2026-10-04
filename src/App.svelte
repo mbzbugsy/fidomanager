@@ -13,6 +13,9 @@
     authenticationNoticeRevision: string;
   };
 
+  // Readiness of the BooGooCypher service only; says nothing about local security keys.
+  type BooGooCypherStatus = 'checking' | 'online' | 'offline';
+
   type AuthenticatorOption = {
     name: string;
     enabled: boolean;
@@ -46,6 +49,8 @@
   };
 
   let foundation: FoundationStatus | null = null;
+  let boogoocypher: BooGooCypherStatus = 'checking';
+  let boogoocypherTimer: ReturnType<typeof setTimeout> | null = null;
   let snapshot: AuthenticatorList | null = null;
   let discoveryError: string | null = null;
   let refreshing = false;
@@ -59,6 +64,8 @@
   let noticeTimer: ReturnType<typeof setTimeout> | null = null;
 
   const pollDelayMs = 1000;
+  // The backend caches the result (30 s) and owns every network request; this only re-reads it.
+  const boogoocypherPollMs = 5000;
 
   function updateNotice(revision: string | null, message: string | null) {
     if (revision === activeNoticeRevision) return;
@@ -105,6 +112,23 @@
     }
   }
 
+  async function loadBooGooCypher() {
+    try {
+      const status = await invoke<BooGooCypherStatus>('boogoocypher_status');
+      boogoocypher =
+        status === 'online' || status === 'offline' ? status : 'checking';
+    } catch {
+      boogoocypher = 'checking';
+    } finally {
+      if (!stopped) {
+        boogoocypherTimer = setTimeout(
+          () => void loadBooGooCypher(),
+          boogoocypherPollMs,
+        );
+      }
+    }
+  }
+
   async function refreshDevices(scheduleNext = true, manual = false) {
     if (refreshing || stopped) return;
     refreshing = true;
@@ -145,10 +169,12 @@
     stopped = false;
     void loadFoundation();
     void refreshDevices();
+    void loadBooGooCypher();
     return () => {
       stopped = true;
       if (timer) clearTimeout(timer);
       if (foundationTimer) clearTimeout(foundationTimer);
+      if (boogoocypherTimer) clearTimeout(boogoocypherTimer);
       if (noticeTimer) clearTimeout(noticeTimer);
     };
   });
@@ -199,6 +225,20 @@
           <i aria-hidden="true" class:warning={Boolean(discoveryError)}></i>
           Native service
           <strong>{discoveryError ? 'attention' : 'online'}</strong>
+        </span>
+        <span
+          class="status-item"
+          title="Readiness status only. BooGooCypher does not protect or process PINs, credentials or security-key operations, and its status never affects them."
+        >
+          <i
+            aria-hidden="true"
+            class:neutral={boogoocypher !== 'online'}
+            class:checking={boogoocypher === 'checking'}
+          ></i>
+          BooGooCypher
+          <strong
+            >{boogoocypher === 'checking' ? 'checking…' : boogoocypher}</strong
+          >
         </span>
         <span class="status-item">
           libfido2 <strong>{foundation?.reviewedLibfido2Baseline ?? '—'}</strong

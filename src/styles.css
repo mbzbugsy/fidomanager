@@ -140,6 +140,27 @@ code {
   box-shadow: 0 0 0 3px rgba(255, 184, 92, 0.1);
 }
 
+.status-item i.neutral {
+  background: var(--faint);
+  box-shadow: 0 0 0 3px rgba(137, 147, 142, 0.08);
+}
+
+.status-item i.checking {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-item i.checking {
+    animation: none;
+  }
+}
+
 .tool-button {
   display: inline-flex;
   align-items: center;
