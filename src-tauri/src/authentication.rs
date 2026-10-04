@@ -128,8 +128,11 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
         // Refresh before using the native-menu selection. Stale handles are rejected, never
         // rebound to another key. Other connected keys cannot change the selected target.
         let snapshot = match supervisor.refresh() {
-            Ok(snapshot) if snapshot.devices.iter().any(|d| d.handle == target.handle) => snapshot,
+            Ok(snapshot) => snapshot,
             _ => {
+                if let Ok(mut store) = app.state::<AppState>().inspection.lock() {
+                    store.clear();
+                }
                 authority.cancel_unpresented(&mut supervisor, reservation);
                 eprintln!("[authentication] selected key is unavailable");
                 notice(
@@ -139,13 +142,54 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
                 return;
             }
         };
+        let Some(worker_generation) = supervisor.status().worker_generation else {
+            authority.cancel_unpresented(&mut supervisor, reservation);
+            return;
+        };
+        let inventory_devices = {
+            let state = app.state::<AppState>();
+            let prepared = state.inspection.lock().ok().and_then(|mut store| {
+                store
+                    .reconcile_connected(&snapshot.devices, worker_generation)
+                    .ok()
+            });
+            let Some(devices) = prepared else {
+                authority.cancel_unpresented(&mut supervisor, reservation);
+                notice(
+                    &app,
+                    "Inspection unavailable. Connected inventory could not be validated.",
+                );
+                return;
+            };
+            devices
+        };
         let Some(index) = snapshot
             .devices
             .iter()
             .position(|d| d.handle == target.handle)
         else {
+            let quiescent = authority.cancel_unpresented(&mut supervisor, reservation);
+            if let Ok(mut store) = app.state::<AppState>().inspection.lock() {
+                if quiescent == fido_service::inspection::ExecutionQuiescence::Quiescent {
+                    store.proven_retirement(worker_generation);
+                } else {
+                    store.clear();
+                }
+            }
+            notice(
+                &app,
+                "The selected security key is no longer connected. Select a current key from the native menu.",
+            );
             return;
         };
+        let inventory_device = inventory_devices[index];
+        if let Ok(mut store) = app.state::<AppState>().inspection.lock() {
+            // Retire ONLY this key's prior view, before PIN/acquisition.
+            store.invalidate(inventory_device);
+        } else {
+            authority.cancel_unpresented(&mut supervisor, reservation);
+            return;
+        }
         let device = &snapshot.devices[index];
         let handle = device.handle;
         let history_id = device.verification_history_id;
@@ -189,10 +233,17 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
             },
         );
         if let Ok(mut store) = app.state::<AppState>().inspection.lock() {
-            store.clear();
+            if result.worker_quiescent {
+                store.proven_retirement(worker_generation);
+            } else {
+                store.clear();
+            }
             if let Some(inventory) = result.inventory.take() {
                 let assessment = inventory.assess();
-                if store.replace(handle, snapshot_label, inventory).is_ok() {
+                if store
+                    .replace(inventory_device, snapshot_label, inventory)
+                    .is_ok()
+                {
                     eprintln!(
                         "[inspection] snapshot={:?} total_kind={} mutation_issued=false",
                         assessment.completeness,

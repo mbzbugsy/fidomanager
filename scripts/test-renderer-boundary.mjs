@@ -68,6 +68,15 @@ try {
   );
   assert.match(check().stderr, /unreviewed renderer field/);
   writeFileSync(commandPath, commandText);
+  writeFileSync(
+    commandPath,
+    commandText.replace(
+      'struct AuthenticatorSummary {',
+      'struct AuthenticatorSummary {\n    puat: String,',
+    ),
+  );
+  assert.match(check().stderr, /unreviewed renderer field/);
+  writeFileSync(commandPath, commandText);
   const appPath = join(fixture, 'src/App.svelte');
   const appText = readFileSync(appPath, 'utf8');
   writeFileSync(

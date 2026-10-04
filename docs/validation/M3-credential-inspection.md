@@ -103,36 +103,83 @@ only the typed assessment.
 ## Snapshot and identity boundary
 
 The worker returns bounded owned inventory to the trusted service only. The service
-independently validates bounds, text and RP digest consistency, assesses completeness,
-and replaces its InspectionStore. Fresh snapshots get independently random 128-bit
-EnumerationEpoch and random CredentialHandles, with collisions rejected. Neither is
-an encoding/digest of raw identity. Exact ID and RP hash remain in a private mapping.
-Lookup requires matching epoch, handle and originating DeviceHandle; stale epochs,
-handles and device selections fail closed. Replacing/clearing the snapshot retires old
-mappings. The mapping grants no authorization: future mutation needs fresh trusted
-approval, exact live device generation and the ID enumerated in that same epoch.
-Mutation remains deferred.
+independently validates bounds, text and RP digest consistency. InspectionStore now
+holds separate snapshots and private raw identity mappings for every currently
+connected inspected key. Labels never identify entries. Starting a fresh inspection
+invalidates only the selected key's snapshot before PIN acquisition; success replaces
+only that entry, while failure/cancellation leaves other keys intact.
+
+Each entry binds its display DeviceHandle, exact connected DeviceGeneration and a
+fresh random 128-bit EnumerationEpoch. CredentialHandles are independently random
+128-bit values, with collisions rejected within an inventory. Neither encodes raw
+identity. Backend lookup requires all four matching dimensions: current display
+DeviceHandle, exact DeviceGeneration, EnumerationEpoch and CredentialHandle. Exact
+credential ID and RP hash remain private; stale or cross-key lookup fails closed.
+Mutation remains deferred and this mapping grants no operation authority.
+
+### Worker retirement and connection continuity
+
+M2 deliberately invalidates **all native operation DeviceHandles** on every worker
+retirement, including a successful inspection. Those handles still route the native
+menu and AuthenticationAuthority, and none is reused or rebound. To retain another
+key's inventory without changing that invariant, the backend has a separate typed
+DisplayDeviceHandle registry. The renderer receives only this nonauthorizing display
+handle and its connected generation. DisplayDeviceHandle is never accepted by the
+native operation resolver or an AcquisitionBinding.
+
+The registry reconciles against every trusted discovery manifest. Within a worker,
+changed native handle/generation or vendor/product advances the display generation
+and purges that key's inventory and raw mapping. An incomplete/unreadable discovery view purges the affected inventory. Disconnect removes both; replug
+creates a new connection/handle and starts Not inspected. No label-based correlation
+is allowed. Across worker generations, continuity is allowed only after explicitly
+proven orderly retirement/reap and a subsequent fresh manifest with a uniquely
+matching existing app-scoped macOS IORegistry connection marker. That backend-only
+marker changes on replug and never grants authentication approval. Missing or
+ambiguous markers cannot preserve inventories across retirement. Unexpected worker
+replacement, discovery failure or unproven quiescence clears the store.
+
+During the orderly retirement/refresh gap, publication and identity resolution are
+suspended. Normal restart backoff keeps dormant entries, with no DTO returned until
+fresh discovery verifies them. A retired or older worker cannot republish them.
+Lock order is discovery then inspection throughout. Device cards and inspections
+are returned together in one coherent list_authenticators response; foundation_status
+retains only nonsensitive service status/notice fields.
 
 Renderer DTO:
 
 ```text
-InspectionSnapshot {
-  epoch, authenticator,
-  assessment { completeness, total { kind, value? },
-               duplicate_rps, duplicate_credentials, count_contradiction },
-  rps [{ verifiedText?, issue?,
-         credentials [{ handle, userName?, displayName? }] }]
+AuthenticatorList {
+  enumerationEpoch,
+  devices [{ existing safe device fields, handle, generation,
+    inspection: { state: "not_inspected" }
+      | { state: "inspected", snapshot: {
+          deviceHandle, deviceGeneration, epoch, authenticator,
+          assessment { completeness, total { kind, value? },
+                       duplicate_rps, duplicate_credentials, count_contradiction },
+          rps [{ verifiedText?, issue?,
+                 credentials [{ handle, userName?, displayName? }] }]
+      }}
+  }]
 }
 ```
 
-Only the existing parameter-free foundation_status retrieves this sanitized
-snapshot. No renderer inspection command or added ACL permission exists. Renderer
-shows selected authenticator, RP groups, credential/passkey entries, typed completeness,
-Exact/At least/Unknown totals and explicit unread/unsupported messages. All DTOs reject
-unknown fields. Raw hashes, IDs, user IDs, auth bindings, worker/workflow/acquisition/
-prompt identities, paths, pointers, permissions, PIN and PUAT never enter this DTO.
-Raw inventory Debug is redacted; hardware logs contain fixed categories and booleans,
-not account text, counts or identifier material.
+All connected keys appear in their existing cards. Each card shows Not inspected or
+its own RP groups, entries, completeness and Exact/At least/Unknown total. An
+uninspected key never claims zero credentials. Identical labels are disambiguated
+by the existing presentation details; opaque handles are never displayed as text.
+There is no renderer Inspect action, new command or ACL permission. Each key still
+requires its own explicit native menu selection and native PIN/PUAT workflow.
+Both tagged states and all inventory DTO layers reject unknown fields. Raw hashes,
+IDs, user IDs, auth bindings, native worker/workflow/acquisition/prompt identities,
+paths, pointers, permissions, PIN and PUAT never enter these DTOs. Hardware logs
+contain fixed categories and booleans, never account text, counts or raw identities.
+
+The existing discovery ceiling limits the collection to 64 connected devices; each
+inventory retains the reviewed 64 RP / 128 credential / per-field byte bounds above.
+Thus the aggregate private ID budget is at most 4 MiB, copied user/display text
+4 MiB and RP text 1,040,384 bytes. A deterministic 64-device maximum-escaping DTO
+fixture is under 16 MiB. Over-limit discovery purges the store rather than silently
+truncating it. Native allocation, single-key worker frames and deadlines are unchanged.
 
 ## Private-library linkage
 
@@ -146,20 +193,22 @@ and dead-stripped attribution. macOS CI runs these controls and production verif
 
 ## Validation evidence
 
-Final deterministic validation passed on the production macOS workstation:
+Multi-device correction validation passed on the production macOS workstation:
 
 - cargo fmt --all --check: passed.
 - cargo clippy --workspace --all-targets --locked -- -D warnings: passed.
-- cargo test --workspace --all-targets --locked: 248 passed, 0 failed, 0 ignored
+- cargo test --workspace --all-targets --locked: 255 passed, 0 failed, 0 ignored
   outside the sandbox, including unchanged process visibility/containment tests.
 - node scripts/check-renderer-boundary.mjs and test-renderer-boundary.mjs: passed.
-- pnpm check: 0 errors / 0 warnings; pnpm test: passed (no frontend test files).
+- pnpm check: 0 errors / 0 warnings; pnpm test: 5 passed, 0 failed (1 file).
 - pnpm build and pnpm exec prettier --check .: passed.
 - git diff --check: passed.
-- python3 scripts/test-libfido2.py --rebuild: passed patched allocation tests,
-  unpatched/override/corrupt input negative controls and byte-identical archive rebuilds.
+- Previous M3 python3 scripts/test-libfido2.py --rebuild: passed patched allocation
+  tests, negative controls and byte-identical archive rebuilds. The correction changes
+  no native library, FFI or linkage code, so this rebuild was not repeated.
 - python3 scripts/test-credman-linkage.py: passed all positive/negative controls.
-- cargo build -p fido-worker -p fidomanager-app --locked: passed.
+- cargo build -p fidomanager-app --features tauri/custom-protocol --locked: passed;
+  production worker binary remains validated by the full workspace build/tests.
 - python3 scripts/verify-libfido2-linkage.py target/debug/fido-worker: passed all
   16 production credman symbols, private archive identity/digest, no dylib or unresolved FIDO symbols.
 
@@ -170,6 +219,13 @@ one-shot secret use, unrelated pending request, cleanup/close poisoning, owned n
 copies, invalid/unterminated RP text, text/hash mismatch, hash-only records, duplicates,
 contradictory totals, aggregate/ID/text bounds, snapshot stale handles, DTO unknown fields,
 renderer command/permission allowlists and private-library symbol attribution.
+Multi-device coverage adds identical labels, two independent snapshots, per-key epoch
+replacement, cross-key/generation rejection, disconnect/replug, failed refresh,
+ambiguous connection correlation, stale retired worker, bounded collection and hostile
+fields in both display states. A real-process fixture runs A, B, reinspection of A and
+cancellation of A across worker retirement, preserving B and rejecting all old native
+operation handles. Five rendering tests compile the actual App and inventory component for SSR and cover zero connected, all uninspected,
+mixed and multiple inspected keys, complete zero and incomplete/unknown totals.
 
 ## Real Thetis read-only evidence (2026-10-04, Europe/Stockholm)
 
@@ -192,12 +248,10 @@ Observed from the production native menu and AppKit sheet:
 After the guided run, the operator reported independently inspecting a second connected
 key. Sanitized logs show a second CredMan acquisition and successful metadata/RP/credential
 reads, Complete/Exact snapshot, clear/close/free, prompt teardown and worker retirement/reap.
-No extra hardware operation was requested by Codex. Both keys' display-history PIN-check
-markers may remain, but InspectionStore keeps one latest selected-authenticator snapshot:
-a second inspection replaces the first; identical RP/app text never merges credential
-sets across keys. The operator's report that only the latest key inventory appears is
-expected for this snapshot scope. No mutation was issued in either observed inspection.
-
+No extra hardware operation was requested by Codex at that point. The earlier
+single-slot implementation displayed only the most recently inspected key; this
+product correction replaces that behavior with per-connected-key snapshots. The
+original read-only native cleanup evidence remains applicable.
 
 Initial direct debug launch showed a blank window because its configured development
 URL had no frontend server. The hardware app was rebuilt using
@@ -206,7 +260,44 @@ the validated dist assets. The blank instance was stopped and the embedded-front
 instance was launched. The operator confirmed the rendered Authenticators screen.
 This launch correction changed no source, ACL, worker, native budget or authentication logic.
 
-## Changed files
+## Multi-key UI confirmation (2026-10-04, Europe/Stockholm)
+
+After all deterministic tests were green, the final embedded-frontend build was
+launched for the two already available USB keys. Interactive operator mode used
+one action per prompt and waited for each confirmation:
+
+- Operator confirmed both connected cards initially showed Not inspected.
+- Key 1: native menu selection, native secure PIN sheet, one normal PIN submission.
+  Sanitized lifecycle: CredMan, attached PUAT, successful metadata/RP/credential
+  reads, Complete/Exact, PUAT cleared, device closed/freed, prompt torn down and
+  worker quiescent after retirement. No mutation issued.
+- Operator confirmed Key 1 Complete/Exact and Key 2 still Not inspected.
+- Key 2: independent native menu selection, native secure PIN sheet, one normal
+  PIN submission. The same successful read-only and cleanup lifecycle was logged.
+- Operator confirmed **both credential inventories simultaneously visible**, each
+  Complete/Exact. No account text, credential details or counts were collected.
+
+No additional wrong-PIN, mutation or automatic inspection was performed. Hardware
+check covered simultaneous display; deterministic tests cover disconnect/replug,
+reinspection, cancellation and stale/cross-key resolution.
+
+## Files changed by the multi-device correction
+
+- `crates/fido-service/src/authentication.rs`
+- `crates/fido-service/src/inspection.rs`
+- `crates/fido-worker-fixture/tests/authentication.rs`
+- `docs/validation/M3-credential-inspection.md`
+- `scripts/check-renderer-boundary.mjs`
+- `scripts/test-renderer-boundary.mjs`
+- `src-tauri/src/authentication.rs`
+- `src-tauri/src/commands/mod.rs`
+- `src-tauri/src/lib.rs`
+- `src/App.svelte`
+- `src/CredentialInventory.svelte`
+- `src/inspection.ts`
+- `tests/CredentialInventory.test.ts`
+
+## All M3 PR changed files
 
 - `.github/workflows/ci.yml`
 - `Cargo.lock`
@@ -236,4 +327,7 @@ This launch correction changed no source, ACL, worker, native budget or authenti
 - `src-tauri/src/commands/mod.rs`
 - `src-tauri/src/lib.rs`
 - `src/App.svelte`
+- `src/CredentialInventory.svelte`
+- `src/inspection.ts`
+- `tests/CredentialInventory.test.ts`
 - `src/styles.css`

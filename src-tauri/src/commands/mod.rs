@@ -7,7 +7,6 @@ use crate::AppState;
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FoundationStatus {
-    inspection: Option<fido_service::inspection::InspectionSnapshot>,
     phase: &'static str,
     worker_protocol_version: u16,
     reviewed_libfido2_baseline: &'static str,
@@ -25,6 +24,7 @@ pub struct AuthenticatorList {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AuthenticatorSummary {
+    inspection: fido_service::inspection::InspectionDisplay,
     display_name: String,
     display_detail: String,
     handle: String,
@@ -61,7 +61,6 @@ pub fn foundation_status(state: tauri::State<'_, AppState>) -> FoundationStatus 
         .map(|n| *n)
         .unwrap_or((0, None));
     FoundationStatus {
-        inspection: state.inspection.lock().ok().and_then(|s| s.latest()),
         phase: info.phase,
         worker_protocol_version: info.worker_protocol_version,
         reviewed_libfido2_baseline: info.reviewed_libfido2_baseline,
@@ -75,6 +74,7 @@ pub async fn list_authenticators(
     state: tauri::State<'_, AppState>,
 ) -> Result<AuthenticatorList, String> {
     let discovery = Arc::clone(&state.discovery);
+    let inspection = Arc::clone(&state.inspection);
     let verification_history = Arc::clone(&state.verification_history);
     #[cfg(all(
         feature = "native-pin",
@@ -91,7 +91,31 @@ pub async fn list_authenticators(
         let mut coordinator = discovery
             .lock()
             .map_err(|_| "native discovery authority lock is poisoned".to_owned())?;
-        let snapshot = coordinator.refresh().map_err(|error| error.to_string())?;
+        // Lock order everywhere is discovery -> inspection. No renderer command takes a store
+        // lock and then asks for discovery. Publish one coherent connected-device/inventory DTO.
+        let snapshot = match coordinator.refresh() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                if let Ok(mut store) = inspection.lock() {
+                    let settle = store.awaiting_retired_worker()
+                        && matches!(error, fido_service::SupervisorError::RestartBackoff { .. });
+                    if !settle {
+                        store.clear();
+                    }
+                }
+                return Err(error.to_string());
+            }
+        };
+        let worker = coordinator
+            .status()
+            .worker_generation
+            .ok_or("worker unavailable")?;
+        let mut store = inspection
+            .lock()
+            .map_err(|_| "inspection store unavailable")?;
+        let inventory_devices = store
+            .reconcile_connected(&snapshot.devices, worker)
+            .map_err(|_| "connected inventory unavailable")?;
         let presentations =
             fido_service::presentation::authenticator_presentations(&snapshot.devices);
         // Keep history only for uniquely identified currently connected macOS IORegistry entries.
@@ -135,37 +159,41 @@ pub async fn list_authenticators(
             .devices
             .into_iter()
             .zip(presentations)
-            .map(|(device, presentation)| AuthenticatorSummary {
-                display_name: presentation.name,
-                display_detail: presentation.detail,
-                pin_check_passed: device
-                    .verification_history_id
-                    .is_some_and(|id| passed.contains(&id)),
-                handle: format!("{:032x}", device.handle.as_raw()),
-                generation: device.generation.0.to_string(),
-                vendor_id: device.vendor_id,
-                product_id: device.product_id,
-                manufacturer: device.manufacturer,
-                product: device.product,
-                aaguid: device
-                    .aaguid
-                    .map(|value| format!("{:032x}", u128::from_be_bytes(*value.as_bytes()))),
-                versions: device.versions,
-                extensions: device.extensions,
-                transports: presentation.transports,
-                options: device
-                    .options
-                    .into_iter()
-                    .map(|option| AuthenticatorOption {
-                        name: option.name,
-                        enabled: option.enabled,
-                    })
-                    .collect(),
-                max_message_size: device.max_message_size.map(|value| value.to_string()),
-                firmware_version: device.firmware_version.map(|value| value.to_string()),
-                read_status: device.read_status.as_wire_name().to_owned(),
-                freshness: device.freshness.as_wire_name().to_owned(),
-            })
+            .zip(inventory_devices)
+            .map(
+                |((device, presentation), inventory_device)| AuthenticatorSummary {
+                    inspection: store.display_for(inventory_device),
+                    display_name: presentation.name,
+                    display_detail: presentation.detail,
+                    pin_check_passed: device
+                        .verification_history_id
+                        .is_some_and(|id| passed.contains(&id)),
+                    handle: inventory_device.handle.as_wire(),
+                    generation: inventory_device.generation.0.to_string(),
+                    vendor_id: device.vendor_id,
+                    product_id: device.product_id,
+                    manufacturer: device.manufacturer,
+                    product: device.product,
+                    aaguid: device
+                        .aaguid
+                        .map(|value| format!("{:032x}", u128::from_be_bytes(*value.as_bytes()))),
+                    versions: device.versions,
+                    extensions: device.extensions,
+                    transports: presentation.transports,
+                    options: device
+                        .options
+                        .into_iter()
+                        .map(|option| AuthenticatorOption {
+                            name: option.name,
+                            enabled: option.enabled,
+                        })
+                        .collect(),
+                    max_message_size: device.max_message_size.map(|value| value.to_string()),
+                    firmware_version: device.firmware_version.map(|value| value.to_string()),
+                    read_status: device.read_status.as_wire_name().to_owned(),
+                    freshness: device.freshness.as_wire_name().to_owned(),
+                },
+            )
             .collect();
 
         Ok(AuthenticatorList {

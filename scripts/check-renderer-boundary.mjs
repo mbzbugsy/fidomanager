@@ -139,7 +139,6 @@ const foundationFields = [
 assertExactArray(
   foundationFields,
   [
-    'inspection',
     'phase',
     'worker_protocol_version',
     'reviewed_libfido2_baseline',
@@ -150,13 +149,44 @@ assertExactArray(
 );
 if (
   !commandSource.includes(
-    'inspection: Option<fido_service::inspection::InspectionSnapshot>',
+    'inspection: fido_service::inspection::InspectionDisplay',
   )
 ) {
   throw new Error(
-    'Only the reviewed sanitized InspectionSnapshot may cross foundation_status.',
+    'Only the reviewed per-device InspectionDisplay may cross list_authenticators.',
   );
 }
+
+const authenticatorFields = [
+  ...(
+    commandSource.match(/struct AuthenticatorSummary \{([^}]+)\}/s)?.[1] ?? ''
+  ).matchAll(/^\s*([a-z0-9_]+):/gm),
+].map((m) => m[1]);
+assertExactArray(
+  authenticatorFields,
+  [
+    'inspection',
+    'display_name',
+    'display_detail',
+    'handle',
+    'generation',
+    'vendor_id',
+    'product_id',
+    'manufacturer',
+    'product',
+    'aaguid',
+    'versions',
+    'extensions',
+    'transports',
+    'options',
+    'max_message_size',
+    'firmware_version',
+    'read_status',
+    'freshness',
+    'pin_check_passed',
+  ],
+  'AuthenticatorSummary contains an unreviewed renderer field.',
+);
 
 const appSource = readFileSync('src-tauri/src/lib.rs', 'utf8');
 const handlerMatch = appSource.match(/generate_handler!\[([^\]]*)\]/s);

@@ -137,7 +137,7 @@ impl AuthenticationAuthority {
         &self,
         supervisor: &mut DiscoverySupervisor<ProcessWorkerLauncher>,
         reservation: AuthenticationReservation,
-    ) {
+    ) -> ExecutionQuiescence {
         let binding = reservation.prompt.binding();
         let quiescent = supervisor.retire_authentication() == ExecutionQuiescence::Quiescent;
         let torn_down = self.controller.lock().is_ok_and(|mut c| {
@@ -156,6 +156,11 @@ impl AuthenticationAuthority {
                     self.clock.now(),
                 );
             }
+        }
+        if quiescent {
+            ExecutionQuiescence::Quiescent
+        } else {
+            ExecutionQuiescence::Active
         }
     }
 

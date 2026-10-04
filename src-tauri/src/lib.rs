@@ -18,7 +18,7 @@ type DiscoveryAuthority = fido_service::DiscoverySupervisor<fido_service::Proces
 
 pub(crate) struct AppState {
     discovery: Arc<Mutex<DiscoveryAuthority>>,
-    inspection: Mutex<fido_service::inspection::InspectionStore>,
+    inspection: Arc<Mutex<fido_service::inspection::InspectionStore>>,
     // Presentation history only; never consulted for authorization or workflow admission.
     authentication_notice: Arc<Mutex<(u64, Option<&'static str>)>>,
     // Historical display facts only; not grants and never checked by authentication admission.
@@ -80,7 +80,9 @@ pub fn run() {
         }))
         .manage(AppState {
             discovery: Arc::clone(&discovery),
-            inspection: Mutex::new(fido_service::inspection::InspectionStore::default()),
+            inspection: Arc::new(Mutex::new(
+                fido_service::inspection::InspectionStore::default(),
+            )),
             authentication_notice: Arc::new(Mutex::new((0, None))),
             verification_history: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
             #[cfg(all(

@@ -1,30 +1,11 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
+  import CredentialInventory from './CredentialInventory.svelte';
+  import type { InspectionDisplay } from './inspection';
   import logoUrl from './assets/fidomanager-logo.png';
 
-  type InspectionSnapshot = {
-    epoch: string;
-    authenticator: string;
-    assessment: {
-      completeness: 'complete' | 'incomplete' | 'inconsistent';
-      total: { kind: 'exact' | 'at_least' | 'unknown'; value?: number };
-      duplicate_rps: boolean;
-      duplicate_credentials: boolean;
-      count_contradiction: boolean;
-    };
-    rps: {
-      verifiedText: string | null;
-      issue: string | null;
-      credentials: {
-        handle: string;
-        userName: string | null;
-        displayName: string | null;
-      }[];
-    }[];
-  };
   type FoundationStatus = {
-    inspection: InspectionSnapshot | null;
     phase: string;
     workerProtocolVersion: number;
     reviewedLibfido2Baseline: string;
@@ -38,6 +19,7 @@
   };
 
   type Authenticator = {
+    inspection: InspectionDisplay;
     displayName: string;
     displayDetail: string;
     handle: string;
@@ -334,6 +316,7 @@
                   </div>
                 </div>
               {/if}
+              <CredentialInventory inspection={device.inspection} />
             </article>
           {/each}
         </div>
@@ -353,62 +336,6 @@
           <h3>Starting native discovery…</h3>
           <p>Establishing the local FIDO authority.</p>
         </div>
-      {/if}
-    </section>
-    <section class="credential-inventory" aria-label="Credential inspection">
-      <h2>Credentials</h2>
-      {#if foundation?.inspection}
-        {@const inventory = foundation.inspection}
-        <p>Selected authenticator: {inventory.authenticator}</p>
-        <p>
-          <strong>{friendlyStatus(inventory.assessment.completeness)}</strong> ·
-          {#if inventory.assessment.total.kind === 'exact'}Exact: {inventory
-              .assessment.total.value}
-          {:else if inventory.assessment.total.kind === 'at_least'}At least: {inventory
-              .assessment.total.value}
-          {:else}Unknown total{/if}
-        </p>
-        {#if inventory.assessment.completeness !== 'complete'}
-          <p>
-            Some entries could not be read or the authenticator returned
-            conflicting data. This inventory does not establish an exact
-            credential count.
-          </p>
-        {/if}
-        {#if inventory.assessment.duplicate_rps}<p>
-            Duplicate RP identities were preserved. Totals are unknown.
-          </p>{/if}
-        {#if inventory.assessment.duplicate_credentials}<p>
-            Duplicate credential identities were returned. Totals are unknown.
-          </p>{/if}
-        {#each inventory.rps as rp}
-          <article class="credential-rp">
-            <h3>{rp.verifiedText ?? 'RP text unavailable or unverified'}</h3>
-            {#if rp.issue}<p>
-                Incomplete / unsupported: {friendlyStatus(rp.issue)}. An unread
-                group is not an empty credential set.
-              </p>{/if}
-            <ul>
-              {#each rp.credentials as credential (credential.handle)}
-                <li>
-                  {credential.displayName ?? credential.userName ?? 'Passkey'}
-                  {#if credential.displayName && credential.userName}<span>
-                      · {credential.userName}</span
-                    >{/if}
-                </li>
-              {/each}
-            </ul>
-          </article>
-        {/each}
-        {#if inventory.assessment.completeness === 'complete' && inventory.rps.length === 0}<p
-          >
-            No resident credentials were reported.
-          </p>{/if}
-      {:else}
-        <p>
-          Choose “Inspect credentials” for a connected authenticator from the
-          native Security key menu. Enter your PIN only in the native sheet.
-        </p>
       {/if}
     </section>
   </main>

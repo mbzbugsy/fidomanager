@@ -337,3 +337,107 @@ fn complete_inspection_transaction_clears_reaps_and_restarts_fresh() -> TestResu
     }
     Ok(())
 }
+
+#[test]
+fn two_inspected_inventories_survive_real_worker_retirement_and_cancel() -> TestResult {
+    use fido_service::inspection::InspectionStore;
+    let mut supervisor = DiscoverySupervisor::new(
+        launcher(&["--authentication", "--two-devices"])?,
+        DiscoveryPolicy::default(),
+        RestartPolicy::default(),
+    )?;
+    let authority = AuthenticationAuthority::default();
+    let mut store = InspectionStore::default();
+    let mut epochs = [None, None];
+    for (selected, cancel) in [(0, false), (1, false), (0, false), (0, true)] {
+        let snapshot = supervisor.refresh()?;
+        let worker = supervisor.status().worker_generation.ok_or("generation")?;
+        let ids = store
+            .reconcile_connected(&snapshot.devices, worker)
+            .map_err(|_| "reconcile")?;
+        for i in 0..2 {
+            assert_eq!(store.snapshot_for(ids[i]).map(|s| s.epoch), epochs[i]);
+        }
+        store.invalidate(ids[selected]);
+        let mut result = authority.inspect(
+            &mut supervisor,
+            snapshot.devices[selected].handle,
+            authority.reserve()?,
+            |request, controller, sender, _, _, _| {
+                let binding = request.binding();
+                let outcome = if cancel {
+                    PromptOutcome::Cancelled(binding)
+                } else {
+                    PromptOutcome::Approved(binding)
+                };
+                let mut controller = controller.lock().map_err(|_| "controller")?;
+                controller
+                    .resolve(outcome, Instant::now())
+                    .map_err(|_| "resolve")?;
+                controller
+                    .did_teardown(binding, Instant::now())
+                    .map_err(|_| "teardown")?;
+                let pin = if cancel {
+                    None
+                } else {
+                    Some(
+                        PinSecret::collect(|b| {
+                            b[..4].copy_from_slice(b"fake");
+                            Some(4)
+                        })
+                        .map_err(|_| "pin")?,
+                    )
+                };
+                sender
+                    .send(PinCompletion {
+                        binding,
+                        outcome,
+                        pin,
+                    })
+                    .map_err(|_| "send")
+            },
+        );
+        assert!(result.worker_quiescent && result.prompt_torn_down);
+        assert_eq!(
+            result.status,
+            if cancel {
+                Status::Cancelled
+            } else {
+                Status::Validated
+            }
+        );
+        for device in &snapshot.devices {
+            assert!(supervisor.resolve_handle(device.handle).is_none());
+        }
+        store.proven_retirement(worker);
+        if let Some(inventory) = result.inventory.take() {
+            store
+                .replace(ids[selected], "Identical label".into(), inventory)
+                .map_err(|_| "replace")?;
+        }
+        assert!(ids.iter().all(|d| store.snapshot_for(*d).is_none()));
+        std::thread::sleep(Duration::from_millis(1_020));
+        let next = supervisor.refresh()?;
+        let new_ids = store
+            .reconcile_connected(
+                &next.devices,
+                supervisor.status().worker_generation.ok_or("generation")?,
+            )
+            .map_err(|_| "reconcile")?;
+        assert_eq!(ids, new_ids);
+        let new_epoch = store.snapshot_for(new_ids[selected]).map(|s| s.epoch);
+        if !cancel {
+            assert!(new_epoch.is_some());
+            assert_ne!(new_epoch, epochs[selected]);
+        } else {
+            assert!(new_epoch.is_none());
+        }
+        epochs[selected] = new_epoch;
+        assert_eq!(
+            store.snapshot_for(new_ids[1 - selected]).map(|s| s.epoch),
+            epochs[1 - selected]
+        );
+    }
+    assert!(epochs[0].is_none() && epochs[1].is_some());
+    Ok(())
+}
