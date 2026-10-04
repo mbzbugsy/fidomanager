@@ -13,11 +13,13 @@ pub use framing::{
 };
 pub use handshake::{ChildHello, HandshakeError, ParentHello};
 
+pub use fido_core::inventory::InspectionError;
+
 use fido_auth::{AcquisitionBinding, AuthenticationEvidence, GrantKind};
 use fido_core::{Aaguid, DeviceGeneration, ExecutionQuiescence, MutationOutcome};
 use serde::{Deserialize, Serialize};
 
-pub const WORKER_PROTOCOL_VERSION: u16 = 2;
+pub const WORKER_PROTOCOL_VERSION: u16 = 3;
 /// Largest frame the service accepts from a worker (responses). Transport implementations must
 /// reject larger frames before deserialization, and before allocating their payload.
 pub const MAX_WORKER_FRAME_BYTES: usize = 1_048_576;
@@ -113,7 +115,8 @@ impl WorkerRequestEnvelope {
         let generation_is_valid = match &self.request {
             WorkerRequest::GetDeviceInfo { .. }
             | WorkerRequest::PrepareAuthentication { .. }
-            | WorkerRequest::ValidateAuthentication { .. } => self.device_generation.is_some(),
+            | WorkerRequest::ValidateAuthentication { .. }
+            | WorkerRequest::InspectCredentials { .. } => self.device_generation.is_some(),
             WorkerRequest::HealthCheck
             | WorkerRequest::Cancel { .. }
             | WorkerRequest::ListDevices => self.device_generation.is_none(),
@@ -156,6 +159,9 @@ pub enum WorkerRequest {
         device_id: WorkerDeviceId,
         binding: AcquisitionBinding,
     },
+    InspectCredentials {
+        binding: AcquisitionBinding,
+    },
     ValidateAuthentication {
         binding: AcquisitionBinding,
     },
@@ -164,9 +170,9 @@ pub enum WorkerRequest {
 impl WorkerRequest {
     pub const fn operation_class(&self) -> WorkerOperationClass {
         match self {
-            Self::PrepareAuthentication { .. } | Self::ValidateAuthentication { .. } => {
-                WorkerOperationClass::SensitiveRead
-            }
+            Self::PrepareAuthentication { .. }
+            | Self::ValidateAuthentication { .. }
+            | Self::InspectCredentials { .. } => WorkerOperationClass::SensitiveRead,
             Self::HealthCheck | Self::Cancel { .. } => WorkerOperationClass::Control,
             Self::ListDevices | Self::GetDeviceInfo { .. } => WorkerOperationClass::ReadOnly,
         }
@@ -240,6 +246,11 @@ pub enum WorkerResponse {
         grant_kind: GrantKind,
         pin_retries: Option<u8>,
     },
+    CredentialsInspected {
+        evidence: AuthenticationEvidence,
+        inventory: Option<fido_core::inventory::OwnedInventory>,
+        error: Option<InspectionError>,
+    },
     AuthenticationValidated {
         evidence: AuthenticationEvidence,
     },
@@ -291,8 +302,20 @@ mod tests {
                 binding,
             },
             WorkerRequest::ValidateAuthentication { binding },
+            WorkerRequest::InspectCredentials { binding },
         ] {
             let envelope = request_envelope(request, Some(DeviceGeneration(1)));
+            assert_eq!(
+                envelope.operation_class,
+                WorkerOperationClass::SensitiveRead
+            );
+            assert!(envelope.validate().is_ok());
+            let mut missing = envelope.clone();
+            missing.device_generation = None;
+            assert_eq!(
+                missing.validate(),
+                Err(WorkerRequestValidationError::InvalidDeviceGeneration)
+            );
             let encoded = serde_json::to_string(&envelope)?;
             assert_eq!(
                 serde_json::from_str::<WorkerRequestEnvelope>(&encoded)?,
@@ -452,5 +475,34 @@ mod tests {
         }"#;
 
         assert!(serde_json::from_str::<WorkerResponseEnvelope>(encoded).is_err());
+    }
+    #[test]
+    fn largest_application_inventory_fits_existing_frame() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use fido_core::inventory::*;
+        // Worst JSON expansion: each byte of a UTF-8 ASCII quote/backslash needs escaping,
+        // IDs serialize as three-digit JSON numbers plus separators. Controls are rejected.
+        let credential = OwnedCredential {
+            id: vec![255; MAX_CREDENTIAL_ID_BYTES],
+            user_name: Some("\\".repeat(MAX_USER_TEXT_BYTES)),
+            display_name: Some("\\".repeat(MAX_USER_TEXT_BYTES)),
+        };
+        let mut rps: Vec<_> = (0..MAX_RPS)
+            .map(|_| OwnedRp {
+                hash: [255; 32],
+                verified_text: Some("\\".repeat(MAX_RP_TEXT_BYTES)),
+                issue: None,
+                credentials: Vec::new(),
+            })
+            .collect();
+        rps[0].credentials = vec![credential; MAX_CREDENTIALS];
+        let inventory = OwnedInventory {
+            metadata_existing: 128,
+            rps,
+        };
+        assert!(inventory.within_bounds());
+        let bytes = encode_message(&inventory)?;
+        assert!(bytes.len() < MAX_WORKER_FRAME_BYTES / 2);
+        Ok(())
     }
 }

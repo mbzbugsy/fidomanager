@@ -19,6 +19,7 @@ native-pin = ["fido-service/native-pin"]
 native-ui-spike = ["fido-service/native-ui-spike"]
 
 [dependencies]
+boogoocypher-status = { path = "../crates/boogoocypher-status" }
 fido-service = { path = "../crates/fido-service" }
 serde.workspace = true
 tauri = { version = "=2.12.0", features = [] }

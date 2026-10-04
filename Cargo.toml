@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/boogoocypher-status",
     "crates/fido-auth",
     "crates/fido-core",
     "crates/fido-libfido2",

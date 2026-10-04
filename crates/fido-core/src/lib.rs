@@ -1,5 +1,7 @@
 //! Platform-independent domain contracts for FidoManager.
 
+pub mod inventory;
+
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 fn is_exact_lower_hex(encoded: &str, expected_len: usize) -> bool {

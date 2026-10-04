@@ -105,6 +105,23 @@ impl NativeAuthenticationSession for Session {
     fn pin_retries(&self) -> Option<u8> {
         self.retries
     }
+    fn inspect(
+        mut self: Box<Self>,
+        binding: AcquisitionBinding,
+        pin: PinSecret,
+        deadline: NativeDeadline,
+    ) -> crate::inspection::NativeInspection {
+        self.deadline = deadline;
+        let kind = self.kind;
+        let result = crate::inspection::finish_inspection(&mut *self, binding, kind, pin, deadline);
+        drop(self); // native free completes before any owned result leaves the adapter
+        eprintln!(
+            "[inspection] native_freed=true puat_cleared={} device_closed={}",
+            result.evidence.attached_puat_cleared, result.evidence.attached_puat_cleared
+        );
+        result
+    }
+
     fn validate(
         mut self: Box<Self>,
         binding: AcquisitionBinding,
@@ -169,5 +186,18 @@ impl Drop for Session {
         if self.attached() {
             let _ = self.clear();
         }
+    }
+}
+
+impl crate::inspection::ReadOnlyInspection for Session {
+    fn read_inventory(
+        &mut self,
+        deadline: NativeDeadline,
+    ) -> Result<fido_core::inventory::OwnedInventory, crate::inspection::InspectionError> {
+        eprintln!("[inspection] puat_attached=true read_only_sequence=true");
+        super::inspection::read(&mut self.device, &deadline)
+    }
+    fn close_device(&mut self) -> bool {
+        self.device.close()
     }
 }
