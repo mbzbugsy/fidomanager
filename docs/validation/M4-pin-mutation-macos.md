@@ -290,6 +290,7 @@ resolution and activity presentation; `fido-worker-protocol` version 4;
 `fido-worker` consumed native session/runtime; `fido-libfido2` exact private adapter;
 synthetic worker fixture tests; native Tauri menu/routing; hostile boundary/linkage
 checks and macOS CI step labels; architecture/security/ADR-010 and this evidence
-report. Cargo.lock changes only for the fixture's serde_json test dependency.
+report. Cargo.lock changes only for serde_json test dependencies in the process
+fixture and macOS application menu tests.
 The exact changed-file list, base/head SHA, CI outcome and working-tree state are
 reported in the Draft PR review handoff. The PR stays Draft and must not be merged.
