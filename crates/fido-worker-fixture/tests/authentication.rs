@@ -12,6 +12,26 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Existing M2/M3 fixtures initialize an empty read-only journal. Every write fails: these
+// tests can exercise inspection, but this storage can never acknowledge mutation readiness.
+fn initialized_authority() -> Result<AuthenticationAuthority, fido_service::recovery::JournalError>
+{
+    struct InspectionJournal;
+    impl fido_service::recovery::JournalStorage for InspectionJournal {
+        fn read(&mut self) -> std::io::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn replace_durable(&mut self, _: &[u8]) -> std::io::Result<()> {
+            Err(std::io::Error::other(
+                "inspection fixture cannot acknowledge journal writes",
+            ))
+        }
+    }
+    let authority = AuthenticationAuthority::default();
+    authority.initialize_recovery(Box::new(InspectionJournal))?;
+    Ok(authority)
+}
+
 #[test]
 fn complete_native_auth_transaction_clears_reaps_and_restarts_fresh() -> TestResult {
     let mut supervisor = DiscoverySupervisor::new(
@@ -19,7 +39,7 @@ fn complete_native_auth_transaction_clears_reaps_and_restarts_fresh() -> TestRes
         DiscoveryPolicy::default(),
         RestartPolicy::default(),
     )?;
-    let authority = AuthenticationAuthority::default();
+    let authority = initialized_authority()?;
     let mut previous_worker = 0;
     for _ in 0..2 {
         let snapshot = supervisor.refresh()?;
@@ -78,7 +98,7 @@ fn two_keys_use_selected_native_target_and_discard_both_old_handles() -> TestRes
         DiscoveryPolicy::default(),
         RestartPolicy::default(),
     )?;
-    let authority = AuthenticationAuthority::default();
+    let authority = initialized_authority()?;
     let mut previous_history_ids = None;
     let mut retired_handles = Vec::new();
     for (selected, kind) in [
@@ -184,7 +204,7 @@ fn cleanup_poison_wrong_pin_cancel_and_revocation_retire_real_worker() -> TestRe
             RestartPolicy::default(),
         )?;
         let snapshot = supervisor.refresh()?;
-        let authority = AuthenticationAuthority::default();
+        let authority = initialized_authority()?;
         let result = authority.validate(
             &mut supervisor,
             snapshot.devices[0].handle,
@@ -235,7 +255,7 @@ fn teardown_proof_is_required_and_unpresented_failure_releases_safely() -> TestR
             RestartPolicy::default(),
         )?;
         let snapshot = supervisor.refresh()?;
-        let authority = AuthenticationAuthority::default();
+        let authority = initialized_authority()?;
         let result = authority.validate(
             &mut supervisor,
             snapshot.devices[0].handle,
@@ -282,7 +302,7 @@ fn complete_inspection_transaction_clears_reaps_and_restarts_fresh() -> TestResu
         DiscoveryPolicy::default(),
         RestartPolicy::default(),
     )?;
-    let authority = AuthenticationAuthority::default();
+    let authority = initialized_authority()?;
     let mut previous_worker = 0;
     for _ in 0..2 {
         let snapshot = supervisor.refresh()?;
@@ -346,7 +366,7 @@ fn two_inspected_inventories_survive_real_worker_retirement_and_cancel() -> Test
         DiscoveryPolicy::default(),
         RestartPolicy::default(),
     )?;
-    let authority = AuthenticationAuthority::default();
+    let authority = initialized_authority()?;
     let mut store = InspectionStore::default();
     let mut epochs = [None, None];
     for (selected, cancel) in [(0, false), (1, false), (0, false), (0, true)] {

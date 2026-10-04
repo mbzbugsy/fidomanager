@@ -137,15 +137,17 @@ pub struct NativeDeadline {
 }
 
 impl NativeDeadline {
-    /// Far enough in the future to behave as "no deadline" if the budget overflows `Instant`.
-    const OVERFLOW_FALLBACK: Duration = Duration::from_secs(60 * 60 * 24 * 365);
+    /// Reviewed ceiling for one request. Current production budgets are 1–5 seconds.
+    /// Oversized/unrepresentable budgets fail closed as already expired, never as unlimited.
+    pub const MAX_BUDGET: Duration = Duration::from_secs(60);
 
     pub fn after(budget: Duration) -> Self {
         let now = Instant::now();
-        let expires_at = now
-            .checked_add(budget)
-            .or_else(|| now.checked_add(Self::OVERFLOW_FALLBACK))
-            .unwrap_or(now);
+        let expires_at = if budget <= Self::MAX_BUDGET {
+            now.checked_add(budget).unwrap_or(now)
+        } else {
+            now
+        };
         Self { expires_at }
     }
 
@@ -811,10 +813,27 @@ mod tests {
     }
 
     #[test]
-    fn overflowing_budget_does_not_panic_or_expire_immediately() {
-        let deadline = NativeDeadline::after(Duration::MAX);
+    fn invalid_deadline_budgets_fail_closed() {
+        for budget in [
+            Duration::ZERO,
+            NativeDeadline::MAX_BUDGET + Duration::from_nanos(1),
+            Duration::MAX,
+        ] {
+            let deadline = NativeDeadline::after(budget);
+            assert!(deadline.is_expired());
+            assert_eq!(
+                deadline.next_call_timeout_ms().err().map(|e| e.kind()),
+                Some(NativeErrorKind::TimedOut)
+            );
+        }
+    }
+
+    #[test]
+    fn maximum_reviewed_deadline_is_finite_and_accepted() {
+        let deadline = NativeDeadline::after(NativeDeadline::MAX_BUDGET);
         assert!(!deadline.is_expired());
-        assert_eq!(deadline.next_call_timeout_ms().ok(), Some(i32::MAX));
+        assert!(deadline.remaining() <= NativeDeadline::MAX_BUDGET);
+        assert!(matches!(deadline.next_call_timeout_ms(), Ok(1..=60_000)));
     }
 
     #[test]

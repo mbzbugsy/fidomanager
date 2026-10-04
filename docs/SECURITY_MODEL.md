@@ -451,7 +451,10 @@ After a mutating libfido2 call is entered, generic `FIDO_ERR_TX`, `FIDO_ERR_RX`,
 
 Acquire application-managed authorization in a separate earlier step where the workflow allows it. This removes authentication/token acquisition from the mutating call for operations such as token-backed credential deletion and makes evidence easier to classify.
 
-`fido_dev_set_pin`/PIN change remains multi-exchange and requires its own ADR-010 evidence table.
+`fido_dev_set_pin`/PIN change remains multi-exchange. The non-dispatching M4
+foundation records the exact pinned-source evidence table and initial recovery
+contracts in [ADR-010](adr/ADR-010-MUTATION-OUTCOME-RECOVERY.md). It adds no
+executable mutation request or renderer authority.
 
 Reset response loss remains uncertain even when the device re-enumerates quickly.
 

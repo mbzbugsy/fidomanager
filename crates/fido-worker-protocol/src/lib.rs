@@ -287,6 +287,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mutation_messages_are_not_protocol_requests() -> Result<(), Box<dyn std::error::Error>> {
+        for kind in ["set_pin", "change_pin", "reset", "delete_credential"] {
+            let encoded = serde_json::json!({ "kind": kind });
+            assert!(serde_json::from_value::<WorkerRequest>(encoded).is_err());
+        }
+        let binding = fido_auth::AcquisitionBinding {
+            worker_generation: 1,
+            device_generation: fido_core::DeviceGeneration(1),
+            workflow_id: fido_core::WorkflowId::from_raw(1),
+            prompt_instance_id: fido_core::PromptInstanceId::from_raw(1),
+            acquisition_id: fido_auth::AcquisitionId(1),
+        };
+        for request in [
+            WorkerRequest::HealthCheck,
+            WorkerRequest::Cancel {
+                target_request_id: WorkerRequestId(1),
+                target_cancellation_id: CancellationId(1),
+            },
+            WorkerRequest::ListDevices,
+            WorkerRequest::GetDeviceInfo {
+                device_id: WorkerDeviceId(1),
+            },
+            WorkerRequest::PrepareAuthentication {
+                device_id: WorkerDeviceId(1),
+                binding,
+            },
+            WorkerRequest::InspectCredentials { binding },
+            WorkerRequest::ValidateAuthentication { binding },
+        ] {
+            assert_ne!(request.operation_class(), WorkerOperationClass::Mutation);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn authentication_round_trip_and_hostile_secret_fields()
     -> Result<(), Box<dyn std::error::Error>> {
         let binding = AcquisitionBinding {
