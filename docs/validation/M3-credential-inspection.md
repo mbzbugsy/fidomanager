@@ -181,6 +181,32 @@ Thus the aggregate private ID budget is at most 4 MiB, copied user/display text
 fixture is under 16 MiB. Over-limit discovery purges the store rather than silently
 truncating it. Native allocation, single-key worker frames and deadlines are unchanged.
 
+## Credential inventory presentation
+
+Presentation only. The backend Complete / Incomplete / Inconsistent assessment and its
+Exact / AtLeast / Unknown total are unchanged, and no enum word is shown to the user.
+Credentials is a native section of the authenticator card (same surfaces, separators,
+tokens and type hierarchy as AAGUID/Capabilities), not a standalone outlined box.
+
+| Backend state | Total shown | Extra text |
+| --- | --- | --- |
+| Complete + Exact(1) | `1 credential` | “Inventory complete” (secondary) |
+| Complete + Exact(n) | `n credentials` | “Inventory complete” (secondary) |
+| Complete + Exact(0) | `0 credentials` | “No resident credentials were reported.” (the only state that may show zero) |
+| Incomplete + AtLeast(n) | `At least n credentials` | “Some credentials could not be read. The actual total may be higher.” |
+| Inconsistent + Unknown | `Credential count unavailable` | “The authenticator returned conflicting inventory information.” |
+| Not inspected | `Not inspected` | Inspection is started from the native Security key menu; never implies zero |
+
+Each verified RP group shows its RP text and the number of credentials listed for it;
+an unverified or unreadable RP shows “RP identity unavailable” with “Incomplete” and no
+invented domain. Warnings use text plus an icon, never color alone, and the section keeps
+semantic headings (`h4` Credentials, `h5` per RP) and nested lists.
+
+Credential names: identical displayName/userName is shown once; differing values show
+displayName primary and userName subdued; a single available value is shown alone; neither
+yields “Passkey”. Credential IDs and opaque CredentialHandles are never rendered (the
+handle remains only the internal list key).
+
 ## Private-library linkage
 
 The existing pinned private build, digest/identity probe and allocation patch are

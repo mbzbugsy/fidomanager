@@ -678,12 +678,139 @@ h1 {
   }
 }
 
-.credential-inventory {
-  margin-top: 2rem;
-  padding: 1.5rem;
-  border: 1px solid var(--border, #d8dde5);
-  border-radius: 12px;
+.credential-section {
+  padding: 0.9rem 1.35rem 1.1rem;
+  border-top: 1px solid var(--line);
 }
+
+.credential-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.credential-label {
+  margin: 0;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.credential-total {
+  color: #c8d0cc;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.credential-total.muted {
+  color: var(--muted);
+}
+
+.credential-total.caution,
+.caution {
+  color: var(--warn);
+}
+
+.credential-note {
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.credential-note.quiet {
+  color: var(--faint);
+  font-size: 0.66rem;
+}
+
+.credential-note.caution span {
+  display: inline-block;
+  width: 1.1em;
+  margin-right: 0.35rem;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-size: 0.64rem;
+  font-weight: 700;
+  line-height: 1.1em;
+  text-align: center;
+}
+
+.credential-rps,
+.credential-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.credential-rps {
+  margin-top: 0.7rem;
+}
+
 .credential-rp {
-  padding: 0.75rem 0;
+  padding: 0.7rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.credential-rp-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.credential-rp-head h5 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: #c8d0cc;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.credential-list {
+  margin-top: 0.4rem;
+}
+
+.credential-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  padding: 0.2rem 0;
+  font-size: 0.74rem;
+}
+
+.credential-list svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: var(--faint);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.credential-name {
+  min-width: 0;
+  overflow: hidden;
+  color: #b5bdb9;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.credential-sub {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

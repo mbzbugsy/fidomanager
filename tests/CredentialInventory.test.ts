@@ -90,7 +90,27 @@ const appHtml = (inspections: InspectionDisplay[]) =>
       },
     },
   }).body;
-const inspected = (total: number): InspectionDisplay => ({
+type Cred = { userName: string | null; displayName: string | null };
+type Rp = {
+  verifiedText: string | null;
+  issue: string | null;
+  credentials: Cred[];
+};
+let handleCounter = 0;
+const rp = (
+  verifiedText: string | null,
+  credentials: Cred[],
+  issue = null,
+): Rp => ({
+  verifiedText,
+  issue,
+  credentials,
+});
+const build = (
+  completeness: 'complete' | 'incomplete' | 'inconsistent',
+  total: { kind: 'exact' | 'at_least' | 'unknown'; value?: number },
+  rps: Rp[],
+): InspectionDisplay => ({
   state: 'inspected',
   snapshot: {
     deviceHandle: 'opaque-device',
@@ -98,36 +118,35 @@ const inspected = (total: number): InspectionDisplay => ({
     epoch: 'opaque-epoch',
     authenticator: 'Thetis',
     assessment: {
-      completeness: 'complete',
-      total: { kind: 'exact', value: total },
+      completeness,
+      total,
       duplicate_rps: false,
       duplicate_credentials: false,
       count_contradiction: false,
     },
-    rps: total
-      ? [
-          {
-            verifiedText: 'example.com',
-            issue: null,
-            credentials: [
-              {
-                handle: 'opaque-credential',
-                userName: 'Account',
-                displayName: null,
-              },
-            ],
-          },
-        ]
-      : [],
+    rps: rps.map((group) => ({
+      ...group,
+      credentials: group.credentials.map((credential) => ({
+        ...credential,
+        handle: `opaque-credential-${handleCounter++}`,
+      })),
+    })),
   },
 });
+const inspected = (total: number): InspectionDisplay =>
+  build(
+    'complete',
+    { kind: 'exact', value: total },
+    total
+      ? [rp('example.com', [{ userName: 'Account', displayName: null }])]
+      : [],
+  );
 const html = (inspection: InspectionDisplay) =>
   render(Inventory, { props: { inspection } }).body;
 
 describe('connected-key credential display', () => {
   it('has no inventory cards when zero keys are connected', () => {
-    const devices: InspectionDisplay[] = [];
-    const result = appHtml(devices);
+    const result = appHtml([]);
     expect(result).toContain('No authenticator connected');
     expect(result).not.toContain('Credential inspection');
   });
@@ -137,43 +156,153 @@ describe('connected-key credential display', () => {
       { state: 'not_inspected' },
     ]);
     expect(result).toContain('Not inspected');
+    expect(result).toContain('native Security key menu');
     expect(result).not.toContain('No resident credentials');
-    expect(result).not.toContain('Exact:');
+    expect(result).not.toMatch(/\d+ credentials?/);
     expect(result.match(/Not inspected/g)?.length).toBe(2);
   });
-  it('two inspected inventories and a mixed uninspected key remain separate', () => {
+  it('multiple connected keys keep independent inventories', () => {
     const result = appHtml([
       inspected(1),
-      inspected(1),
+      build('complete', { kind: 'exact', value: 2 }, [
+        rp('github.com', [
+          { userName: 'a', displayName: 'A' },
+          { userName: 'b', displayName: 'B' },
+        ]),
+      ]),
       { state: 'not_inspected' } as InspectionDisplay,
     ]);
-    expect(result.match(/example\.com/g)?.length).toBe(2);
-    expect(result.match(/Exact:/g)?.length).toBe(2);
-    expect(result).toContain('Not inspected');
+    expect(result.match(/example\.com/g)?.length).toBe(1);
+    expect(result.match(/github\.com/g)?.length).toBe(1);
+    expect(result.match(/1 credential</g)?.length).toBe(2); // total + RP group
+    expect(result.match(/2 credentials</g)?.length).toBe(2);
+    expect(result.match(/Not inspected/g)?.length).toBe(1);
     expect(result).not.toContain('opaque-device');
     expect(result).not.toContain('opaque-credential');
   });
+  it('complete Exact(1) reads "1 credential" without backend wording', () => {
+    const result = html(inspected(1));
+    expect(result).toContain('1 credential<');
+    expect(result).not.toContain('1 credentials');
+    expect(result).not.toContain('Exact');
+    expect(result).not.toContain('Complete:');
+    expect(result).toContain('Inventory complete');
+  });
+  it('complete Exact(7) is plural', () => {
+    const result = html(build('complete', { kind: 'exact', value: 7 }, []));
+    expect(result).toContain('7 credentials');
+    expect(result).not.toContain('Exact');
+  });
   it('a complete exact zero is distinct from not inspected', () => {
     const result = html(inspected(0));
-    expect(result).toContain('Exact: 0');
-    expect(result).toContain('No resident credentials');
+    expect(result).toContain('0 credentials');
+    expect(result).toContain('No resident credentials were reported.');
     expect(result).not.toContain('Not inspected');
   });
-  it('incomplete and inconsistent inventories keep typed totals', () => {
-    const partial = inspected(0) as {
-      state: 'inspected';
-      snapshot: InspectionSnapshot;
-    };
-    partial.snapshot.assessment.completeness = 'incomplete';
-    partial.snapshot.assessment.total = { kind: 'at_least', value: 0 };
-    partial.snapshot.rps = [
-      { verifiedText: null, issue: 'text_unavailable', credentials: [] },
-    ];
-    expect(html(partial)).toContain('At least: 0');
-    expect(html(partial)).not.toContain('No resident credentials');
-    partial.snapshot.assessment.completeness = 'inconsistent';
-    partial.snapshot.assessment.total = { kind: 'unknown' };
-    expect(html(partial)).toContain('Unknown total');
-    expect(html(partial)).not.toContain('Exact:');
+  it('incomplete AtLeast is a lower bound with a warning', () => {
+    const result = html(
+      build('incomplete', { kind: 'at_least', value: 3 }, [
+        rp('example.com', [{ userName: 'u', displayName: null }]),
+        rp(null, [], 'text_unavailable' as never),
+      ]),
+    );
+    expect(result).toContain('At least 3 credentials');
+    expect(result).toContain(
+      'Some credentials could not be read. The actual total may be higher.',
+    );
+    expect(result).toContain('RP identity unavailable');
+    expect(result).toContain('Incomplete');
+    expect(result).not.toContain('AtLeast');
+    expect(result).not.toContain('at_least');
+    expect(result).not.toContain('No resident credentials');
+    expect(result).not.toContain('Inventory complete');
+  });
+  it('incomplete AtLeast(0) never claims zero', () => {
+    const result = html(
+      build('incomplete', { kind: 'at_least', value: 0 }, [
+        rp(null, [], 'text_unavailable' as never),
+      ]),
+    );
+    expect(result).toContain('At least 0 credentials');
+    expect(result).not.toContain('No resident credentials');
+  });
+  it('inconsistent Unknown shows no count', () => {
+    const result = html(build('inconsistent', { kind: 'unknown' }, []));
+    expect(result).toContain('Credential count unavailable');
+    expect(result).toContain(
+      'The authenticator returned conflicting inventory information.',
+    );
+    expect(result).not.toMatch(/\d+ credentials?/);
+    expect(result).not.toContain('Exact');
+    expect(result).not.toContain('No resident credentials');
+  });
+  it('shows an identical displayName and userName once', () => {
+    const result = html(
+      build('complete', { kind: 'exact', value: 1 }, [
+        rp('openai.com', [
+          {
+            userName: 'nima.foladi@gmail.com',
+            displayName: 'nima.foladi@gmail.com',
+          },
+        ]),
+      ]),
+    );
+    expect(result.match(/nima\.foladi@gmail\.com/g)?.length).toBe(1);
+    expect(result).not.toContain('·');
+  });
+  it('shows differing names as primary and secondary', () => {
+    const result = html(
+      build('complete', { kind: 'exact', value: 1 }, [
+        rp('github.com', [
+          { userName: 'nima@example.com', displayName: 'Nima Foladi' },
+        ]),
+      ]),
+    );
+    expect(result).toMatch(
+      /class="credential-name">Nima Foladi<\/span>.*class="credential-sub">nima@example\.com</s,
+    );
+  });
+  it('shows the single available name, else Passkey', () => {
+    const result = html(
+      build('complete', { kind: 'exact', value: 3 }, [
+        rp('example.org', [
+          { userName: 'only-user', displayName: null },
+          { userName: null, displayName: 'Only Display' },
+          { userName: null, displayName: null },
+        ]),
+      ]),
+    );
+    expect(result).toContain('only-user');
+    expect(result).toContain('Only Display');
+    expect(result).toContain('>Passkey<');
+    expect(result).not.toContain('credential-sub');
+  });
+  it('groups several RPs with their own counts', () => {
+    const result = html(
+      build('complete', { kind: 'exact', value: 4 }, [
+        rp('openai.com', [{ userName: 'o', displayName: null }]),
+        rp('github.com', [
+          { userName: 'g1', displayName: null },
+          { userName: 'g2', displayName: null },
+        ]),
+        rp('example.org', [{ userName: null, displayName: null }]),
+      ]),
+    );
+    expect(result).toContain('4 credentials');
+    expect(result).toMatch(
+      /openai\.com<\/h5>\s*(?:<!--\[0-->)?<span>1 credential</,
+    );
+    expect(result).toMatch(
+      /github\.com<\/h5>\s*(?:<!--\[0-->)?<span>2 credentials</,
+    );
+    expect(result).toMatch(
+      /example\.org<\/h5>\s*(?:<!--\[0-->)?<span>1 credential</,
+    );
+  });
+  it('keeps semantic headings and lists', () => {
+    const result = html(inspected(1));
+    expect(result).toContain('<h4 class="credential-label">Credentials</h4>');
+    expect(result).toContain('<h5>example.com</h5>');
+    expect(result).toContain('<ul class="credential-list">');
   });
 });
