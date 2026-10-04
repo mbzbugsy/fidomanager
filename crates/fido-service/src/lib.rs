@@ -7,7 +7,9 @@ pub mod activity;
 pub mod authentication;
 pub mod discovery_presentation;
 pub mod inspection;
+pub mod mutation;
 pub mod presentation;
+pub mod recovery;
 
 mod discovery;
 mod process_worker;
@@ -215,6 +217,7 @@ pub struct SensitiveWorkflowGate {
     policy: AdmissionPolicy,
     active: Option<ActiveWorkflow>,
     recovery_admission: RecoveryAdmission,
+    persistent_barrier: bool,
     next_workflow_raw: u128,
     interruptions: VecDeque<u64>,
     cooldown_until_ms: Option<u64>,
@@ -283,7 +286,11 @@ impl SensitiveWorkflowGate {
         // Quiescence permits the exclusion lock to release. Recovery admission remains a
         // separate authority state and may continue to block ordinary workflows afterwards.
         self.active = None;
-        self.recovery_admission = release_evidence.recovery_admission;
+        self.recovery_admission = if self.persistent_barrier {
+            RecoveryAdmission::Barrier
+        } else {
+            release_evidence.recovery_admission
+        };
 
         if matches!(
             completion,
@@ -311,11 +318,29 @@ impl SensitiveWorkflowGate {
         self.recovery_admission
     }
 
+    pub(crate) fn set_persistent_barrier(&mut self, barrier: bool) {
+        self.persistent_barrier = barrier;
+        self.recovery_admission = if barrier {
+            RecoveryAdmission::Barrier
+        } else {
+            RecoveryAdmission::Open
+        };
+    }
+
+    pub(crate) fn matches(&self, admission: &WorkflowAdmission) -> bool {
+        self.active
+            == Some(ActiveWorkflow {
+                workflow_id: admission.workflow_id,
+                kind: admission.kind,
+            })
+    }
+
     fn from_valid_policy(policy: AdmissionPolicy) -> Self {
         Self {
             policy,
             active: None,
             recovery_admission: RecoveryAdmission::Open,
+            persistent_barrier: false,
             next_workflow_raw: 1,
             interruptions: VecDeque::new(),
             cooldown_until_ms: None,

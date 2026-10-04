@@ -15,6 +15,7 @@ native-ui-spike = ["fido-native-ui/modality-spike"]
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 sha2 = "=0.10.9"
 fido-auth = { path = "../fido-auth" }
 getrandom = "=0.3.4"

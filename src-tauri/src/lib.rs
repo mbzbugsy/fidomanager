@@ -69,9 +69,16 @@ pub fn run() {
         }
     };
 
-    let authentication_authority =
-        Arc::new(fido_service::authentication::AuthenticationAuthority::default());
+    let authentication_authority = Arc::new(
+        fido_service::authentication::AuthenticationAuthority::awaiting_recovery_startup(),
+    );
     let auth_for_events = Arc::clone(&authentication_authority);
+    #[cfg(not(all(
+        feature = "native-pin",
+        not(feature = "native-ui-spike"),
+        target_os = "macos"
+    )))]
+    let auth_for_startup = Arc::clone(&authentication_authority);
     let builder = tauri::Builder::default()
         // Security invariant: single-instance is registered before any future plugin.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -117,6 +124,7 @@ pub fn run() {
     ))]
     let builder = builder
         .setup(|app| {
+            initialize_recovery(app, &app.state::<AppState>().authentication);
             fido_service::authentication::install_lifecycle(Arc::clone(
                 &app.state::<AppState>().authentication.epoch,
             ))?;
@@ -153,6 +161,15 @@ pub fn run() {
                 fido_service::authentication::shutdown_native_prompt();
             }
         });
+    #[cfg(not(all(
+        feature = "native-pin",
+        not(feature = "native-ui-spike"),
+        target_os = "macos"
+    )))]
+    let builder = builder.setup(move |app| {
+        initialize_recovery(app, &auth_for_startup);
+        Ok(())
+    });
     let built = builder.build(tauri::generate_context!());
 
     let app = match built {
@@ -193,4 +210,25 @@ pub fn run() {
             }
         }
     });
+}
+
+// Framework-derived application data location only. Storage errors leave ordinary sensitive
+// admission blocked while passive discovery remains available. No recovery data crosses IPC.
+fn initialize_recovery(
+    app: &tauri::App,
+    authority: &fido_service::authentication::AuthenticationAuthority,
+) {
+    #[cfg(unix)]
+    {
+        let initialized = app
+            .path()
+            .app_data_dir()
+            .ok()
+            .is_some_and(|path| authority.initialize_recovery_at(&path).is_ok());
+        if !initialized {
+            eprintln!("sensitive recovery storage unavailable; admission remains blocked");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (app, authority); // Windows journal placement remains ADR-013 work; fail closed.
 }

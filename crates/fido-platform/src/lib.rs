@@ -4,6 +4,8 @@
 //! stays small, commented, and reviewable in one place.
 
 pub mod process;
+#[cfg(unix)]
+pub mod recovery_file;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerPlacement {

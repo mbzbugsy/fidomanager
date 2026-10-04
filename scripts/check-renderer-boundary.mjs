@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
@@ -498,4 +499,84 @@ if (existsSync(generatedCapabilitiesPath) || existsSync(generatedAclPath)) {
   }
 }
 
-console.log('Renderer boundary check passed.');
+// M4 foundation has no executable mutation variant or native mutation entry point. This check
+// runs in ordinary CI and rejects even a newly declared FFI symbol before it can become callable.
+const workerProtocol = readFileSync(
+  'crates/fido-worker-protocol/src/lib.rs',
+  'utf8',
+);
+const requestShape =
+  workerProtocol.match(/pub enum WorkerRequest \{([\s\S]*?)^\}/m)?.[1] ?? '';
+assertExactArray(
+  [...requestShape.matchAll(/^    ([A-Z][A-Za-z]+)(?:,| \{)/gm)].map(
+    (m) => m[1],
+  ),
+  [
+    'HealthCheck',
+    'Cancel',
+    'ListDevices',
+    'GetDeviceInfo',
+    'PrepareAuthentication',
+    'InspectCredentials',
+    'ValidateAuthentication',
+  ],
+  'M4 foundation must not add an executable mutation worker request.',
+);
+for (const file of [
+  ...listFiles('crates', (path) => path.endsWith('.rs')),
+  ...rustFiles,
+]) {
+  const source = readFileSync(file, 'utf8');
+  // The pre-existing opt-in M1.5 manual harness has one reviewed deletion probe. Freeze it
+  // byte-for-byte, and keep it outside production dependencies; no M4 path may use that probe.
+  const manualSpike = file === 'crates/fido-puat-spike/src/native.rs';
+  if (
+    manualSpike &&
+    createHash('sha256').update(source).digest('hex') !==
+      '9e2b92cd7f416d9633bac9de21d903e784697de3a5d495face2d7bd451565a22'
+  ) {
+    throw new Error(
+      'M4 foundation must not change the opt-in manual mutation spike.',
+    );
+  }
+  if (
+    /\b(?:fido_dev_set_pin|fido_dev_reset)\s*\(/.test(source) ||
+    (!manualSpike && /\bfido_credman_del_dev_rk\s*\(/.test(source))
+  ) {
+    throw new Error(
+      `M4 foundation must not declare or call authenticator mutation: ${file}`,
+    );
+  }
+}
+for (const file of rendererFiles) {
+  if (
+    /\b(?:OperationPermit|OperationIntent|WorkflowId|PromptInstanceId|recovery_journal|journal_path|dispatch_capable)\b/.test(
+      readFileSync(file, 'utf8'),
+    )
+  ) {
+    throw new Error(
+      `M4 foundation authority or recovery data must not enter renderer: ${file}`,
+    );
+  }
+}
+
+for (const file of [
+  ...listFiles('crates', (path) => path.endsWith('Cargo.toml')),
+  'src-tauri/Cargo.toml',
+]) {
+  if (file === 'crates/fido-puat-spike/Cargo.toml') continue;
+  if (/^fido-puat-spike\s*=/m.test(readFileSync(file, 'utf8'))) {
+    throw new Error(
+      'M4 production dependencies must not include the manual PUAT spike.',
+    );
+  }
+}
+const spikeManifest = readFileSync('crates/fido-puat-spike/Cargo.toml', 'utf8');
+if (
+  !/^default = \[\]/m.test(spikeManifest) ||
+  !spikeManifest.includes('required-features = ["native-puat"]')
+) {
+  throw new Error('M4 must leave the manual spike opt-in and non-shipping.');
+}
+
+console.log('Renderer boundary check passed; no production mutation path.');

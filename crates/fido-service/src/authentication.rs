@@ -49,25 +49,29 @@ pub struct AuthenticationResult {
 }
 
 pub struct AuthenticationAuthority {
-    gate: Mutex<SensitiveWorkflowGate>,
-    controller: NativeController,
+    pub(crate) gate: Mutex<SensitiveWorkflowGate>,
+    pub(crate) controller: NativeController,
+    pub(crate) recovery: Mutex<Option<crate::recovery::RecoveryJournal>>,
     pub epoch: Arc<AtomicU64>,
     next_acquisition: AtomicU64,
-    clock: SystemMonotonicClock,
+    pub(crate) clock: SystemMonotonicClock,
 }
 pub struct AuthenticationReservation {
-    admission: WorkflowAdmission,
-    prompt: PromptRequest,
-    prompt_outcome: mpsc::Receiver<PromptOutcome>,
+    pub(crate) admission: WorkflowAdmission,
+    pub(crate) prompt: PromptRequest,
+    pub(crate) prompt_outcome: mpsc::Receiver<PromptOutcome>,
     acquisition: AcquisitionId,
-    epoch: u64,
+    pub(crate) epoch: u64,
 }
 
 impl Default for AuthenticationAuthority {
     fn default() -> Self {
+        let mut gate = SensitiveWorkflowGate::default();
+        gate.set_persistent_barrier(true);
         Self {
-            gate: Mutex::new(SensitiveWorkflowGate::default()),
+            gate: Mutex::new(gate),
             controller: Arc::new(Mutex::new(PromptController::default())),
+            recovery: Mutex::new(None),
             epoch: Arc::new(AtomicU64::new(1)),
             next_acquisition: AtomicU64::new(1),
             clock: SystemMonotonicClock::new(),
@@ -76,18 +80,75 @@ impl Default for AuthenticationAuthority {
 }
 
 impl AuthenticationAuthority {
+    /// Production starts blocked until its authority-owned durable journal has been loaded.
+    /// Default also fails closed; no constructor opens admission before journal loading.
+    pub fn awaiting_recovery_startup() -> Self {
+        Self::default()
+    }
+
+    pub fn initialize_recovery(
+        &self,
+        storage: Box<dyn crate::recovery::JournalStorage>,
+    ) -> Result<(), crate::recovery::JournalError> {
+        // Same lock order as final permit consumption. Never reload to erase runtime incidents.
+        let mut gate = self
+            .gate
+            .lock()
+            .map_err(|_| crate::recovery::JournalError::Unavailable)?;
+        let mut slot = self
+            .recovery
+            .lock()
+            .map_err(|_| crate::recovery::JournalError::Unavailable)?;
+        if slot.is_some() || gate.is_active() {
+            return Err(crate::recovery::JournalError::InvalidTransition);
+        }
+        let journal = crate::recovery::RecoveryJournal::load(storage);
+        gate.set_persistent_barrier(journal.admission() == RecoveryAdmission::Barrier);
+        *slot = Some(journal);
+        Ok(())
+    }
+    #[cfg(unix)]
+    pub fn initialize_recovery_at(
+        &self,
+        application_data: &std::path::Path,
+    ) -> Result<(), crate::recovery::JournalError> {
+        {
+            let mut gate = self
+                .gate
+                .lock()
+                .map_err(|_| crate::recovery::JournalError::Unavailable)?;
+            if self
+                .recovery
+                .lock()
+                .map_err(|_| crate::recovery::JournalError::Unavailable)?
+                .is_some()
+                || gate.is_active()
+            {
+                return Err(crate::recovery::JournalError::InvalidTransition);
+            }
+            gate.set_persistent_barrier(true);
+        }
+        let storage = fido_platform::recovery_file::DurableRecoveryFile::open(application_data)
+            .map_err(|_| crate::recovery::JournalError::Unavailable)?;
+        self.initialize_recovery(Box::new(storage))
+    }
+
     pub fn revoke(&self) {
         self.epoch.fetch_add(1, Ordering::SeqCst);
     }
     pub fn reserve(&self) -> Result<AuthenticationReservation, AdmissionError> {
+        self.reserve_sensitive(SensitiveWorkflowKind::CredentialInspection)
+    }
+
+    pub(crate) fn reserve_sensitive(
+        &self,
+        kind: SensitiveWorkflowKind,
+    ) -> Result<AuthenticationReservation, AdmissionError> {
         let mut gate = self
             .gate
             .try_lock()
             .map_err(|_| AdmissionError::OperationInProgress)?;
-        let admission = gate.try_begin(
-            SensitiveWorkflowKind::CredentialInspection,
-            self.clock.now(),
-        )?;
+        let admission = gate.try_begin(kind, self.clock.now())?;
         let setup = (|| {
             let acquisition = self
                 .next_acquisition
@@ -563,9 +624,16 @@ mod tests {
     use super::*;
     use fido_core::{DeviceGeneration, PromptInstanceId, WorkflowId};
 
+    fn initialized_authority() -> AuthenticationAuthority {
+        let a = AuthenticationAuthority::default();
+        a.initialize_recovery(Box::new(crate::recovery::tests::MemoryStorage::default()))
+            .unwrap_or_else(|_| panic!("journal startup"));
+        a
+    }
+
     #[test]
     fn reservation_unwinds_acquisition_exhaustion_before_any_prompt() {
-        let a = AuthenticationAuthority::default();
+        let a = initialized_authority();
         a.next_acquisition.store(u64::MAX, Ordering::SeqCst);
         assert!(matches!(
             a.reserve(),
@@ -585,7 +653,7 @@ mod tests {
 
     #[test]
     fn reservation_unwinds_prompt_request_failure_without_new_controller_state() {
-        let a = AuthenticationAuthority::default();
+        let a = initialized_authority();
         a.controller
             .lock()
             .unwrap_or_else(|_| panic!("controller"))
@@ -605,7 +673,7 @@ mod tests {
 
     #[test]
     fn reservation_unwinds_without_tearing_down_an_existing_prompt() {
-        let a = AuthenticationAuthority::default();
+        let a = initialized_authority();
         let (existing, outcome) = a
             .controller
             .lock()
@@ -641,7 +709,7 @@ mod tests {
 
     #[test]
     fn reservation_unwinds_poisoned_controller_but_retains_recovery_barrier() {
-        let a = AuthenticationAuthority::default();
+        let a = initialized_authority();
         let controller = Arc::clone(&a.controller);
         let poisoned = std::thread::spawn(move || {
             let _held = controller.lock().unwrap_or_else(|_| panic!("controller"));
@@ -707,7 +775,7 @@ mod tests {
 
     #[test]
     fn admission_has_zero_queue_and_bound_prompt_identity() {
-        let a = AuthenticationAuthority::default();
+        let a = initialized_authority();
         let r = a.reserve().unwrap_or_else(|_| panic!("reserve"));
         assert_eq!(r.prompt.binding().workflow_id, r.admission.workflow_id());
         assert!(matches!(

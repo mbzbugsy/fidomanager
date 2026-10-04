@@ -1477,6 +1477,11 @@ Before shipping/using production authentication:
 - operation-specific adapter evidence table;
 - uncertainty handling.
 
+The non-dispatching M4 foundation is described in
+[ADR-010](adr/ADR-010-MUTATION-OUTCOME-RECOVERY.md) and
+[M4 foundation validation](validation/M4-mutation-foundation.md). Native PIN
+mutation execution, its presenter and final recovery UI remain gated future work.
+
 ### Milestone 5 — credential deletion
 
 - exact credential/RP binding;

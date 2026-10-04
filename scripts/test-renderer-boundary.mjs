@@ -22,8 +22,14 @@ try {
   cpSync('crates', join(fixture, 'crates'), { recursive: true });
   const manifestPath = join(fixture, 'src-tauri/Cargo.toml');
   const manifest = readFileSync(manifestPath, 'utf8');
-  const check = () =>
-    spawnSync(process.execPath, [checker], { cwd: fixture, encoding: 'utf8' });
+  let checks = 0;
+  const check = () => {
+    checks += 1;
+    return spawnSync(process.execPath, [checker], {
+      cwd: fixture,
+      encoding: 'utf8',
+    });
+  };
   assert.equal(
     check().status,
     0,
@@ -261,8 +267,51 @@ try {
     /CSP must not allow network/,
     'a CSP allowing network access',
   );
+  for (const field of [
+    'old_pin',
+    'new_pin',
+    'operation_permit',
+    'approval',
+    'recovery_journal_path',
+    'workflow_id',
+    'dispatch_capable',
+  ]) {
+    mutate(
+      'src-tauri/src/commands/mod.rs',
+      (text) =>
+        text.replace(
+          'pub struct FoundationStatus {',
+          `pub struct FoundationStatus {\n    ${field}: String,`,
+        ),
+      /unreviewed renderer field/,
+      `M4 authority field ${field}`,
+    );
+  }
+  mutate(
+    'crates/fido-worker-protocol/src/lib.rs',
+    (text) =>
+      text.replace(
+        'pub enum WorkerRequest {',
+        'pub enum WorkerRequest {\n    SetPin,',
+      ),
+    /must not add an executable mutation worker request/,
+    'executable SetPin worker request',
+  );
+  mutate(
+    'crates/fido-libfido2/src/lib.rs',
+    (text) => text + '\nunsafe extern "C" { fn fido_dev_set_pin(); }\n',
+    /must not declare or call authenticator mutation/,
+    'native PIN mutation FFI',
+  );
+  mutate(
+    'src/App.svelte',
+    (text) => text + '\n<script>let OperationPermit = true;</script>\n',
+    /authority or recovery data must not enter renderer/,
+    'renderer permit reference',
+  );
+  assert.equal(check().status, 0, 'All restored M4 fixtures must pass.');
   console.log(
-    'Renderer boundary regression checks passed (8 denied crates, command and permission allowlists, BooGooCypher separation).',
+    `Renderer boundary regression checks passed (${checks} checker executions; 8 denied crates, command/permission allowlists, service separation and M4 controls).`,
   );
 } finally {
   rmSync(fixture, { recursive: true, force: true });
