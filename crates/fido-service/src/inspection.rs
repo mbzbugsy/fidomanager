@@ -464,6 +464,54 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn generation_change_clears_the_correlated_cards_old_issue()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::activity::{ActivityOutcome, ActivityTracker};
+        use std::sync::Arc;
+
+        let mut store = InspectionStore::default();
+        let tracker = Arc::new(ActivityTracker::default());
+        let connected = store
+            .reconcile_connected(&[device(1, 1, 1), device(2, 1, 2)], WorkerGeneration(1))
+            .map_err(|_| "reconcile")?;
+        let claim = tracker.try_claim().ok_or("claim")?;
+        claim.target(connected[0]);
+        claim.finish(ActivityOutcome::Issue("Incorrect PIN. No retry was made."));
+        tracker.retain_connected(&connected);
+        assert!(tracker.view().issue.is_some());
+
+        // Expected retirement/backoff supplies no new identity: keep the same presentation.
+        let issue = tracker.view().issue;
+        store.proven_retirement(WorkerGeneration(1));
+        assert_eq!(
+            store.discovery_problem::<()>(crate::SupervisorError::RestartBackoff {
+                retry_after_ms: 100,
+            }),
+            crate::discovery_presentation::DiscoveryPresentation::Settling {}
+        );
+        assert_eq!(tracker.view().issue, issue);
+        let refreshed = store
+            .reconcile_connected(&[device(9, 1, 1), device(10, 1, 2)], WorkerGeneration(2))
+            .map_err(|_| "refresh")?;
+        assert_eq!(refreshed, connected);
+        tracker.retain_connected(&refreshed);
+        assert_eq!(tracker.view().issue, issue);
+
+        let changed = store
+            .reconcile_connected(&[device(9, 2, 1), device(10, 1, 2)], WorkerGeneration(2))
+            .map_err(|_| "reconcile")?;
+        assert_eq!(changed[0].handle, connected[0].handle);
+        assert_ne!(changed[0].generation, connected[0].generation);
+        assert_eq!(changed[1], connected[1]);
+        tracker.retain_connected(&changed);
+        assert!(
+            tracker.view().issue.is_none(),
+            "old generation's issue survived"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn generation_disconnect_reconnect_and_discovery_uncertainty()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut store = InspectionStore::default();

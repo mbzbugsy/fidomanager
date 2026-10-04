@@ -89,6 +89,7 @@ const appHtml = (
   boogoocypher?: 'checking' | 'online' | 'offline',
   activity?: Partial<InspectionActivity>,
   discoveryState: 'fresh' | 'settling' | 'unavailable' = 'fresh',
+  generations: string[] = [],
 ) =>
   render(App, {
     props: {
@@ -101,6 +102,7 @@ const appHtml = (
               reviewedLibfido2Baseline: '1.17.0',
               inspectionActivity: {
                 device: null,
+                generation: null,
                 phase: null,
                 issue: null,
                 notice: null,
@@ -116,7 +118,7 @@ const appHtml = (
           devices: inspections.map((inspection, i) => ({
             inspection,
             handle: `opaque-device-${i}`,
-            generation: '1',
+            generation: generations[i] ?? '1',
             displayName: 'Thetis',
             displayDetail: `USB · Key ${i + 1}`,
             vendorId: 1,
@@ -396,6 +398,7 @@ describe('inspection activity presentation', () => {
     const result = flat(
       appHtml([none, inspected(1), none], undefined, {
         device: 'opaque-device-0',
+        generation: '1',
         phase: 'waiting_for_pin',
       }),
     );
@@ -412,6 +415,7 @@ describe('inspection activity presentation', () => {
     const result = flat(
       appHtml([inspected(1)], undefined, {
         device: 'opaque-device-0',
+        generation: '1',
         phase: 'reading_credentials',
       }),
     );
@@ -424,11 +428,72 @@ describe('inspection activity presentation', () => {
     const result = flat(
       appHtml([none], undefined, {
         device: 'some-other-handle',
+        generation: '1',
         phase: 'waiting_for_pin',
       }),
     );
     expect(result).not.toContain('Waiting for PIN…');
     expect(result).toContain('Not inspected');
+  });
+  it('cached issues for the old generation do not appear on the same handle in a newer generation', () => {
+    for (const message of [
+      'Incorrect PIN. No retry was made.',
+      'The PIN prompt timed out. No retry was made.',
+    ]) {
+      const activity = {
+        issue: { device: 'opaque-device-0', generation: '1', message },
+      };
+      const same = flat(appHtml([none, inspected(1)], undefined, activity));
+      expect(same).toContain(message);
+      const newer = flat(
+        appHtml([none, inspected(1)], undefined, activity, 'fresh', ['2', '1']),
+      );
+      expect(newer).not.toContain(message);
+      expect(newer.match(/class="device-card"/g)?.length).toBe(2);
+      expect(newer).toContain('Not inspected');
+      expect(newer).toContain('example.com');
+      expect(newer).not.toContain(
+        'Security key scanning is temporarily unavailable.',
+      );
+    }
+  });
+  it('cached active phases cannot hide the inventory of a newer generation', () => {
+    for (const phase of ['waiting_for_pin', 'reading_credentials'] as const) {
+      const result = flat(
+        appHtml(
+          [inspected(1)],
+          undefined,
+          {
+            device: 'opaque-device-0',
+            generation: '1',
+            phase,
+          },
+          'fresh',
+          ['2'],
+        ),
+      );
+      expect(result).not.toContain('Waiting for PIN…');
+      expect(result).not.toContain('Reading credentials…');
+      expect(result).toContain('example.com');
+      expect(result).toContain('class="device-card"');
+    }
+  });
+  it('matches activity on the exact newer generation without affecting the other key', () => {
+    const message = 'Incorrect PIN. No retry was made.';
+    const result = flat(
+      appHtml(
+        [none, inspected(1)],
+        undefined,
+        {
+          issue: { device: 'opaque-device-0', generation: '2', message },
+        },
+        'fresh',
+        ['2', '1'],
+      ),
+    );
+    expect(result.match(/Incorrect PIN/g)?.length).toBe(1);
+    expect(result).toContain('example.com');
+    expect(result.match(/class="device-card"/g)?.length).toBe(2);
   });
   it('success returns to the normal inventory in place with a small confirmation', () => {
     const result = flat(
@@ -460,6 +525,7 @@ describe('inspection activity presentation', () => {
       appHtml([none, none], undefined, {
         issue: {
           device: 'opaque-device-1',
+          generation: '1',
           message: 'Incorrect PIN. No retry was made.',
         },
       }),
@@ -557,7 +623,7 @@ describe('typed discovery continuity', () => {
       'waiting_for_pin',
       'reading_credentials',
     ] as const) {
-      const activity = { device: 'opaque-device-0', phase };
+      const activity = { device: 'opaque-device-0', generation: '1', phase };
       const fresh = flat(appHtml([inspected(1), none], undefined, activity));
       const settling = flat(
         appHtml([inspected(1), none], undefined, activity, 'settling'),
@@ -633,16 +699,22 @@ describe('typed discovery continuity', () => {
     const steps = [
       appHtml([none, inspected(1)], undefined, {
         device: 'opaque-device-0',
+        generation: '1',
         phase: 'waiting_for_pin',
       }),
       appHtml([none, inspected(1)], undefined, {
         device: 'opaque-device-0',
+        generation: '1',
         phase: 'reading_credentials',
       }),
       appHtml(
         [none, inspected(1)],
         undefined,
-        { device: 'opaque-device-0', phase: 'reading_credentials' },
+        {
+          device: 'opaque-device-0',
+          generation: '1',
+          phase: 'reading_credentials',
+        },
         'settling',
       ),
       appHtml([inspected(2), inspected(1)], undefined, {
@@ -682,7 +754,9 @@ describe('operation-local issues during settling', () => {
       'The security key PIN is blocked.',
       'Credential inspection timed out. Try again.',
     ]) {
-      const activity = { issue: { device: 'opaque-device-0', message } };
+      const activity = {
+        issue: { device: 'opaque-device-0', generation: '1', message },
+      };
       const fresh = appHtml([none, inspected(1)], undefined, activity);
       const settling = appHtml(
         [none, inspected(1)],

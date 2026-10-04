@@ -98,13 +98,8 @@ pub async fn list_authenticators(
         let inventory_devices = store
             .reconcile_connected(&snapshot.devices, worker)
             .map_err(|_| ())?;
-        // A remembered problem belongs to a connected key's card; drop it when that key is gone.
-        activity.retain_connected(
-            &inventory_devices
-                .iter()
-                .map(|device| device.handle)
-                .collect::<Vec<_>>(),
-        );
+        // Card continuity does not carry activity/problems across a connected generation.
+        activity.retain_connected(&inventory_devices);
         let presentations =
             fido_service::presentation::authenticator_presentations(&snapshot.devices);
         // Keep history only for uniquely identified currently connected macOS IORegistry entries.

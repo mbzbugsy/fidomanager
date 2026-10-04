@@ -17,7 +17,7 @@ use serde::Serialize;
 
 use crate::AdmissionError;
 use crate::authentication::{AuthenticationResult, Progress, Status};
-use crate::inspection::DisplayDeviceHandle;
+use crate::inspection::InventoryDevice;
 use fido_core::inventory::InspectionError;
 
 pub const REFRESHED: &str = "Credentials refreshed";
@@ -48,6 +48,7 @@ pub enum NoticeTone {
 #[serde(rename_all = "camelCase")]
 pub struct DeviceIssue {
     pub device: String,
+    pub generation: String,
     pub message: &'static str,
 }
 
@@ -59,12 +60,13 @@ pub struct ActivityNotice {
     pub message: &'static str,
 }
 
-/// The whole renderer-facing shape. Only display handles (already present in the device list) and
-/// fixed text cross; no secret, identity or authority.
+/// The whole renderer-facing shape. Only display handles and connected generations (already in
+/// the device list) plus fixed text cross; no secret, native identity or authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivityView {
     pub device: Option<String>,
+    pub generation: Option<String>,
     pub phase: Option<ActivityPhase>,
     pub issue: Option<DeviceIssue>,
     pub notice: Option<ActivityNotice>,
@@ -81,9 +83,10 @@ pub enum ActivityOutcome {
 #[derive(Default)]
 struct State {
     claimed: bool,
-    target: Option<DisplayDeviceHandle>,
+    target: Option<InventoryDevice>,
+    target_invalidated: bool,
     phase: Option<ActivityPhase>,
-    issue: Option<(DisplayDeviceHandle, &'static str)>,
+    issue: Option<(InventoryDevice, &'static str)>,
     notice: Option<(u64, NoticeTone, &'static str)>,
     revision: u64,
 }
@@ -109,6 +112,7 @@ impl ActivityTracker {
         }
         state.claimed = true;
         state.target = None;
+        state.target_invalidated = false;
         state.phase = None;
         Some(StartClaim {
             tracker: Arc::clone(self),
@@ -119,9 +123,18 @@ impl ActivityTracker {
         self.lock().claimed
     }
 
-    /// Forget a remembered problem for a key that is no longer connected.
-    pub fn retain_connected(&self, connected: &[DisplayDeviceHandle]) {
+    /// Forget generation-local presentation when its exact connected identity is gone.
+    /// Only fresh reconciliation calls this; a proven settling gap preserves presentation.
+    pub fn retain_connected(&self, connected: &[InventoryDevice]) {
         let mut state = self.lock();
+        if state
+            .target
+            .is_some_and(|device| !connected.contains(&device))
+        {
+            state.target = None;
+            state.phase = None;
+            state.target_invalidated = true;
+        }
         if state
             .issue
             .is_some_and(|(device, _)| !connected.contains(&device))
@@ -133,10 +146,12 @@ impl ActivityTracker {
     pub fn view(&self) -> ActivityView {
         let state = self.lock();
         ActivityView {
-            device: state.target.map(DisplayDeviceHandle::as_wire),
+            device: state.target.map(|device| device.handle.as_wire()),
+            generation: state.target.map(|device| device.generation.0.to_string()),
             phase: state.target.and(state.phase),
             issue: state.issue.map(|(device, message)| DeviceIssue {
-                device: device.as_wire(),
+                device: device.handle.as_wire(),
+                generation: device.generation.0.to_string(),
                 message,
             }),
             notice: state
@@ -157,9 +172,10 @@ pub struct StartClaim {
 
 impl StartClaim {
     /// The key this attempt is about. Clears that key's previous problem.
-    pub fn target(&self, device: DisplayDeviceHandle) {
+    pub fn target(&self, device: InventoryDevice) {
         let mut state = self.tracker.lock();
         state.target = Some(device);
+        state.target_invalidated = false;
         if state.issue.is_some_and(|(d, _)| d == device) {
             state.issue = None;
         }
@@ -176,6 +192,11 @@ impl StartClaim {
     /// no key was resolved yet) and free the slot.
     pub fn finish(self, outcome: ActivityOutcome) {
         let mut state = self.tracker.lock();
+        // A late result for an invalidated generation must not become a global notice or attach
+        // to its replacement card. The claim still releases normally; no authority is affected.
+        if state.target_invalidated {
+            return;
+        }
         let target = state.target;
         match (outcome, target) {
             (ActivityOutcome::Refreshed, _) => {
@@ -266,12 +287,17 @@ pub fn outcome_for(result: &AuthenticationResult) -> ActivityOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fido_core::DeviceGeneration;
     use fido_core::inventory::InspectionError as E;
 
-    fn device(raw: u128) -> DisplayDeviceHandle {
+    fn device(raw: u128) -> InventoryDevice {
         // The wire form is the only public constructor surface; round-trip it.
         let wire = format!("\"{raw:032x}\"");
-        serde_json::from_str(&wire).unwrap_or_else(|_| panic!("display handle wire form"))
+        InventoryDevice {
+            handle: serde_json::from_str(&wire)
+                .unwrap_or_else(|_| panic!("display handle wire form")),
+            generation: DeviceGeneration(1),
+        }
     }
 
     fn result(status: Status) -> AuthenticationResult {
@@ -403,7 +429,7 @@ mod tests {
         assert_eq!(tracker.view().device, None);
         assert_eq!(tracker.view().phase, None);
         claim.target(device(7));
-        assert_eq!(tracker.view().device, Some(device(7).as_wire()));
+        assert_eq!(tracker.view().device, Some(device(7).handle.as_wire()));
         assert_eq!(tracker.view().phase, Some(ActivityPhase::WaitingForPin));
         claim.progress(Progress::PinSubmitted);
         assert_eq!(
@@ -458,7 +484,7 @@ mod tests {
         let issue = tracker.view().issue;
         assert_eq!(
             issue.as_ref().map(|i| i.device.clone()),
-            Some(device(7).as_wire())
+            Some(device(7).handle.as_wire())
         );
         assert_eq!(
             tracker.view().notice,
@@ -482,6 +508,81 @@ mod tests {
         claim.target(device(8));
         assert!(tracker.view().issue.is_none());
         drop(claim);
+    }
+
+    #[test]
+    fn an_unrelated_generation_change_preserves_the_exact_keys_issue() {
+        let tracker = Arc::new(ActivityTracker::default());
+        let claim = tracker.try_claim().unwrap_or_else(|| panic!("claim"));
+        claim.target(device(7));
+        claim.finish(ActivityOutcome::Issue("Incorrect PIN. No retry was made."));
+        let issue = tracker.view().issue;
+        let newer_other_key = InventoryDevice {
+            generation: DeviceGeneration(2),
+            ..device(8)
+        };
+        tracker.retain_connected(&[device(7), newer_other_key]);
+        assert_eq!(tracker.view().issue, issue);
+
+        let claim = tracker.try_claim().unwrap_or_else(|| panic!("claim"));
+        claim.target(newer_other_key);
+        assert_eq!(tracker.view().issue, issue);
+        claim.finish(ActivityOutcome::Cancelled);
+        assert_eq!(tracker.view().issue, issue);
+    }
+
+    #[test]
+    fn targeting_a_different_generation_does_not_clear_an_exact_generations_issue() {
+        let tracker = Arc::new(ActivityTracker::default());
+        let newer = InventoryDevice {
+            generation: DeviceGeneration(2),
+            ..device(7)
+        };
+        let claim = tracker.try_claim().unwrap_or_else(|| panic!("claim"));
+        claim.target(newer);
+        claim.finish(ActivityOutcome::Issue("Incorrect PIN. No retry was made."));
+        let issue = tracker.view().issue;
+        let claim = tracker.try_claim().unwrap_or_else(|| panic!("claim"));
+        claim.target(device(7));
+        assert_eq!(tracker.view().issue, issue);
+        drop(claim);
+        let claim = tracker.try_claim().unwrap_or_else(|| panic!("claim"));
+        claim.target(newer);
+        assert!(tracker.view().issue.is_none());
+    }
+
+    #[test]
+    fn a_generation_change_hides_active_state_and_discards_its_late_outcome() {
+        for outcome in [
+            ActivityOutcome::Issue("The PIN prompt timed out. No retry was made."),
+            ActivityOutcome::Cancelled,
+            ActivityOutcome::Refreshed,
+        ] {
+            let tracker = Arc::new(ActivityTracker::default());
+            let claim = tracker.try_claim().unwrap_or_else(|| panic!("claim"));
+            claim.target(device(7));
+            claim.progress(Progress::PinRequested);
+            tracker.retain_connected(&[device(7), device(8)]);
+            assert_eq!(tracker.view().phase, Some(ActivityPhase::WaitingForPin));
+            tracker.retain_connected(&[
+                InventoryDevice {
+                    generation: DeviceGeneration(2),
+                    ..device(7)
+                },
+                device(8),
+            ]);
+            claim.progress(Progress::PinSubmitted);
+            assert_eq!((tracker.view().device, tracker.view().phase), (None, None));
+            assert!(
+                tracker.is_busy(),
+                "presentation invalidation cannot release the start"
+            );
+            claim.finish(outcome);
+            assert!(tracker.view().issue.is_none());
+            assert!(tracker.view().notice.is_none());
+            assert!(!tracker.is_busy());
+            assert!(tracker.try_claim().is_some());
+        }
     }
 
     #[test]
@@ -560,11 +661,32 @@ mod tests {
             json,
             serde_json::json!({
                 "device": format!("{:032x}", 0xabu128),
+                "generation": "1",
                 "phase": "reading_credentials",
                 "issue": null,
                 "notice": null,
             })
         );
         drop(claim);
+        let claim = tracker.try_claim().unwrap_or_else(|| panic!("claim"));
+        claim.target(InventoryDevice {
+            generation: DeviceGeneration(2),
+            ..device(0xab)
+        });
+        claim.finish(ActivityOutcome::Issue("Incorrect PIN. No retry was made."));
+        assert_eq!(
+            serde_json::to_value(tracker.view()).unwrap_or_default(),
+            serde_json::json!({
+                "device": null,
+                "generation": null,
+                "phase": null,
+                "issue": {
+                    "device": format!("{:032x}", 0xabu128),
+                    "generation": "2",
+                    "message": "Incorrect PIN. No retry was made.",
+                },
+                "notice": null,
+            })
+        );
     }
 }

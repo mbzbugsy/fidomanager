@@ -111,12 +111,20 @@
 
   function activityFor(
     handle: string,
+    generation: string,
     activity: InspectionActivity | undefined,
   ): DeviceActivity {
-    if (activity?.device === handle && activity.phase) {
+    if (
+      activity?.device === handle &&
+      activity.generation === generation &&
+      activity.phase
+    ) {
       return { state: activity.phase };
     }
-    if (activity?.issue?.device === handle) {
+    if (
+      activity?.issue?.device === handle &&
+      activity.issue.generation === generation
+    ) {
       return { state: 'attention', message: activity.issue.message };
     }
     return { state: 'idle' };
@@ -393,6 +401,7 @@
                 inspection={device.inspection}
                 activity={activityFor(
                   device.handle,
+                  device.generation,
                   foundation?.inspectionActivity,
                 )}
               />

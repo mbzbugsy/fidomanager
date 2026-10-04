@@ -28,8 +28,9 @@ export type InspectionDisplay =
 // Presentation-only activity of the native credential inspection (fixed backend wording).
 export type InspectionActivity = {
   device: string | null;
+  generation: string | null;
   phase: 'waiting_for_pin' | 'reading_credentials' | null;
-  issue: { device: string; message: string } | null;
+  issue: { device: string; generation: string; message: string } | null;
   notice: {
     revision: string;
     tone: 'success' | 'problem';

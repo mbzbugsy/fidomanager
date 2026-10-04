@@ -199,6 +199,7 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
                 claim.finish(ActivityOutcome::Issue(activity::INVENTORY_UNAVAILABLE));
                 return;
             };
+            state.activity.retain_connected(&devices);
             devices
         };
         let Some(index) = snapshot
@@ -227,7 +228,7 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
             return;
         }
         // Presentation only: attribute the running attempt to this key's card.
-        claim.target(inventory_device.handle);
+        claim.target(inventory_device);
         let device = &snapshot.devices[index];
         let handle = device.handle;
         let history_id = device.verification_history_id;
