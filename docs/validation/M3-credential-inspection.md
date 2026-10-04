@@ -284,7 +284,60 @@ Full deterministic correction validation passed on macOS:
 - No native library/FFI/linkage implementation changed; the reviewed private build
   and allocation limits remain unchanged.
 
-**The macOS defect is not yet claimed fixed: hardware revalidation is pending.**
+### macOS hardware revalidation of the pushed correction
+
+The operator re-tested the built application at
+`3e7339835d50f375b5fbc619b6ab9f54f3905ec1` on 2026-10-04 with both existing
+USB keys connected. Build/run commands were:
+
+```text
+pnpm build
+cargo build -p fido-worker --locked
+cargo build -p fidomanager-app --features tauri/custom-protocol --locked
+target/debug/fidomanager-app > /tmp/fidomanager-settling-hardware.log 2>&1
+```
+
+The standalone worker linkage verification passed all 16 reviewed credman symbols
+against the private pinned patched library, with no dynamic libfido2 dependency.
+The captured runtime log contains fixed categories and booleans only, with no PIN,
+credential IDs, RP hashes, account identifiers, native device paths or operation IDs.
+
+- Correct PIN submission showed Reading credentials…; the inventory updated in
+  place while both cards stayed visible. No discovery banner, full-page state or
+  other settling interruption appeared.
+- A controlled single menu selection produced exactly one start and one PIN
+  sheet, and Waiting for PIN… was visible. All native Inspect menu items were
+  greyed while the sheet was open. That sheet reached its 30-second timeout before
+  Cancel could be clicked; its cleanup remained proven.
+- A separate fresh inspection was explicitly cancelled. Both cards stayed visible
+  and returned quietly to their normal state, without discovery interruption or
+  an Authentication result message.
+- The operator reported no generic Authentication result message or internal
+  wording during successful inspections.
+- BooGooCypher online was visible in the informational system-status area. Its
+  backend/renderer separation remains covered by deterministic boundary checks;
+  no network outage was induced in this hardware run.
+- After the primary checks, Key 1 and then Key 2 were inspected with their correct
+  PINs. Both inventories remained visible simultaneously with Complete and Exact,
+  and the card grid remained continuous.
+
+The controlled log segment contains four starts and four sheets: one timeout, one
+explicit Cancel and two successful key reads. The initial successful submission
+and its visual continuity confirmation preceded that segment. No duplicate-start
+suppression or admission refusal occurred anywhere in the application run.
+
+Across the entire run, all ten terminal outcomes proved worker quiescence and
+prompt teardown. Five successful inspections also proved PUAT cleared, native
+device closed/freed, Complete/exact inventories and no mutation. Preliminary
+activity outside the controlled segment included a WrongPin outcome. The guided
+test did not request or include a wrong-PIN experiment, and no wrong-PIN UI behavior
+is claimed verified here. That outcome also proved PUAT
+clearance and cleanup. No cleanup failure or mutation was logged.
+
+**The reported success/Cancel card-disappearance defect did not recur on the
+pushed correction. All required hardware revalidation checks passed; no new defect
+was found.** The following documentation-only commit does not change the tested
+application source. PR #25 remains Draft for independent review.
 
 ## Inspection start suppression and activity presentation
 
