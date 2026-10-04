@@ -34,8 +34,11 @@ service gate remains authoritative with no queue and the existing shared cooldow
 AppKit sheets run on the main thread and display the exact trusted label, operation
 and persistent physical-key effect. Set collects new/confirmation; Change collects
 current/new/confirmation and shows remaining retries before submission. Exactly
-one retry requires acknowledgement. Cancel is the default Return action and first
-responder, and the actual attached sheet/default cell is checked at presentation.
+one retry requires acknowledgement. The rows read top-to-bottom as current/new/
+confirmation for Change and new/confirmation for Set, with equal field widths.
+Input focus starts on current PIN for Change or new PIN for Set; recovery starts
+on Cancel. Cancel remains the default Return action, and the actual attached
+sheet/default cell is checked at presentation.
 Mutation/recovery action is initially disabled for 500 ms. Confirmation must match;
 a new PIN must have at least four Unicode scalar values within the existing
 4–63-byte valid NUL-free UTF-8 bounds. Authenticator policy may impose a supported
@@ -199,12 +202,34 @@ recorded in the Draft PR. This committed report does not claim an unobserved run
 **Change PIN hardware validation: NOT PERFORMED.**
 **Recovery hardware fault scenarios: NOT PERFORMED.**
 
-No real PIN was entered or transported, no PIN attempt or mutation was performed,
-and no hardware success/rejection/uncertainty, UI appearance, retry category,
-physical-device identity, journal transition, teardown or quiescence is claimed.
-Native runtime compilation, exact-symbol attribution and synthetic fixtures are
-software evidence only. No dedicated unconfigured key has been selected; Set PIN
-must remain NOT PERFORMED unless one is already available and explicitly authorized.
+Operator preparation at `5df83d5fbaaac29ed3e5b242a7c1c97b9fbd9940`:
+
+- The operator selected the connected small Thetis key and explicitly authorized
+  one persistent Change PIN. Read-only discovery reported Security Key(F829),
+  Thetis, USB, vendor/product `0x1ea8`/`0xf829`, and `clientPin=true`.
+- The operator first pressed Authenticate for credential inspection. That result
+  was not independently observed; this was not a Change PIN submission.
+- An operator-supplied screenshot of the empty Change PIN sheet confirmed the
+  exact trusted key, operation, persistent-change text and normal retry category
+  (8 remaining). It exposed reversed field order, unequal widths and initial
+  focus on confirmation. These layout issues were corrected before submission.
+- The operator reported that the untouched sheet closed itself, consistent with
+  expiry. No mutation submission was reported, no saved mutation record was
+  present, and no native mutation outcome or journal transition is claimed.
+- Computer Use was denied Terminal access and macOS screen capture permission;
+  live prompt teardown/quiescence and the inspection result were not independently
+  observed. The screenshot establishes only the visible pre-submission UI.
+- The operator also reported the generic Dock icon. The icon assets/configuration
+  are unchanged; the test executable used `tauri/custom-protocol` without an app
+  bundle. Tauri 2.12.0 installs its embedded Dock icon only in development mode.
+  The next operator launch will use the normal development build and local Vite
+  server; no icon asset or packaging change is needed. Visual confirmation of
+  the corrected layout/focus and restored icon remains pending.
+
+No real mutation success/rejection/uncertainty is claimed. Native runtime
+compilation, exact-symbol attribution and synthetic fixtures are software evidence
+only. No dedicated unconfigured key has been selected; Set PIN must remain NOT
+PERFORMED unless one is already available and explicitly authorized.
 
 After deterministic tests/builds/available CI are green and the Draft PR exists,
 work must stop in interactive operator mode. Give one simple human action at a

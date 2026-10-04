@@ -258,7 +258,18 @@ unsafe fn present_sheet(
     approve.setEnabled(matches!(purpose, Purpose::Inspection));
     let input = NSSecureTextField::initWithFrame(
         NSSecureTextField::alloc(mtm),
-        NSRect::new(NSPoint::new(0., 0.), NSSize::new(300., 26.)),
+        NSRect::new(
+            // AppKit accessory coordinates increase upwards: current is the top row.
+            NSPoint::new(
+                0.,
+                if matches!(purpose, Purpose::Mutation(PinOperation::ChangePin)) {
+                    60.
+                } else {
+                    0.
+                },
+            ),
+            NSSize::new(340., 26.),
+        ),
     );
     input.setPlaceholderString(Some(&NSString::from_str("Security key PIN")));
     let last_retry_ack = if match purpose {
@@ -290,12 +301,25 @@ unsafe fn present_sheet(
         field
     };
     let new_input = mutation.then(|| field("New PIN", 30.));
-    let confirm_input = mutation.then(|| field("Confirm new PIN", 60.));
+    let confirm_input = mutation.then(|| field("Confirm new PIN", 0.));
     let accessory = NSView::initWithFrame(
         NSView::alloc(mtm),
         NSRect::new(
             NSPoint::new(0., 0.),
-            NSSize::new(340., if mutation { 120. } else { 60. }),
+            NSSize::new(
+                340.,
+                if mutation {
+                    if last_retry_ack.is_some() {
+                        120.
+                    } else if matches!(purpose, Purpose::Mutation(PinOperation::ChangePin)) {
+                        90.
+                    } else {
+                        60.
+                    }
+                } else {
+                    60.
+                },
+            ),
         ),
     );
     if !matches!(purpose, Purpose::Recovery(_)) {
@@ -327,7 +351,19 @@ unsafe fn present_sheet(
     }
     alert.setAccessoryView(Some(&accessory));
     alert.layout();
-    alert.window().makeFirstResponder(Some(&cancel));
+    let initial_input = match purpose {
+        Purpose::Mutation(PinOperation::SetPin) => new_input.as_ref(),
+        Purpose::Recovery(_) => None,
+        _ => Some(&input),
+    };
+    // Set the initial responder before presentation; NSAlert may otherwise choose a field.
+    if let Some(field) = initial_input {
+        alert.window().setInitialFirstResponder(Some(field));
+    } else {
+        alert.window().setInitialFirstResponder(Some(&cancel));
+    }
+    // Retain only the native control, never its value, across ACTIVE ownership transfer.
+    let initial_input = initial_input.cloned();
     let tick = RcBlock::new(move |_: NonNull<NSTimer>| {
         poll(binding);
     });
@@ -375,6 +411,13 @@ unsafe fn present_sheet(
         complete(binding, Some(response));
     });
     alert.beginSheetModalForWindow_completionHandler(&parent, Some(&completion));
+    // Presentation can change first responder. Apply input focus to the actual sheet while
+    // keeping Cancel as its default Return button; approval is never initially focused.
+    if let Some(field) = &initial_input {
+        alert.window().makeFirstResponder(Some(field));
+    } else {
+        alert.window().makeFirstResponder(Some(&cancel));
+    }
     let associated = alert
         .window()
         .sheetParent()
