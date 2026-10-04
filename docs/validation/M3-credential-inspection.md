@@ -178,8 +178,8 @@ Observed from the production native menu and AppKit sheet:
 - Operator confirmed Thetis connected and the Authenticators screen visible.
 - Native selection prepared CredMan; sheet ran on main thread with secure control,
   window modality and default Cancel.
-- One normal PIN submission acquired attached PUAT. Exactly one read-only inspection
-  reached PUAT acquisition; no wrong-PIN, automatic PIN retry or mutation experiment ran.
+- One guided normal PIN submission acquired attached PUAT for the requested Thetis
+  inspection; no wrong-PIN, automatic PIN retry or mutation experiment ran.
 - Metadata, RP enumeration and credential enumeration all returned successfully.
 - Typed snapshot: Complete; total kind: Exact. No account identifiers/counts are recorded.
 - Native PUAT cleared, device closed/freed, prompt detached/torn down, and worker quiescent
@@ -188,6 +188,16 @@ Observed from the production native menu and AppKit sheet:
 - A prior cancelled prompt and an expired prompt were both torn down and reaped before
   acquisition. These were not additional credential inspections.
 - No mutation command issued (read-only FFI surface and sanitized lifecycle evidence).
+
+After the guided run, the operator reported independently inspecting a second connected
+key. Sanitized logs show a second CredMan acquisition and successful metadata/RP/credential
+reads, Complete/Exact snapshot, clear/close/free, prompt teardown and worker retirement/reap.
+No extra hardware operation was requested by Codex. Both keys' display-history PIN-check
+markers may remain, but InspectionStore keeps one latest selected-authenticator snapshot:
+a second inspection replaces the first; identical RP/app text never merges credential
+sets across keys. The operator's report that only the latest key inventory appears is
+expected for this snapshot scope. No mutation was issued in either observed inspection.
+
 
 Initial direct debug launch showed a blank window because its configured development
 URL had no frontend server. The hardware app was rebuilt using
