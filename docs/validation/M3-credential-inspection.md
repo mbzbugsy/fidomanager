@@ -141,8 +141,8 @@ ambiguous markers cannot preserve inventories across retirement. Unexpected work
 replacement, discovery failure or unproven quiescence clears the store.
 
 During the orderly retirement/refresh gap, publication and identity resolution are
-suspended. Normal restart backoff keeps dormant entries, with no DTO returned until
-fresh discovery verifies them. A retired or older worker cannot republish them.
+suspended. Normal restart backoff keeps dormant entries, with no inventory DTO returned until
+fresh discovery verifies them (only the data-free Settling presentation state is returned). A retired or older worker cannot republish them.
 Lock order is discovery then inspection throughout. Device cards and inspections
 are returned together in one coherent list_authenticators response; foundation_status
 retains only nonsensitive service status/notice fields.
@@ -209,6 +209,82 @@ Credential names: identical displayName/userName is shown once; differing values
 displayName primary and userName subdued; a single available value is shown alone; neither
 yields “Passkey”. Credential IDs and opaque CredentialHandles are never rendered (the
 handle remains only the internal list key).
+
+## Silent typed discovery settling correction (2026-10-04)
+
+### Hardware defect at `8f2d47b9b138323f0efabd7c212ce852b77fe543`
+
+The macOS operator observed the entire USB authenticator card grid briefly being
+replaced by “Discovery paused” / discovery unavailable after correct PIN submission,
+and reported the same behavior after clicking Cancel. All recorded attempts had
+proven prompt teardown and worker quiescence; successful reads also cleared PUAT
+and closed/freed the native device. This was a presentation/contract defect, not a
+failed native cleanup. The prior hardware verification stopped without patching.
+
+The backend already preserved dormant InspectionStore entries during a proven
+orderly retirement followed by RestartBackoff, but list_authenticators returned
+that expected gap as an untyped error string. App.svelte treated every rejection as
+discovery failure, cleared the displayed list and replaced its cards. Its error view
+also exposed “snapshot” and could forward “worker” wording.
+
+### Contract and fail-closed boundary
+
+The parameter-free list_authenticators now returns the reviewed tagged
+DiscoveryPresentation<AuthenticatorList>:
+
+```text
+{ state: "fresh", list: AuthenticatorList }
+{ state: "settling" }
+{ state: "unavailable" }
+```
+
+Only InspectionStore's backend-held proven-retirement marker plus the exact typed
+SupervisorError::RestartBackoff can classify a failed refresh as settling. That
+response has no device/credential identities, error text or authority. No renderer
+input can supply a classification, and no renderer error-string parsing is used.
+The existing discovery/store lock order and native operation binding are unchanged.
+A native selection arriving during that same gap uses the same classification; its
+unpresented cancellation must also prove quiescence or the store is cleared.
+
+Settling silently preserves the last trustworthy device presentation in exactly the
+same card grid. It introduces no banner, toast, empty state, message, busy indicator
+or Native service warning. Independent per-key inspection activity still updates the
+affected card and automatic polling continues. The next fresh manifest reconciles
+backend identities and replaces the list normally. Stored identity resolution and
+fresh inventory publication remain suspended during settling; retained renderer
+presentation cannot authorize an operation.
+
+Every other discovery error clears backend inventory/identity state and reports
+Unavailable. Lock poisoning, missing backend state or task failure also purge the
+store and return Unavailable, without exporting error text. The renderer then hides
+stale cards and shows concise security-key scanning wording. An unusable IPC response
+fails closed as well. Success, Cancel, wrong PIN, blocked PIN, timeout and other
+operation-local outcomes have no independent whole-view clearing path; teardown
+alone is not discovery failure.
+
+### Deterministic validation and hardware status
+
+Correction validation covers the exact proven-retirement/backoff classifier,
+uncertain errors purging the store even after retirement, hostile DTO fields,
+parameter-free classification ownership, unchanged native authorization, actual
+polling through settling/fresh/unavailable/IPC rejection, byte-identical silent
+settling rendering, per-key activity/issues, success/cancellation continuity and
+forbidden wording. The real-process two-key fixture checks that normal post-retirement
+backoff produces typed settling without reviving old native operation handles.
+
+Full deterministic correction validation passed on macOS:
+
+- cargo fmt --all --check and cargo clippy --workspace --all-targets --locked -- -D warnings.
+- cargo test --workspace --all-targets --locked: 284 passed, 0 failed, 0 ignored;
+  outside the sandbox for unchanged process-visibility containment tests.
+- Both renderer boundary scripts passed, including hostile classification inputs,
+  authority fields, raw-error contract and renderer string-parsing negative controls.
+- pnpm check: 0 errors / 0 warnings; pnpm test: 34 passed in 1 file.
+- pnpm build, pnpm exec prettier --check . and git diff --check passed.
+- No native library/FFI/linkage implementation changed; the reviewed private build
+  and allocation limits remain unchanged.
+
+**The macOS defect is not yet claimed fixed: hardware revalidation is pending.**
 
 ## Inspection start suppression and activity presentation
 

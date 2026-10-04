@@ -165,11 +165,18 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
         // rebound to another key. Other connected keys cannot change the selected target.
         let snapshot = match supervisor.refresh() {
             Ok(snapshot) => snapshot,
-            _ => {
+            Err(error) => {
                 if let Ok(mut store) = app.state::<AppState>().inspection.lock() {
-                    store.clear();
+                    // A native selection during a proven restart gap must not turn normal
+                    // teardown into discovery failure. This grants no operation authority.
+                    let _ = store.discovery_problem::<()>(error);
                 }
-                authority.cancel_unpresented(&mut supervisor, reservation);
+                let quiescent = authority.cancel_unpresented(&mut supervisor, reservation);
+                if quiescent != fido_service::inspection::ExecutionQuiescence::Quiescent {
+                    if let Ok(mut store) = app.state::<AppState>().inspection.lock() {
+                        store.clear();
+                    }
+                }
                 eprintln!("[authentication] selected key is unavailable");
                 claim.finish(ActivityOutcome::Issue(activity::KEY_UNAVAILABLE));
                 return;

@@ -410,6 +410,14 @@ fn two_inspected_inventories_survive_real_worker_retirement_and_cancel() -> Test
             assert!(supervisor.resolve_handle(device.handle).is_none());
         }
         store.proven_retirement(worker);
+        let settling_error = supervisor
+            .refresh()
+            .err()
+            .ok_or("expected restart settling")?;
+        assert_eq!(
+            store.discovery_problem::<()>(settling_error),
+            fido_service::discovery_presentation::DiscoveryPresentation::Settling {}
+        );
         if let Some(inventory) = result.inventory.take() {
             store
                 .replace(ids[selected], "Identical label".into(), inventory)

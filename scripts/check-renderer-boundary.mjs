@@ -149,6 +149,28 @@ if (
 
 // foundation_status retrieves a backend-created snapshot; it must never return authority.
 const commandSource = readFileSync('src-tauri/src/commands/mod.rs', 'utf8');
+// Discovery classification is backend-owned and carries no error text or authority.
+if (
+  !/pub async fn list_authenticators\([\s\S]*?\)\s*->\s*Result<DiscoveryPresentation<AuthenticatorList>, \(\)>/.test(
+    commandSource,
+  )
+) {
+  throw new Error(
+    'list_authenticators must return only the reviewed typed discovery presentation.',
+  );
+}
+const discoveryDto = readFileSync(
+  'crates/fido-service/src/discovery_presentation.rs',
+  'utf8',
+);
+const discoveryShape = discoveryDto
+  .match(/pub enum DiscoveryPresentation<T> \{([\s\S]*?)^\}/m)?.[1]
+  ?.replace(/\s/g, '');
+if (discoveryShape !== 'Fresh{list:T},Settling{},Unavailable{},') {
+  throw new Error(
+    'DiscoveryPresentation contains an unreviewed renderer field or state.',
+  );
+}
 const foundationFields = [
   ...(
     commandSource.match(/pub struct FoundationStatus \{([^}]+)\}/s)?.[1] ?? ''
@@ -247,6 +269,11 @@ const rendererFiles = listFiles(
 const invokedCommands = new Set();
 for (const file of rendererFiles) {
   const source = readFileSync(file, 'utf8');
+  if (/RestartBackoff/.test(source)) {
+    throw new Error(
+      `Renderer must not infer settling from backend error text: ${file}`,
+    );
+  }
   if (source.includes('@tauri-apps/api/event')) {
     throw new Error(
       `Renderer event API is not approved in Milestone 1: ${file}`,

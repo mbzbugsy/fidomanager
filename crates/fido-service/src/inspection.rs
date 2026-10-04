@@ -208,6 +208,22 @@ impl InspectionStore {
     pub fn awaiting_retired_worker(&self) -> bool {
         self.retired_worker.is_some()
     }
+    /// Classify a failed trusted refresh. Retained presentation grants no operation authority:
+    /// lookup/publication remain suspended until a fresh manifest reconciles this store.
+    pub fn discovery_problem<T>(
+        &mut self,
+        error: crate::SupervisorError,
+    ) -> crate::discovery_presentation::DiscoveryPresentation<T> {
+        use crate::discovery_presentation::DiscoveryPresentation;
+        if self.awaiting_retired_worker()
+            && matches!(error, crate::SupervisorError::RestartBackoff { .. })
+        {
+            DiscoveryPresentation::Settling {}
+        } else {
+            self.clear();
+            DiscoveryPresentation::Unavailable {}
+        }
+    }
     pub fn clear(&mut self) {
         self.entries.clear();
         self.connected.clear();
@@ -633,6 +649,86 @@ mod tests {
                 .is_err()
         );
         assert!(store.entries.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn only_proven_retirement_backoff_settles_without_reviving_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{SupervisorError, discovery_presentation::DiscoveryPresentation};
+        let mut store = InspectionStore::default();
+        let ds = [device(1, 1, 1), device(2, 1, 2)];
+        let ids = store
+            .reconcile_connected(&ds, WorkerGeneration(1))
+            .map_err(|_| "reconcile")?;
+        replace(&mut store, ids[0]);
+        replace(&mut store, ids[1]);
+        let old = snapshot(&store, ids[1]);
+        store.invalidate(ids[0]); // success or cancel begins by retiring only A's old view
+        store.proven_retirement(WorkerGeneration(1));
+        for _ in 0..2 {
+            assert_eq!(
+                store.discovery_problem::<()>(SupervisorError::RestartBackoff {
+                    retry_after_ms: 100
+                }),
+                DiscoveryPresentation::Settling {}
+            );
+            assert!(store.awaiting_retired_worker());
+            assert!(store.snapshot_for(ids[1]).is_none());
+            assert!(
+                store
+                    .resolve(
+                        ids[1].handle,
+                        ids[1].generation,
+                        &old.epoch,
+                        &old.rps[0].credentials[0].handle
+                    )
+                    .is_none()
+            );
+        }
+        let fresh = store
+            .reconcile_connected(&[device(3, 1, 1), device(4, 1, 2)], WorkerGeneration(2))
+            .map_err(|_| "fresh")?;
+        assert_eq!(ids, fresh);
+        assert!(store.snapshot_for(fresh[0]).is_none());
+        assert_eq!(old.epoch, snapshot(&store, fresh[1]).epoch);
+        assert!(!store.awaiting_retired_worker());
+        // An unrelated backoff after successful reconciliation has no continuity proof.
+        assert_eq!(
+            store.discovery_problem::<()>(SupervisorError::RestartBackoff {
+                retry_after_ms: 100
+            }),
+            DiscoveryPresentation::Unavailable {}
+        );
+        assert!(store.entries.is_empty());
+        Ok(())
+    }
+    #[test]
+    fn uncertain_discovery_errors_clear_even_after_orderly_retirement()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{SupervisorError, discovery_presentation::DiscoveryPresentation};
+        for error in [
+            SupervisorError::Discovery(crate::DiscoveryError::UnexpectedResponse),
+            SupervisorError::WorkerNotContained,
+            SupervisorError::CrashLoop {
+                retry_after_ms: 100,
+            },
+            SupervisorError::GenerationExhausted,
+            SupervisorError::InvalidDiscoveryPolicy,
+            SupervisorError::Stopped,
+        ] {
+            let mut store = InspectionStore::default();
+            let ids = store
+                .reconcile_connected(&[device(1, 1, 1)], WorkerGeneration(1))
+                .map_err(|_| "reconcile")?;
+            replace(&mut store, ids[0]);
+            store.proven_retirement(WorkerGeneration(1));
+            assert_eq!(
+                store.discovery_problem::<()>(error),
+                DiscoveryPresentation::Unavailable {}
+            );
+            assert!(store.entries.is_empty() && store.connected.is_empty());
+            assert!(!store.awaiting_retired_worker());
+        }
         Ok(())
     }
     #[test]

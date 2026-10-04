@@ -5,6 +5,7 @@ pub mod native_ui_spike;
 
 pub mod activity;
 pub mod authentication;
+pub mod discovery_presentation;
 pub mod inspection;
 pub mod presentation;
 

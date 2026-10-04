@@ -1,4 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import ts from 'typescript';
+import {
+  applyDiscovery,
+  type DiscoveryResult,
+  type DiscoveryView,
+} from '../src/discovery';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
@@ -30,6 +36,7 @@ const inventoryModule = `data:text/javascript;base64,${Buffer.from(code).toStrin
 const Inventory = (await import(inventoryModule)).default as Component<{
   inspection: InspectionDisplay;
 }>;
+const discoveryModule = `data:text/javascript;base64,${Buffer.from(ts.transpileModule(readFileSync(new URL('../src/discovery.ts', import.meta.url), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText).toString('base64')}`;
 // Supply a discovery snapshot to the actual App template in the SSR-only harness.
 // The production component and its backend-only invocation surface stay unchanged.
 const appSource = readFileSync(
@@ -49,8 +56,8 @@ const appSource = readFileSync(
     "const logoUrl = 'logo.png';",
   )
   .replace(
-    'let snapshot: AuthenticatorList | null = null;',
-    'export let snapshot: AuthenticatorList | null = null;',
+    'let discovery: DiscoveryView<AuthenticatorList>',
+    'export let discovery: DiscoveryView<AuthenticatorList>',
   )
   .replace(
     "let boogoocypher: BooGooCypherStatus = 'checking';",
@@ -68,15 +75,20 @@ const appCode = compile(appSource, {
   (_, quote, name) =>
     `${quote}${pathToFileURL(require.resolve(name)).href}${quote}`,
 );
+const resolvedAppCode = appCode.replace(
+  "'./discovery'",
+  `'${discoveryModule}'`,
+);
 const App = (
   await import(
-    `data:text/javascript;base64,${Buffer.from(appCode).toString('base64')}`
+    `data:text/javascript;base64,${Buffer.from(resolvedAppCode).toString('base64')}`
   )
 ).default;
 const appHtml = (
   inspections: InspectionDisplay[],
   boogoocypher?: 'checking' | 'online' | 'offline',
   activity?: Partial<InspectionActivity>,
+  discoveryState: 'fresh' | 'settling' | 'unavailable' = 'fresh',
 ) =>
   render(App, {
     props: {
@@ -97,29 +109,32 @@ const appHtml = (
             },
           }
         : {}),
-      snapshot: {
-        enumerationEpoch: '1',
-        devices: inspections.map((inspection, i) => ({
-          inspection,
-          handle: `opaque-device-${i}`,
-          generation: '1',
-          displayName: 'Thetis',
-          displayDetail: `USB · Key ${i + 1}`,
-          vendorId: 1,
-          productId: 2,
-          manufacturer: 'Thetis',
-          product: 'Same label',
-          aaguid: null,
-          versions: [],
-          extensions: [],
-          transports: ['USB'],
-          options: [],
-          maxMessageSize: null,
-          firmwareVersion: null,
-          readStatus: 'ready',
-          freshness: 'fresh',
-          pinCheckPassed: false,
-        })),
+      discovery: {
+        state: discoveryState,
+        list: {
+          enumerationEpoch: '1',
+          devices: inspections.map((inspection, i) => ({
+            inspection,
+            handle: `opaque-device-${i}`,
+            generation: '1',
+            displayName: 'Thetis',
+            displayDetail: `USB · Key ${i + 1}`,
+            vendorId: 1,
+            productId: 2,
+            manufacturer: 'Thetis',
+            product: 'Same label',
+            aaguid: null,
+            versions: [],
+            extensions: [],
+            transports: ['USB'],
+            options: [],
+            maxMessageSize: null,
+            firmwareVersion: null,
+            readStatus: 'ready',
+            freshness: 'fresh',
+            pinCheckPassed: false,
+          })),
+        },
       },
     },
   }).body;
@@ -485,6 +500,204 @@ describe('inspection activity presentation', () => {
       );
       expect(result).toContain(text);
       expect(result).not.toContain('Not inspected');
+    }
+  });
+});
+
+describe('typed discovery continuity', () => {
+  const flat = (text: string) =>
+    text.replace(/<!--.*?-->/g, '').replace(/\s+/g, ' ');
+  const none: InspectionDisplay = { state: 'not_inspected' };
+  const forbidden =
+    /workflow|admission|cooldown|recovery barrier|acquisition|binding|puat|worker|snapshot/i;
+  // Execute the actual polling function with a fake parameter-free IPC and scheduler.
+  const pollBody = appSource.match(
+    /  async function refreshDevices[\s\S]*?(?=  function refreshNow)/,
+  )?.[0];
+  if (!pollBody) throw new Error('Missing actual App polling function');
+  const pollModule = ts.transpileModule(
+    `
+    let discovery = initial;
+    let refreshing = false, stopped = false, manualScanning = false, lastScan = null, timer = null;
+    const pollDelayMs = 1000;
+    ${pollBody}
+    return { refresh: refreshDevices, view: () => discovery };
+  `,
+    { compilerOptions: { target: ts.ScriptTarget.ES2022 } },
+  ).outputText;
+  function harness(results: (DiscoveryResult<string[]> | Error)[]) {
+    const callbacks: (() => Promise<void>)[] = [];
+    const invoke = vi.fn(async () => {
+      const result = results.shift();
+      if (result instanceof Error) throw result;
+      if (!result) throw new Error('No IPC result');
+      return result;
+    });
+    const create = new Function(
+      'invoke',
+      'applyDiscovery',
+      'setTimeout',
+      'initial',
+      pollModule,
+    );
+    const poll = create(
+      invoke,
+      applyDiscovery,
+      (callback: () => Promise<void>) => {
+        callbacks.push(callback);
+        return 1;
+      },
+      { state: 'starting', list: null },
+    ) as { refresh: () => Promise<void>; view: () => DiscoveryView<string[]> };
+    return { poll, invoke, callbacks };
+  }
+  it('keeps cards and progress exactly unchanged and silent while settling', () => {
+    for (const phase of [
+      null,
+      'waiting_for_pin',
+      'reading_credentials',
+    ] as const) {
+      const activity = { device: 'opaque-device-0', phase };
+      const fresh = flat(appHtml([inspected(1), none], undefined, activity));
+      const settling = flat(
+        appHtml([inspected(1), none], undefined, activity, 'settling'),
+      );
+      expect(settling).toBe(fresh);
+      expect(settling.match(/class="device-card"/g)?.length).toBe(2);
+      expect(settling).toMatch(/Native service <strong>online</);
+      expect(settling).not.toContain('role="alert"');
+      expect(settling).not.toContain('Refreshing');
+      expect(settling).not.toMatch(forbidden);
+    }
+  });
+  it('genuine failure hides stale cards and uses only friendly wording', () => {
+    const result = flat(
+      appHtml([inspected(1)], undefined, undefined, 'unavailable'),
+    );
+    expect(result).not.toContain('class="device-card"');
+    expect(result).not.toContain('example.com');
+    expect(result).toContain(
+      'Security key scanning is temporarily unavailable.',
+    );
+    expect(result).toContain(
+      'The device list will return when scanning succeeds.',
+    );
+    expect(result).toMatch(/Native service <strong>attention</);
+    expect(result).toContain('role="alert"');
+    expect(result).not.toMatch(forbidden);
+  });
+  it('actual polling retains only explicit settling and continues to fresh data', async () => {
+    const initial = ['Key A'];
+    const renewed = ['Key A refreshed', 'Key B'];
+    const { poll, invoke, callbacks } = harness([
+      { state: 'fresh', list: initial },
+      { state: 'settling' },
+      { state: 'fresh', list: renewed },
+    ]);
+    await poll.refresh();
+    expect(poll.view().list).toBe(initial);
+    await callbacks.shift()?.();
+    expect(poll.view()).toEqual({ state: 'settling', list: initial });
+    await callbacks.shift()?.();
+    expect(poll.view()).toEqual({ state: 'fresh', list: renewed });
+    expect(callbacks).toHaveLength(1);
+    expect(invoke.mock.calls).toEqual([
+      ['list_authenticators'],
+      ['list_authenticators'],
+      ['list_authenticators'],
+    ]);
+  });
+  it('actual polling clears genuine unavailability and can recover', async () => {
+    const { poll, callbacks } = harness([
+      { state: 'fresh', list: ['old'] },
+      { state: 'unavailable' },
+      { state: 'fresh', list: ['new'] },
+    ]);
+    await poll.refresh();
+    await callbacks.shift()?.();
+    expect(poll.view()).toEqual({ state: 'unavailable', list: null });
+    await callbacks.shift()?.();
+    expect(poll.view()).toEqual({ state: 'fresh', list: ['new'] });
+  });
+  it('IPC errors containing implementation text never become settling or UI text', async () => {
+    const { poll, callbacks } = harness([
+      { state: 'fresh', list: ['old'] },
+      new Error('RestartBackoff: the native worker is restarting'),
+    ]);
+    await poll.refresh();
+    await callbacks.shift()?.();
+    expect(poll.view()).toEqual({ state: 'unavailable', list: null });
+    expect(callbacks).toHaveLength(1);
+  });
+  it('inspection phases, silent settling and refreshed inventory keep cards continuous', () => {
+    const steps = [
+      appHtml([none, inspected(1)], undefined, {
+        device: 'opaque-device-0',
+        phase: 'waiting_for_pin',
+      }),
+      appHtml([none, inspected(1)], undefined, {
+        device: 'opaque-device-0',
+        phase: 'reading_credentials',
+      }),
+      appHtml(
+        [none, inspected(1)],
+        undefined,
+        { device: 'opaque-device-0', phase: 'reading_credentials' },
+        'settling',
+      ),
+      appHtml([inspected(2), inspected(1)], undefined, {
+        notice: {
+          revision: '1',
+          tone: 'success',
+          message: 'Credentials refreshed',
+        },
+      }),
+    ].map(flat);
+    expect(steps[0]).toContain('Waiting for PIN…');
+    expect(steps[1]).toContain('Reading credentials…');
+    expect(steps[2]).toBe(steps[1]);
+    expect(steps[3]).toContain('Credentials refreshed');
+    for (const step of steps) {
+      expect(step.match(/class="device-card"/g)?.length).toBe(2);
+      expect(step).not.toContain('role="alert"');
+      expect(step).not.toMatch(forbidden);
+    }
+  });
+  it('cancel followed by settling is quiet and fresh state returns normally', () => {
+    const quiet = flat(appHtml([none, inspected(1)], undefined, {}));
+    expect(flat(appHtml([none, inspected(1)], undefined, {}, 'settling'))).toBe(
+      quiet,
+    );
+    expect(quiet).not.toContain('inspection-toast');
+    expect(quiet).not.toContain('role="alert"');
+    expect(quiet).toContain('Not inspected');
+  });
+});
+
+describe('operation-local issues during settling', () => {
+  it('wrong PIN, blocked PIN and timeout update one card without clearing any card', () => {
+    const none: InspectionDisplay = { state: 'not_inspected' };
+    for (const message of [
+      'Incorrect PIN. No retry was made.',
+      'The security key PIN is blocked.',
+      'Credential inspection timed out. Try again.',
+    ]) {
+      const activity = { issue: { device: 'opaque-device-0', message } };
+      const fresh = appHtml([none, inspected(1)], undefined, activity);
+      const settling = appHtml(
+        [none, inspected(1)],
+        undefined,
+        activity,
+        'settling',
+      );
+      expect(settling).toBe(fresh);
+      expect(settling.match(/class="device-card"/g)?.length).toBe(2);
+      expect(settling).toContain(message);
+      expect(settling).toContain('example.com');
+      expect(settling).not.toContain(
+        'Security key scanning is temporarily unavailable.',
+      );
+      expect(settling).not.toContain('inspection-toast');
     }
   });
 });

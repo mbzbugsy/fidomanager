@@ -1,6 +1,11 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
+  import {
+    applyDiscovery,
+    type DiscoveryResult,
+    type DiscoveryView,
+  } from './discovery';
   import CredentialInventory from './CredentialInventory.svelte';
   import type {
     DeviceActivity,
@@ -51,11 +56,17 @@
     devices: Authenticator[];
   };
 
+  type AuthenticatorDiscovery = DiscoveryResult<AuthenticatorList>;
+
   let foundation: FoundationStatus | null = null;
   let boogoocypher: BooGooCypherStatus = 'checking';
   let boogoocypherTimer: ReturnType<typeof setTimeout> | null = null;
-  let snapshot: AuthenticatorList | null = null;
-  let discoveryError: string | null = null;
+  let discovery: DiscoveryView<AuthenticatorList> = {
+    state: 'starting',
+    list: null,
+  };
+  $: snapshot = discovery.list;
+  $: discoveryUnavailable = discovery.state === 'unavailable';
   let refreshing = false;
   let manualScanning = false;
   let lastScan: string | null = null;
@@ -159,17 +170,19 @@
     }
 
     try {
-      snapshot = await invoke<AuthenticatorList>('list_authenticators');
-      discoveryError = null;
-      lastScan = new Date().toLocaleTimeString([], {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      });
-    } catch (error) {
-      snapshot = null;
-      discoveryError =
-        typeof error === 'string' ? error : 'Native discovery is unavailable.';
+      const result = await invoke<AuthenticatorDiscovery>(
+        'list_authenticators',
+      );
+      discovery = applyDiscovery(discovery, result);
+      if (result.state === 'fresh')
+        lastScan = new Date().toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        });
+    } catch {
+      // An IPC failure is never a proven settling response.
+      discovery = applyDiscovery(discovery, { state: 'unavailable' });
     } finally {
       refreshing = false;
       if (manual) {
@@ -244,9 +257,9 @@
 
       <div class="status-line-inline" aria-label="System status">
         <span class="status-item">
-          <i aria-hidden="true" class:warning={Boolean(discoveryError)}></i>
+          <i aria-hidden="true" class:warning={discoveryUnavailable}></i>
           Native service
-          <strong>{discoveryError ? 'attention' : 'online'}</strong>
+          <strong>{discoveryUnavailable ? 'attention' : 'online'}</strong>
         </span>
         <span
           class="status-item"
@@ -269,23 +282,21 @@
       </div>
     </section>
 
-    {#if discoveryError}
+    {#if discoveryUnavailable}
       <div class="error-banner" role="alert">
-        <strong>Discovery paused</strong>
-        <span>{discoveryError}</span>
+        <strong>Security key scanning is temporarily unavailable.</strong>
         {#if lastScan}<span>Last successful scan {lastScan}.</span>{/if}
       </div>
     {/if}
 
     <section class="devices" aria-label="Connected authenticators">
-      {#if discoveryError}
+      {#if discoveryUnavailable}
         <div class="empty-state">
           <div class="empty-key" aria-hidden="true"></div>
-          <h3>Discovery unavailable</h3>
+          <h3>Security key scanning is temporarily unavailable.</h3>
           <p>
-            The latest authenticator scan did not produce a trustworthy device
-            snapshot. Fido Manager cleared the previous view until discovery
-            succeeds again.
+            Fido Manager could not safely refresh the connected security keys.
+            The device list will return when scanning succeeds.
           </p>
           <span>Use Scan now to retry.</span>
         </div>

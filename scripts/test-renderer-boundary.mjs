@@ -106,6 +106,38 @@ try {
     assert.match(result.stderr, pattern, label);
   };
   mutate(
+    'src-tauri/src/commands/mod.rs',
+    (text) =>
+      text.replace(
+        'pub async fn list_authenticators(',
+        'pub async fn list_authenticators(\n    classification: DiscoveryPresentation<()>,',
+      ),
+    /only authority-owned Tauri State/,
+    'renderer providing a discovery classification',
+  );
+  mutate(
+    'src-tauri/src/commands/mod.rs',
+    (text) =>
+      text.replace(
+        'Result<DiscoveryPresentation<AuthenticatorList>, ()>',
+        'Result<AuthenticatorList, String>',
+      ),
+    /reviewed typed discovery presentation/,
+    'raw discovery error contract',
+  );
+  mutate(
+    'crates/fido-service/src/discovery_presentation.rs',
+    (text) => text.replace('Settling {},', 'Settling { binding: String },'),
+    /unreviewed renderer field or state/,
+    'authority inside the settling response',
+  );
+  mutate(
+    'src/discovery.ts',
+    (text) => `${text}\n// classify errors containing RestartBackoff\n`,
+    /must not infer settling from backend error text/,
+    'renderer interpreting a backend error string',
+  );
+  mutate(
     'src-tauri/src/authentication.rs',
     (text) => text.replace('authority.reserve()', 'authority.skip_gate()'),
     /still reserve through the gate/,

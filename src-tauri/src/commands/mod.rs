@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use fido_service::discovery_presentation::DiscoveryPresentation;
 use serde::Serialize;
 
 use crate::AppState;
@@ -65,7 +66,7 @@ pub fn foundation_status(state: tauri::State<'_, AppState>) -> FoundationStatus 
 #[tauri::command]
 pub async fn list_authenticators(
     state: tauri::State<'_, AppState>,
-) -> Result<AuthenticatorList, String> {
+) -> Result<DiscoveryPresentation<AuthenticatorList>, ()> {
     let discovery = Arc::clone(&state.discovery);
     let inspection = Arc::clone(&state.inspection);
     let verification_history = Arc::clone(&state.verification_history);
@@ -81,35 +82,22 @@ pub async fn list_authenticators(
         .ok()
         .and_then(|m| m.clone());
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut coordinator = discovery
-            .lock()
-            .map_err(|_| "native discovery authority lock is poisoned".to_owned())?;
+    Ok(tauri::async_runtime::spawn_blocking(move || {
+        let mut coordinator = discovery.lock().map_err(|_| ())?;
         // Lock order everywhere is discovery -> inspection. No renderer command takes a store
         // lock and then asks for discovery. Publish one coherent connected-device/inventory DTO.
         let snapshot = match coordinator.refresh() {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                if let Ok(mut store) = inspection.lock() {
-                    let settle = store.awaiting_retired_worker()
-                        && matches!(error, fido_service::SupervisorError::RestartBackoff { .. });
-                    if !settle {
-                        store.clear();
-                    }
-                }
-                return Err(error.to_string());
+                let mut store = inspection.lock().map_err(|_| ())?;
+                return Ok(store.discovery_problem(error));
             }
         };
-        let worker = coordinator
-            .status()
-            .worker_generation
-            .ok_or("worker unavailable")?;
-        let mut store = inspection
-            .lock()
-            .map_err(|_| "inspection store unavailable")?;
+        let worker = coordinator.status().worker_generation.ok_or(())?;
+        let mut store = inspection.lock().map_err(|_| ())?;
         let inventory_devices = store
             .reconcile_connected(&snapshot.devices, worker)
-            .map_err(|_| "connected inventory unavailable")?;
+            .map_err(|_| ())?;
         // A remembered problem belongs to a connected key's card; drop it when that key is gone.
         activity.retain_connected(
             &inventory_devices
@@ -197,13 +185,24 @@ pub async fn list_authenticators(
             )
             .collect();
 
-        Ok(AuthenticatorList {
-            enumeration_epoch: snapshot.enumeration_epoch.0.to_string(),
-            devices,
+        Ok(DiscoveryPresentation::Fresh {
+            list: AuthenticatorList {
+                enumeration_epoch: snapshot.enumeration_epoch.0.to_string(),
+                devices,
+            },
         })
     })
     .await
-    .map_err(|error| format!("native discovery task failed: {error}"))?
+    .unwrap_or(Err(()))
+    .unwrap_or_else(|()| {
+        // Even lock poisoning/task failure must purge inventories and return no raw error text.
+        state
+            .inspection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        DiscoveryPresentation::Unavailable {}
+    }))
 }
 
 /// BooGooCypher readiness status only. Takes no renderer input, reads no FIDO state and returns
