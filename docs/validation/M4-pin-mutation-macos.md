@@ -219,8 +219,12 @@ formatting, all 73 boundary-check executions, Prettier and diff checks pass. The
 are affected checks for this presentation change; the full-suite counts above
 describe the preceding runtime validation. This follow-up adds only a test-time
 serde_json dependency and changes no worker protocol, PIN transport or mutation
-authority. Normal Tauri development visual confirmation of the grouped menu is
-pending; hardware mutation remains on hold.
+authority. Normal Tauri development mode at
+`4f95a89ffd38cdb8abcb1477a76660499494ee3b` compiled/launched successfully, and
+the operator confirmed the grouped menu looks better with the connected small
+Thetis key. Multiple-device grouping remains deterministic-test evidence. No
+menu action/PIN submission was requested or performed for this visual check;
+hardware mutation remains on hold.
 
 Operator preparation at `5df83d5fbaaac29ed3e5b242a7c1c97b9fbd9940`:
 
