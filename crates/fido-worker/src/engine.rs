@@ -39,6 +39,7 @@ pub struct WorkerEngine<B> {
         Box<dyn fido_libfido2::NativeAuthenticationSession>,
     )>,
     auth_used: bool,
+    prepared_request_id: u64,
     verification_display_scope: Option<[u8; 32]>,
 }
 
@@ -52,6 +53,7 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
             secret: None,
             authentication: None,
             auth_used: false,
+            prepared_request_id: 0,
             verification_display_scope: None,
         }
     }
@@ -86,6 +88,7 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
             };
         }
         self.auth_used = true;
+        self.prepared_request_id = request.request_id.0;
         let Some(slot) = self.slots.iter().find(|s| {
             s.device_id == device_id && s.present && s.generation == binding.device_generation
         }) else {
@@ -103,10 +106,10 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
                 self.authentication = Some((binding, session));
                 response
             }
-            Err(_) => {
+            Err(error) => {
                 self.secret = None;
                 WorkerResponse::Error {
-                    code: WorkerErrorCode::UnsupportedDevice,
+                    code: map_native_error(&error, NativeOperation::GetInfo),
                 }
             }
         }
@@ -140,6 +143,65 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
         }
     }
 
+    fn inspect_credentials(
+        &mut self,
+        request: &WorkerRequestEnvelope,
+        binding: fido_auth::AcquisitionBinding,
+        deadline: NativeDeadline,
+    ) -> WorkerResponse {
+        let session = self.authentication.take();
+        let secret = self.secret.take();
+        let (Some((expected, session)), Some(secret)) = (session, secret) else {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        };
+        if binding != expected
+            || Some(binding.device_generation) != request.device_generation
+            || request.request_id.0 <= self.prepared_request_id
+        {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        }
+        let Ok(pin) = fido_auth::receive_secret(secret, binding, request.request_id.0) else {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        };
+        let mut result = session.inspect(binding, pin, deadline);
+        if !result.evidence.attached_puat_cleared {
+            result.evidence.status = fido_auth::AuthenticationStatus::CleanupFailed;
+            result.error = Some(fido_worker_protocol::InspectionError::CleanupFailed);
+        }
+        // Adapter cleanup cannot be overridden by a plausible-looking inventory.
+        if !result.evidence.attached_puat_cleared
+            || result.evidence.status != fido_auth::AuthenticationStatus::Validated
+        {
+            return WorkerResponse::CredentialsInspected {
+                evidence: result.evidence,
+                inventory: None,
+                error: result.error,
+            };
+        }
+        if result
+            .inventory
+            .as_ref()
+            .is_some_and(|i| !i.within_bounds())
+        {
+            return WorkerResponse::CredentialsInspected {
+                evidence: result.evidence,
+                inventory: None,
+                error: Some(fido_worker_protocol::InspectionError::Malformed),
+            };
+        }
+        WorkerResponse::CredentialsInspected {
+            evidence: result.evidence,
+            inventory: result.inventory,
+            error: result.error,
+        }
+    }
+
     /// Handles one request. The request's budget becomes **one** deadline, started here, that is
     /// shared by every native sub-call the request makes.
     pub fn handle(&mut self, request: WorkerRequestEnvelope) -> WorkerResponseEnvelope {
@@ -158,6 +220,7 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
             && !matches!(
                 request.request,
                 WorkerRequest::ValidateAuthentication { .. }
+                    | WorkerRequest::InspectCredentials { .. }
             )
         {
             self.authentication = None;
@@ -176,6 +239,9 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
             }
             WorkerRequest::ValidateAuthentication { binding } => {
                 self.validate_authentication(&request, *binding, deadline)
+            }
+            WorkerRequest::InspectCredentials { binding } => {
+                self.inspect_credentials(&request, *binding, deadline)
             }
             WorkerRequest::HealthCheck => WorkerResponse::Healthy,
             // The process worker implements cancellation by termination: the service kills the
@@ -713,6 +779,196 @@ mod tests {
                 code: WorkerErrorCode::ProtocolMismatch
             }
         ));
+        Ok(())
+    }
+    struct InspectionSession {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        cleanup: bool,
+    }
+    impl fido_libfido2::NativeAuthenticationSession for InspectionSession {
+        fn kind(&self) -> fido_auth::GrantKind {
+            fido_auth::GrantKind::CredMan
+        }
+        fn pin_retries(&self) -> Option<u8> {
+            Some(8)
+        }
+        fn validate(
+            self: Box<Self>,
+            binding: fido_auth::AcquisitionBinding,
+            pin: fido_auth::PinSecret,
+            deadline: NativeDeadline,
+        ) -> fido_auth::AuthenticationEvidence {
+            self.inspect(binding, pin, deadline).evidence
+        }
+        fn inspect(
+            self: Box<Self>,
+            binding: fido_auth::AcquisitionBinding,
+            pin: fido_auth::PinSecret,
+            _: NativeDeadline,
+        ) -> fido_libfido2::inspection::NativeInspection {
+            drop(pin);
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            fido_libfido2::inspection::NativeInspection {
+                evidence: fido_auth::AuthenticationEvidence {
+                    binding,
+                    kind: self.kind(),
+                    status: fido_auth::AuthenticationStatus::Validated,
+                    attached_puat_cleared: self.cleanup,
+                },
+                inventory: Some(fido_core::inventory::OwnedInventory {
+                    metadata_existing: 0,
+                    rps: Vec::new(),
+                }),
+                error: None,
+            }
+        }
+    }
+    struct InspectionBackend {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        cleanup: bool,
+    }
+    impl NativeDiscoveryBackend for InspectionBackend {
+        fn manifest(
+            &mut self,
+            _: NativeDeadline,
+        ) -> Result<Vec<NativeDiscoveredDevice>, NativeError> {
+            Ok(vec![native_device(1)?])
+        }
+        fn get_info(
+            &mut self,
+            _: &NativeDeviceKey,
+            _: NativeDeadline,
+        ) -> Result<NativeDeviceInfo, NativeError> {
+            Ok(native_info())
+        }
+        fn prepare_authentication(
+            &mut self,
+            _: &NativeDeviceKey,
+            _: NativeDeadline,
+        ) -> Result<Box<dyn fido_libfido2::NativeAuthenticationSession>, NativeError> {
+            Ok(Box::new(InspectionSession {
+                calls: self.calls.clone(),
+                cleanup: self.cleanup,
+            }))
+        }
+    }
+    #[test]
+    fn inspection_one_shot_order_binding_secret_and_cleanup()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use fido_auth::{AcquisitionBinding, AcquisitionId, PinSecret};
+        use fido_core::{PromptInstanceId, WorkflowId};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let generation = WorkerGeneration(1);
+        let binding = AcquisitionBinding {
+            worker_generation: 1,
+            device_generation: DeviceGeneration(1),
+            workflow_id: WorkflowId::from_raw(1),
+            prompt_instance_id: PromptInstanceId::from_raw(1),
+            acquisition_id: AcquisitionId(1),
+        };
+        for scenario in 0..7 {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut bytes = Vec::new();
+            let pin = PinSecret::collect(|b| {
+                b[..4].copy_from_slice(b"fake");
+                Some(4)
+            })
+            .map_err(|_| "pin")?;
+            fido_auth::send_secret(&mut bytes, binding, 3, pin).map_err(|_| "secret transport")?;
+            let mut engine = WorkerEngine::new(
+                InspectionBackend {
+                    calls: calls.clone(),
+                    cleanup: scenario != 6,
+                },
+                generation,
+            )
+            .with_secret(Some(Box::new(std::io::Cursor::new(bytes))));
+            engine.handle(request(generation, 1, WorkerRequest::ListDevices, None));
+            if scenario != 1 {
+                let response = engine.handle(request(
+                    generation,
+                    2,
+                    WorkerRequest::PrepareAuthentication {
+                        device_id: WorkerDeviceId(1),
+                        binding,
+                    },
+                    Some(DeviceGeneration(1)),
+                ));
+                assert!(matches!(
+                    response.response,
+                    WorkerResponse::AuthenticationPrepared { .. }
+                ));
+            }
+            if scenario == 2 {
+                engine.handle(request(generation, 9, WorkerRequest::HealthCheck, None));
+            }
+            let mut submitted = binding;
+            if scenario == 3 {
+                submitted.acquisition_id = AcquisitionId(2);
+            }
+            let id = if scenario == 4 {
+                2
+            } else if scenario == 5 {
+                4
+            } else {
+                3
+            };
+            let response = engine.handle(request(
+                generation,
+                id,
+                WorkerRequest::InspectCredentials { binding: submitted },
+                Some(DeviceGeneration(1)),
+            ));
+            assert_eq!(response.evidence.mutation_outcome, None);
+            if scenario == 0 {
+                assert!(matches!(
+                    response.response,
+                    WorkerResponse::CredentialsInspected {
+                        inventory: Some(_),
+                        ..
+                    }
+                ));
+            } else if scenario == 6 {
+                assert!(matches!(
+                    response.response,
+                    WorkerResponse::CredentialsInspected {
+                        inventory: None,
+                        evidence: fido_auth::AuthenticationEvidence {
+                            status: fido_auth::AuthenticationStatus::CleanupFailed,
+                            ..
+                        },
+                        ..
+                    }
+                ));
+            } else {
+                assert!(matches!(
+                    response.response,
+                    WorkerResponse::Error {
+                        code: WorkerErrorCode::ProtocolMismatch
+                    }
+                ));
+            }
+            assert!(engine.authentication.is_none() && engine.secret.is_none());
+            let second = engine.handle(request(
+                generation,
+                8,
+                WorkerRequest::InspectCredentials { binding },
+                Some(DeviceGeneration(1)),
+            ));
+            assert!(matches!(
+                second.response,
+                WorkerResponse::Error {
+                    code: WorkerErrorCode::ProtocolMismatch
+                }
+            ));
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                usize::from(scenario == 0 || scenario == 6)
+            );
+        }
         Ok(())
     }
 }

@@ -3,6 +3,8 @@
 //! The public API deliberately exposes owned values only. Native paths remain opaque inside the
 //! worker and libfido2 pointers never cross this crate boundary.
 
+pub mod inspection;
+
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -178,6 +180,12 @@ impl NativeDeadline {
 pub trait NativeAuthenticationSession: Send {
     fn kind(&self) -> fido_auth::GrantKind;
     fn pin_retries(&self) -> Option<u8>;
+    fn inspect(
+        self: Box<Self>,
+        binding: fido_auth::AcquisitionBinding,
+        pin: fido_auth::PinSecret,
+        deadline: NativeDeadline,
+    ) -> inspection::NativeInspection;
     fn validate(
         self: Box<Self>,
         binding: fido_auth::AcquisitionBinding,
@@ -220,6 +228,8 @@ mod native {
 
     #[cfg(target_os = "macos")]
     mod authentication;
+    #[cfg(target_os = "macos")]
+    mod inspection;
 
     const FIDO_OK: c_int = 0;
     const ERROR_NAME_BOUND: usize = 64;
@@ -443,6 +453,18 @@ mod native {
                 return Err(NativeError::new(NativeErrorKind::Internal, None));
             }
             Ok(Self { ptr, opened: false })
+        }
+
+        #[cfg(target_os = "macos")]
+        fn close(&mut self) -> bool {
+            if !self.opened {
+                return true;
+            }
+            let ok = unsafe { fido_dev_close(self.ptr) } == FIDO_OK;
+            if ok {
+                self.opened = false;
+            }
+            ok
         }
 
         /// Applies the remaining request time as libfido2's timeout for the *next* native call.

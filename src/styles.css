@@ -677,3 +677,13 @@ h1 {
     padding: 0 1rem;
   }
 }
+
+.credential-inventory {
+  margin-top: 2rem;
+  padding: 1.5rem;
+  border: 1px solid var(--border, #d8dde5);
+  border-radius: 12px;
+}
+.credential-rp {
+  padding: 0.75rem 0;
+}

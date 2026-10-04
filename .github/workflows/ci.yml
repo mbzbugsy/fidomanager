@@ -98,7 +98,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Deterministic macOS auth and process tests (no hardware claim)
         run: cargo test --workspace --all-targets --locked
-      - name: Verify production worker's exact private static linkage
+      - name: Verify M3 credman call sites against exact private archive link map
         run: |
           cargo build -p fido-worker --locked
+          python3 scripts/test-credman-linkage.py
           python3 scripts/verify-libfido2-linkage.py target/debug/fido-worker

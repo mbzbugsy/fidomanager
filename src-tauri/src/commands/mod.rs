@@ -7,6 +7,7 @@ use crate::AppState;
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FoundationStatus {
+    inspection: Option<fido_service::inspection::InspectionSnapshot>,
     phase: &'static str,
     worker_protocol_version: u16,
     reviewed_libfido2_baseline: &'static str,
@@ -60,6 +61,7 @@ pub fn foundation_status(state: tauri::State<'_, AppState>) -> FoundationStatus 
         .map(|n| *n)
         .unwrap_or((0, None));
     FoundationStatus {
+        inspection: state.inspection.lock().ok().and_then(|s| s.latest()),
         phase: info.phase,
         worker_protocol_version: info.worker_protocol_version,
         reviewed_libfido2_baseline: info.reviewed_libfido2_baseline,

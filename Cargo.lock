@@ -980,6 +980,7 @@ name = "fido-libfido2"
 version = "0.1.0"
 dependencies = [
  "fido-auth",
+ "fido-core",
  "sha2",
 ]
 
@@ -1023,6 +1024,9 @@ dependencies = [
  "fido-platform",
  "fido-worker-protocol",
  "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "sha2",
  "thiserror 2.0.21",
 ]
 

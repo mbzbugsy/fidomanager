@@ -274,3 +274,66 @@ fn host_deadline_kills_and_reaps_without_claiming_authenticator_cancel() -> Test
     assert!(!common::pid_exists(pid));
     Ok(())
 }
+
+#[test]
+fn complete_inspection_transaction_clears_reaps_and_restarts_fresh() -> TestResult {
+    let mut supervisor = DiscoverySupervisor::new(
+        launcher(&["--authentication"])?,
+        DiscoveryPolicy::default(),
+        RestartPolicy::default(),
+    )?;
+    let authority = AuthenticationAuthority::default();
+    let mut previous_worker = 0;
+    for _ in 0..2 {
+        let snapshot = supervisor.refresh()?;
+        let generation = supervisor
+            .status()
+            .worker_generation
+            .ok_or("missing generation")?
+            .0;
+        assert!(generation > previous_worker);
+        previous_worker = generation;
+        let reservation = authority.reserve()?;
+        let result = authority.inspect(
+            &mut supervisor,
+            snapshot.devices[0].handle,
+            reservation,
+            |request, controller, sender, retries, _, _| {
+                assert_eq!(retries, Some(8));
+                let binding = request.binding();
+                let mut controller = controller.lock().map_err(|_| "controller")?;
+                controller
+                    .resolve(PromptOutcome::Approved(binding), Instant::now())
+                    .map_err(|_| "resolve")?;
+                controller
+                    .did_teardown(binding, Instant::now())
+                    .map_err(|_| "teardown")?;
+                let pin = PinSecret::collect(|b| {
+                    b[..4].copy_from_slice(b"fake");
+                    Some(4)
+                })
+                .map_err(|_| "pin")?;
+                sender
+                    .send(PinCompletion {
+                        binding,
+                        outcome: PromptOutcome::Approved(binding),
+                        pin: Some(pin),
+                    })
+                    .map_err(|_| "send")
+            },
+        );
+        assert_eq!(result.status, Status::Validated);
+        assert_eq!(
+            result.inventory.ok_or("inventory")?.assess().total,
+            fido_core::inventory::CredentialTotal::Exact(0)
+        );
+        assert!(result.attached_puat_cleared && result.worker_quiescent && result.prompt_torn_down);
+        assert!(
+            supervisor
+                .resolve_handle(snapshot.devices[0].handle)
+                .is_none()
+        );
+        std::thread::sleep(Duration::from_millis(1_020));
+    }
+    Ok(())
+}

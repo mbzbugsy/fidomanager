@@ -57,6 +57,25 @@ try {
   writeFileSync(capabilityPath, JSON.stringify(capability));
   assert.match(check().stderr, /unexpected permission set/);
   writeFileSync(capabilityPath, capabilityText);
+  const commandPath = join(fixture, 'src-tauri/src/commands/mod.rs');
+  const commandText = readFileSync(commandPath, 'utf8');
+  writeFileSync(
+    commandPath,
+    commandText.replace(
+      'pub struct FoundationStatus {',
+      'pub struct FoundationStatus {\n    pin: String,',
+    ),
+  );
+  assert.match(check().stderr, /unreviewed renderer field/);
+  writeFileSync(commandPath, commandText);
+  const appPath = join(fixture, 'src/App.svelte');
+  const appText = readFileSync(appPath, 'utf8');
+  writeFileSync(
+    appPath,
+    appText + `\n<script>invoke('inspect_credentials')</script>`,
+  );
+  assert.match(check().stderr, /invoke surface/);
+  writeFileSync(appPath, appText);
   const buildPath = join(fixture, 'src-tauri/build.rs');
   writeFileSync(
     buildPath,

@@ -129,6 +129,35 @@ if (
   );
 }
 
+// foundation_status retrieves a backend-created snapshot; it must never return authority.
+const commandSource = readFileSync('src-tauri/src/commands/mod.rs', 'utf8');
+const foundationFields = [
+  ...(
+    commandSource.match(/pub struct FoundationStatus \{([^}]+)\}/s)?.[1] ?? ''
+  ).matchAll(/^\s*([a-z0-9_]+):/gm),
+].map((m) => m[1]);
+assertExactArray(
+  foundationFields,
+  [
+    'inspection',
+    'phase',
+    'worker_protocol_version',
+    'reviewed_libfido2_baseline',
+    'authentication_notice',
+    'authentication_notice_revision',
+  ],
+  'FoundationStatus contains an unreviewed renderer field.',
+);
+if (
+  !commandSource.includes(
+    'inspection: Option<fido_service::inspection::InspectionSnapshot>',
+  )
+) {
+  throw new Error(
+    'Only the reviewed sanitized InspectionSnapshot may cross foundation_status.',
+  );
+}
+
 const appSource = readFileSync('src-tauri/src/lib.rs', 'utf8');
 const handlerMatch = appSource.match(/generate_handler!\[([^\]]*)\]/s);
 if (!handlerMatch) {

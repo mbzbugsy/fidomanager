@@ -17,7 +17,7 @@ impl NativeTarget {
     ) -> Self {
         Self {
             // Backend-owned event identity only; never displayed or accepted from the renderer.
-            id: format!("validate-authentication-{:032x}", handle.as_raw()),
+            id: format!("inspect-credentials-{:032x}", handle.as_raw()),
             handle,
             label: presentation.label(),
         }
@@ -63,7 +63,7 @@ impl AuthenticationMenu {
                         let item = tauri::menu::MenuItem::with_id(
                             &callback_app,
                             &target.id,
-                            format!("Authenticate {}…", target.label),
+                            format!("Inspect credentials on {}…", target.label),
                             true,
                             None::<&str>,
                         )?;
@@ -152,8 +152,9 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
         let target_label =
             fido_service::presentation::authenticator_presentations(&snapshot.devices)[index]
                 .label();
+        let snapshot_label = target_label.clone();
         let presenter_app = app.clone();
-        let result = authority.validate(
+        let mut result = authority.inspect(
             &mut supervisor,
             handle,
             reservation,
@@ -187,6 +188,27 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
                     .map_err(|_| "main thread unavailable")
             },
         );
+        if let Ok(mut store) = app.state::<AppState>().inspection.lock() {
+            store.clear();
+            if let Some(inventory) = result.inventory.take() {
+                let assessment = inventory.assess();
+                if store.replace(handle, snapshot_label, inventory).is_ok() {
+                    eprintln!(
+                        "[inspection] snapshot={:?} total_kind={} mutation_issued=false",
+                        assessment.completeness,
+                        match assessment.total {
+                            fido_service::inspection::CredentialTotal::Exact(_) => "exact",
+                            fido_service::inspection::CredentialTotal::AtLeast(_) => "at_least",
+                            _ => "unknown",
+                        }
+                    );
+                } else {
+                    result.status = authentication::Status::Uncertain;
+                }
+            }
+        } else {
+            result.status = authentication::Status::Uncertain;
+        }
         // Only typed categories and booleans. No native paths, PIN, tokens, account metadata.
         eprintln!(
             "[authentication] status={:?} grant={:?} attached_puat_cleared={} worker_quiescent={} prompt_torn_down={}",
@@ -210,13 +232,39 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
         }
         // This message is display history, never durable authenticated/approved state. Only
         // fixed backend text crosses the existing read-only foundation-status DTO.
-        let message = if !result.worker_quiescent || !result.prompt_torn_down {
+        let message = if result.inspection_error.is_some() {
+            match result.inspection_error {
+                Some(fido_service::inspection::InspectionError::BoundExceeded) => {
+                    "Credential inventory exceeds supported application bounds. No snapshot was stored."
+                }
+                Some(fido_service::inspection::InspectionError::Malformed) => {
+                    "The authenticator returned malformed inventory. No snapshot was stored."
+                }
+                Some(fido_service::inspection::InspectionError::CleanupFailed) => {
+                    "Cleanup could not be proven. The worker was discarded; no snapshot was stored."
+                }
+                Some(fido_service::inspection::InspectionError::Unsupported) => {
+                    "Credential inspection is unsupported for this authenticator."
+                }
+                Some(fido_service::inspection::InspectionError::DeviceAbsent) => {
+                    "The authenticator disconnected during inspection."
+                }
+                Some(
+                    fido_service::inspection::InspectionError::Busy
+                    | fido_service::inspection::InspectionError::AccessDenied,
+                ) => "The authenticator is busy or access was denied.",
+                Some(fido_service::inspection::InspectionError::TimedOut) => {
+                    "Credential inspection timed out; the worker was discarded."
+                }
+                _ => "Credential inspection failed. No successful empty inventory was substituted.",
+            }
+        } else if !result.worker_quiescent || !result.prompt_torn_down {
             "Authentication outcome uncertain. Recovery is required before another attempt."
         } else {
             use authentication::Status;
             match result.status {
                 Status::Validated if result.attached_puat_cleared => {
-                    "Authentication validated. Temporary authorization cleared; no credentials were read or changed."
+                    "Credential inspection finished. Temporary authorization cleared; the read-only inventory is available below."
                 }
                 Status::WrongPin => {
                     "Incorrect PIN. The attempt ended; no automatic retry was made."
@@ -256,8 +304,8 @@ mod tests {
         let targets = [first.clone(), second.clone()];
         assert_eq!(first.label, "Security Key(F829) · Thetis · USB");
         assert_eq!(first.label, second.label);
-        assert!(!format!("Authenticate {}…", first.label).contains("00000009"));
-        assert!(!format!("Authenticate {}…", second.label).contains("0000000a"));
+        assert!(!format!("Inspect credentials on {}…", first.label).contains("00000009"));
+        assert!(!format!("Inspect credentials on {}…", second.label).contains("0000000a"));
         assert_eq!(
             select_target(&targets, &first.id).map(|t| t.handle),
             Some(first.handle)

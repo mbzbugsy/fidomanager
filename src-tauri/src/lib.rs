@@ -18,6 +18,7 @@ type DiscoveryAuthority = fido_service::DiscoverySupervisor<fido_service::Proces
 
 pub(crate) struct AppState {
     discovery: Arc<Mutex<DiscoveryAuthority>>,
+    inspection: Mutex<fido_service::inspection::InspectionStore>,
     // Presentation history only; never consulted for authorization or workflow admission.
     authentication_notice: Arc<Mutex<(u64, Option<&'static str>)>>,
     // Historical display facts only; not grants and never checked by authentication admission.
@@ -79,6 +80,7 @@ pub fn run() {
         }))
         .manage(AppState {
             discovery: Arc::clone(&discovery),
+            inspection: Mutex::new(fido_service::inspection::InspectionStore::default()),
             authentication_notice: Arc::new(Mutex::new((0, None))),
             verification_history: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
             #[cfg(all(
@@ -111,7 +113,7 @@ pub fn run() {
             let menu = tauri::menu::Menu::default(app.handle())?;
             let item = tauri::menu::MenuItem::with_id(
                 app.handle(),
-                "validate-authentication",
+                "inspect-credentials",
                 "No security key available",
                 false,
                 None::<&str>,
@@ -128,7 +130,7 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| {
-            if event.id().as_ref().starts_with("validate-authentication-") {
+            if event.id().as_ref().starts_with("inspect-credentials-") {
                 authentication::start(app, event.id().as_ref());
             }
         })

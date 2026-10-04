@@ -17,3 +17,4 @@ workspace = true
 [dependencies]
 sha2 = "=0.10.9"
 fido-auth = { path = "../fido-auth" }
+fido-core = { path = "../fido-core" }

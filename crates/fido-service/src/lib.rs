@@ -4,6 +4,7 @@
 pub mod native_ui_spike;
 
 pub mod authentication;
+pub mod inspection;
 pub mod presentation;
 
 mod discovery;
@@ -45,7 +46,7 @@ pub struct FoundationInfo {
 pub const fn foundation_info() -> FoundationInfo {
     FoundationInfo {
         phase: if cfg!(target_os = "macos") {
-            "milestone-2-native-authentication"
+            "milestone-3-credential-inspection"
         } else {
             "milestone-1-read-only-discovery"
         },

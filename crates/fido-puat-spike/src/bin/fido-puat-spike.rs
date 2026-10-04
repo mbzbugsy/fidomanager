@@ -922,7 +922,7 @@ fn inventory_transaction(
     let enumerated = assessment.observed_enumerated;
     println!(
         "RESULT step=reconcile metadata_existing={reported_existing:?} credential_count={enumerated} \
-         counts_reconcile={} completeness={:?} credentials={:?} incomplete={:?} inconsistent={:?}",
+         raw_count_equals_metadata={} completeness={:?} credentials={:?} incomplete={:?} inconsistent={:?}",
         reported_existing == Some(enumerated),
         assessment.completeness,
         assessment.credentials,
