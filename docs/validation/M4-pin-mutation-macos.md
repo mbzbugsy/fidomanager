@@ -31,6 +31,16 @@ The worker independently verifies the approved operation on its exact native
 object. All sensitive menu items are disabled during a workflow; the single
 service gate remains authoritative with no queue and the existing shared cooldown.
 
+The native Security key menu groups each connected authenticator into its own
+submenu, for example `Security Key (F829) · Thetis · USB`, with short
+`Inspect credentials…` and capability-selected `Set PIN…` or `Change PIN…` items.
+Device metadata/transport appears only in the submenu title. Grouping uses the
+exact backend handle, so identical labels never merge devices or route actions.
+Action IDs, full native-sheet target labels and workflow authority remain unchanged.
+Busy-state disabling reaches the submenu and every nested action. Recovery stays
+at the top level because its incident record identifies no reconnected physical
+key; the existing barrier still removes ordinary actions.
+
 AppKit sheets run on the main thread and display the exact trusted label, operation
 and persistent physical-key effect. Set collects new/confirmation; Change collects
 current/new/confirmation and shows remaining retries before submission. Exactly
@@ -201,6 +211,16 @@ recorded in the Draft PR. This committed report does not claim an unobserved run
 **Set PIN hardware validation: NOT PERFORMED.**
 **Change PIN hardware validation: NOT PERFORMED.**
 **Recovery hardware fault scenarios: NOT PERFORMED.**
+
+Native menu follow-up: all four macOS app menu tests pass, covering duplicate
+labels/interleaved device actions, exact handle routing and stale IDs, Set/Change/
+unavailable capability cases and top-level recovery. Workspace clippy, Rust
+formatting, all 73 boundary-check executions, Prettier and diff checks pass. These
+are affected checks for this presentation change; the full-suite counts above
+describe the preceding runtime validation. This follow-up adds only a test-time
+serde_json dependency and changes no worker protocol, PIN transport or mutation
+authority. Normal Tauri development visual confirmation of the grouped menu is
+pending; hardware mutation remains on hold.
 
 Operator preparation at `5df83d5fbaaac29ed3e5b242a7c1c97b9fbd9940`:
 
