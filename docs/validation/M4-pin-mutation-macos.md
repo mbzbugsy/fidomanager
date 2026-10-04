@@ -209,7 +209,7 @@ recorded in the Draft PR. This committed report does not claim an unobserved run
 ## Hardware evidence and operator gate
 
 **Set PIN hardware validation: NOT PERFORMED.**
-**Change PIN hardware validation: NOT PERFORMED.**
+**Change PIN hardware validation: PERFORMED — ConfirmedSuccessful.**
 **Recovery hardware fault scenarios: NOT PERFORMED.**
 
 Native menu follow-up: all four macOS app menu tests pass, covering duplicate
@@ -224,7 +224,7 @@ authority. Normal Tauri development mode at
 the operator confirmed the grouped menu looks better with the connected small
 Thetis key. Multiple-device grouping remains deterministic-test evidence. No
 menu action/PIN submission was requested or performed for this visual check;
-hardware mutation remains on hold.
+hardware mutation remained on hold during that menu-only validation.
 
 Operator preparation at `5df83d5fbaaac29ed3e5b242a7c1c97b9fbd9940`:
 
@@ -270,10 +270,77 @@ features syntax during launch; that generated manifest edit was reverted. The
 application source, icon assets, packaging settings and dependency versions did
 not change during this visual validation.
 
-No real mutation success/rejection/uncertainty is claimed. Native runtime
-compilation, exact-symbol attribution and synthetic fixtures are software evidence
-only. No dedicated unconfigured key has been selected; Set PIN must remain NOT
-PERFORMED unless one is already available and explicitly authorized.
+Change PIN hardware session at
+`5b987170dfd201e9d8e6289a779c280898a080eb`, after green
+[exact-head CI](https://github.com/mbzbugsy/fidomanager/actions/runs/37230321971):
+
+- Environment: macOS 26.5.2 (25F84), arm64. Normal Tauri development mode used the
+  ordinary `native-pin` path. The worker's live mutation/credential symbols again
+  passed attribution to the exact pinned/private libfido2 1.17.0 archive, with
+  no unresolved FIDO symbol or system/Homebrew libfido2 fallback.
+- Fresh non-mutating discovery found only the selected small Thetis Security
+  Key(F829), USB, vendor/product `0x1ea8`/`0xf829`, firmware 256, `clientPin=true`.
+  The sandbox preflight enumerated the key but GetInfo returned an error; the
+  same read-only worker outside the sandbox obtained GetInfo and was reaped. Neither
+  preflight submitted a PIN or mutation.
+- The exact physical key, Change PIN operation, persistent replacement effect,
+  one-submission scope and prohibited tests were explained. The operator gave
+  fresh explicit authorization for one Change PIN and entered/submitted secrets
+  himself, solely in the native secure sheet. Earlier unsubmitted sheet closures
+  were independently logged as NotDispatched with teardown/quiescence.
+- The first guided, authorized submission returned `MutationOutcome::Rejected`. The operator
+  reported the exact application message: “PIN was not changed: the security
+  key rejected the new PIN policy.” This matches typed `PinRejection::PinPolicy`
+  (native policy status `0x37`), not a wrong-current-PIN rejection. The rejection
+  was unexpected; it was not deliberately injected.
+- Logs independently confirmed main-thread secure controls, window modality,
+  Cancel default, detached sheet teardown, `worker_quiescent=true`,
+  `prompt_torn_down=true` and `recovery_required=false`. A bounded, no-follow,
+  owner/mode/schema-checked categorical read confirmed the saved Change PIN
+  incident is `Resolved` with `Resolution::Rejected`. Intermediate journal phases
+  were not separately sampled on hardware. No persistent recovery barrier remains.
+- That first rejection did not change the PIN. The operator then independently
+  initiated another Change PIN in the native app and reported success. Native logs
+  independently recorded `MutationOutcome::ConfirmedSuccessful`,
+  `worker_quiescent=true`, `prompt_torn_down=true` and `recovery_required=false`.
+  A categorical journal read immediately afterward verified Change PIN,
+  `JournalPhase::Resolved`, `Resolution::ConfirmedSuccessful`. This is the
+  successful hardware evidence; it is not inferred from a later GetInfo or UI
+  notification alone. It establishes a completed persistent PIN change.
+- Operator-initiated credential inspections around that successful change were
+  logged as `Validated` with a complete inventory, `attached_puat_cleared=true`,
+  `worker_quiescent=true` and `prompt_torn_down=true`. These were human-initiated
+  native submissions, not automatic probes. No credential/account data or PIN
+  characteristics were retained as evidence.
+- The operator later explicitly requested reopening the same verified app to
+  restore the previous PIN. Before the final instruction to stop all further
+  hardware operations, that reopened app logged another `ConfirmedSuccessful`
+  Change PIN followed by a separate `Rejected` Change PIN; both independently
+  proved native teardown, worker quiescence and no recovery requirement. The
+  latter rejection reason was not captured. Subsequent operator-initiated
+  inspections were also logged as `Validated` with complete cleanup.
+- At final evidence collection, the current categorical journal snapshot is
+  Change PIN / `Resolved` / `Rejected`, reflecting the most recent workflow. It
+  does not erase the earlier directly observed `Resolved` / `ConfirmedSuccessful`
+  snapshot or successful native outcomes. Exact PIN values and restoration to a
+  specific earlier value are not established by these non-secret records.
+- No automatic PIN retry or agent-submitted PIN/mutation occurred. No deliberate
+  wrong-PIN/retry depletion, reset, credential deletion, unplug/crash injection,
+  journal corruption or recovery fault scenario was tested on hardware. No
+  OutcomeUnknown was observed. All further hardware operations are now stopped
+  under the operator's final instruction; the evidence update performs none.
+- The precise device rule was not separately measured. After the rejection,
+  [Thetis's official PIN troubleshooting](https://thetis.io/pages/troubleshooting)
+  was reviewed; it publishes a minimum of six digits for its FIDO2 keys. The form
+  currently enforces the generic four-scalar/63-byte baseline and did not convey
+  this stronger vendor requirement. This guidance gap remains a follow-up; this
+  evidence-only update does not claim a UI-policy implementation or retest. No candidate
+  PIN values, lengths or other characteristics are recorded here.
+
+Native compilation and synthetic fixtures remain software evidence only. No
+dedicated unconfigured key has been selected; Set PIN remains NOT PERFORMED.
+Recovery fault scenarios remain deterministic evidence, without live hardware
+fault injection.
 
 After deterministic tests/builds/available CI are green and the Draft PR exists,
 work must stop in interactive operator mode. Give one simple human action at a
