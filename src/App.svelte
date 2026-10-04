@@ -1,15 +1,28 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
+  import {
+    applyDiscovery,
+    type DiscoveryResult,
+    type DiscoveryView,
+  } from './discovery';
+  import CredentialInventory from './CredentialInventory.svelte';
+  import type {
+    DeviceActivity,
+    InspectionActivity,
+    InspectionDisplay,
+  } from './inspection';
   import logoUrl from './assets/fidomanager-logo.png';
 
   type FoundationStatus = {
     phase: string;
     workerProtocolVersion: number;
     reviewedLibfido2Baseline: string;
-    authenticationNotice: string | null;
-    authenticationNoticeRevision: string;
+    inspectionActivity: InspectionActivity;
   };
+
+  // Readiness of the BooGooCypher service only; says nothing about local security keys.
+  type BooGooCypherStatus = 'checking' | 'online' | 'offline';
 
   type AuthenticatorOption = {
     name: string;
@@ -17,6 +30,7 @@
   };
 
   type Authenticator = {
+    inspection: InspectionDisplay;
     displayName: string;
     displayDetail: string;
     handle: string;
@@ -42,9 +56,17 @@
     devices: Authenticator[];
   };
 
+  type AuthenticatorDiscovery = DiscoveryResult<AuthenticatorList>;
+
   let foundation: FoundationStatus | null = null;
-  let snapshot: AuthenticatorList | null = null;
-  let discoveryError: string | null = null;
+  let boogoocypher: BooGooCypherStatus = 'checking';
+  let boogoocypherTimer: ReturnType<typeof setTimeout> | null = null;
+  let discovery: DiscoveryView<AuthenticatorList> = {
+    state: 'starting',
+    list: null,
+  };
+  $: snapshot = discovery.list;
+  $: discoveryUnavailable = discovery.state === 'unavailable';
   let refreshing = false;
   let manualScanning = false;
   let lastScan: string | null = null;
@@ -56,16 +78,26 @@
   let noticeTimer: ReturnType<typeof setTimeout> | null = null;
 
   const pollDelayMs = 1000;
+  // The backend caches the result (30 s) and owns every network request; this only re-reads it.
+  const boogoocypherPollMs = 5000;
 
-  function updateNotice(revision: string | null, message: string | null) {
+  // A brief confirmation (success) or a problem that has no card to attach to. Per-key progress
+  // and per-key problems are shown in that key's card, never in a replacement view.
+  function updateNotice(
+    revision: string | null,
+    tone: 'success' | 'problem' | null,
+  ) {
     if (revision === activeNoticeRevision) return;
     activeNoticeRevision = revision;
     if (noticeTimer) clearTimeout(noticeTimer);
-    noticeVisible = Boolean(message);
+    noticeVisible = revision !== null;
     if (noticeVisible) {
-      noticeTimer = setTimeout(() => {
-        noticeVisible = false;
-      }, 10_000);
+      noticeTimer = setTimeout(
+        () => {
+          noticeVisible = false;
+        },
+        tone === 'success' ? 4_000 : 10_000,
+      );
     }
   }
 
@@ -74,10 +106,21 @@
     if (noticeTimer) clearTimeout(noticeTimer);
   }
 
-  $: updateNotice(
-    foundation?.authenticationNoticeRevision ?? null,
-    foundation?.authenticationNotice ?? null,
-  );
+  $: notice = foundation?.inspectionActivity?.notice ?? null;
+  $: updateNotice(notice?.revision ?? null, notice?.tone ?? null);
+
+  function activityFor(
+    handle: string,
+    activity: InspectionActivity | undefined,
+  ): DeviceActivity {
+    if (activity?.device === handle && activity.phase) {
+      return { state: activity.phase };
+    }
+    if (activity?.issue?.device === handle) {
+      return { state: 'attention', message: activity.issue.message };
+    }
+    return { state: 'idle' };
+  }
 
   function hex16(value: number) {
     return value.toString(16).padStart(4, '0');
@@ -102,6 +145,23 @@
     }
   }
 
+  async function loadBooGooCypher() {
+    try {
+      const status = await invoke<BooGooCypherStatus>('boogoocypher_status');
+      boogoocypher =
+        status === 'online' || status === 'offline' ? status : 'checking';
+    } catch {
+      boogoocypher = 'checking';
+    } finally {
+      if (!stopped) {
+        boogoocypherTimer = setTimeout(
+          () => void loadBooGooCypher(),
+          boogoocypherPollMs,
+        );
+      }
+    }
+  }
+
   async function refreshDevices(scheduleNext = true, manual = false) {
     if (refreshing || stopped) return;
     refreshing = true;
@@ -110,17 +170,19 @@
     }
 
     try {
-      snapshot = await invoke<AuthenticatorList>('list_authenticators');
-      discoveryError = null;
-      lastScan = new Date().toLocaleTimeString([], {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      });
-    } catch (error) {
-      snapshot = null;
-      discoveryError =
-        typeof error === 'string' ? error : 'Native discovery is unavailable.';
+      const result = await invoke<AuthenticatorDiscovery>(
+        'list_authenticators',
+      );
+      discovery = applyDiscovery(discovery, result);
+      if (result.state === 'fresh')
+        lastScan = new Date().toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        });
+    } catch {
+      // An IPC failure is never a proven settling response.
+      discovery = applyDiscovery(discovery, { state: 'unavailable' });
     } finally {
       refreshing = false;
       if (manual) {
@@ -142,10 +204,12 @@
     stopped = false;
     void loadFoundation();
     void refreshDevices();
+    void loadBooGooCypher();
     return () => {
       stopped = true;
       if (timer) clearTimeout(timer);
       if (foundationTimer) clearTimeout(foundationTimer);
+      if (boogoocypherTimer) clearTimeout(boogoocypherTimer);
       if (noticeTimer) clearTimeout(noticeTimer);
     };
   });
@@ -193,9 +257,23 @@
 
       <div class="status-line-inline" aria-label="System status">
         <span class="status-item">
-          <i aria-hidden="true" class:warning={Boolean(discoveryError)}></i>
+          <i aria-hidden="true" class:warning={discoveryUnavailable}></i>
           Native service
-          <strong>{discoveryError ? 'attention' : 'online'}</strong>
+          <strong>{discoveryUnavailable ? 'attention' : 'online'}</strong>
+        </span>
+        <span
+          class="status-item"
+          title="Readiness status only. BooGooCypher does not protect or process PINs, credentials or security-key operations, and its status never affects them."
+        >
+          <i
+            aria-hidden="true"
+            class:neutral={boogoocypher !== 'online'}
+            class:checking={boogoocypher === 'checking'}
+          ></i>
+          BooGooCypher
+          <strong
+            >{boogoocypher === 'checking' ? 'checking…' : boogoocypher}</strong
+          >
         </span>
         <span class="status-item">
           libfido2 <strong>{foundation?.reviewedLibfido2Baseline ?? '—'}</strong
@@ -204,23 +282,21 @@
       </div>
     </section>
 
-    {#if discoveryError}
+    {#if discoveryUnavailable}
       <div class="error-banner" role="alert">
-        <strong>Discovery paused</strong>
-        <span>{discoveryError}</span>
+        <strong>Security key scanning is temporarily unavailable.</strong>
         {#if lastScan}<span>Last successful scan {lastScan}.</span>{/if}
       </div>
     {/if}
 
     <section class="devices" aria-label="Connected authenticators">
-      {#if discoveryError}
+      {#if discoveryUnavailable}
         <div class="empty-state">
           <div class="empty-key" aria-hidden="true"></div>
-          <h3>Discovery unavailable</h3>
+          <h3>Security key scanning is temporarily unavailable.</h3>
           <p>
-            The latest authenticator scan did not produce a trustworthy device
-            snapshot. Fido Manager cleared the previous view until discovery
-            succeeds again.
+            Fido Manager could not safely refresh the connected security keys.
+            The device list will return when scanning succeeds.
           </p>
           <span>Use Scan now to retry.</span>
         </div>
@@ -313,6 +389,13 @@
                   </div>
                 </div>
               {/if}
+              <CredentialInventory
+                inspection={device.inspection}
+                activity={activityFor(
+                  device.handle,
+                  foundation?.inspectionActivity,
+                )}
+              />
             </article>
           {/each}
         </div>
@@ -345,16 +428,21 @@
   </footer>
 </div>
 
-{#if noticeVisible && foundation?.authenticationNotice}
-  <div class="authentication-toast" role="status" aria-live="polite">
-    <div>
-      <strong>Authentication result</strong>
-      <p>{foundation.authenticationNotice}</p>
-    </div>
+{#if noticeVisible && notice}
+  <div
+    class="inspection-toast"
+    class:problem={notice.tone === 'problem'}
+    role="status"
+    aria-live="polite"
+  >
+    <span class="toast-mark" aria-hidden="true"
+      >{notice.tone === 'success' ? '✓' : '!'}</span
+    >
+    <p>{notice.message}</p>
     <button
       class="notice-dismiss"
       type="button"
-      aria-label="Dismiss authentication result"
+      aria-label="Dismiss message"
       onclick={dismissNotice}>Dismiss</button
     >
   </div>

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use fido_service::discovery_presentation::DiscoveryPresentation;
 use serde::Serialize;
 
 use crate::AppState;
@@ -10,8 +11,7 @@ pub struct FoundationStatus {
     phase: &'static str,
     worker_protocol_version: u16,
     reviewed_libfido2_baseline: &'static str,
-    authentication_notice: Option<&'static str>,
-    authentication_notice_revision: String,
+    inspection_activity: fido_service::activity::ActivityView,
 }
 
 #[derive(Debug, Serialize)]
@@ -24,6 +24,7 @@ pub struct AuthenticatorList {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AuthenticatorSummary {
+    inspection: fido_service::inspection::InspectionDisplay,
     display_name: String,
     display_detail: String,
     handle: String,
@@ -54,26 +55,22 @@ struct AuthenticatorOption {
 #[tauri::command]
 pub fn foundation_status(state: tauri::State<'_, AppState>) -> FoundationStatus {
     let info = fido_service::foundation_info();
-    let (revision, notice) = state
-        .authentication_notice
-        .lock()
-        .map(|n| *n)
-        .unwrap_or((0, None));
     FoundationStatus {
         phase: info.phase,
         worker_protocol_version: info.worker_protocol_version,
         reviewed_libfido2_baseline: info.reviewed_libfido2_baseline,
-        authentication_notice: notice,
-        authentication_notice_revision: revision.to_string(),
+        inspection_activity: state.activity.view(),
     }
 }
 
 #[tauri::command]
 pub async fn list_authenticators(
     state: tauri::State<'_, AppState>,
-) -> Result<AuthenticatorList, String> {
+) -> Result<DiscoveryPresentation<AuthenticatorList>, ()> {
     let discovery = Arc::clone(&state.discovery);
+    let inspection = Arc::clone(&state.inspection);
     let verification_history = Arc::clone(&state.verification_history);
+    let activity = Arc::clone(&state.activity);
     #[cfg(all(
         feature = "native-pin",
         not(feature = "native-ui-spike"),
@@ -85,11 +82,29 @@ pub async fn list_authenticators(
         .ok()
         .and_then(|m| m.clone());
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut coordinator = discovery
-            .lock()
-            .map_err(|_| "native discovery authority lock is poisoned".to_owned())?;
-        let snapshot = coordinator.refresh().map_err(|error| error.to_string())?;
+    Ok(tauri::async_runtime::spawn_blocking(move || {
+        let mut coordinator = discovery.lock().map_err(|_| ())?;
+        // Lock order everywhere is discovery -> inspection. No renderer command takes a store
+        // lock and then asks for discovery. Publish one coherent connected-device/inventory DTO.
+        let snapshot = match coordinator.refresh() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let mut store = inspection.lock().map_err(|_| ())?;
+                return Ok(store.discovery_problem(error));
+            }
+        };
+        let worker = coordinator.status().worker_generation.ok_or(())?;
+        let mut store = inspection.lock().map_err(|_| ())?;
+        let inventory_devices = store
+            .reconcile_connected(&snapshot.devices, worker)
+            .map_err(|_| ())?;
+        // A remembered problem belongs to a connected key's card; drop it when that key is gone.
+        activity.retain_connected(
+            &inventory_devices
+                .iter()
+                .map(|device| device.handle)
+                .collect::<Vec<_>>(),
+        );
         let presentations =
             fido_service::presentation::authenticator_presentations(&snapshot.devices);
         // Keep history only for uniquely identified currently connected macOS IORegistry entries.
@@ -133,44 +148,69 @@ pub async fn list_authenticators(
             .devices
             .into_iter()
             .zip(presentations)
-            .map(|(device, presentation)| AuthenticatorSummary {
-                display_name: presentation.name,
-                display_detail: presentation.detail,
-                pin_check_passed: device
-                    .verification_history_id
-                    .is_some_and(|id| passed.contains(&id)),
-                handle: format!("{:032x}", device.handle.as_raw()),
-                generation: device.generation.0.to_string(),
-                vendor_id: device.vendor_id,
-                product_id: device.product_id,
-                manufacturer: device.manufacturer,
-                product: device.product,
-                aaguid: device
-                    .aaguid
-                    .map(|value| format!("{:032x}", u128::from_be_bytes(*value.as_bytes()))),
-                versions: device.versions,
-                extensions: device.extensions,
-                transports: presentation.transports,
-                options: device
-                    .options
-                    .into_iter()
-                    .map(|option| AuthenticatorOption {
-                        name: option.name,
-                        enabled: option.enabled,
-                    })
-                    .collect(),
-                max_message_size: device.max_message_size.map(|value| value.to_string()),
-                firmware_version: device.firmware_version.map(|value| value.to_string()),
-                read_status: device.read_status.as_wire_name().to_owned(),
-                freshness: device.freshness.as_wire_name().to_owned(),
-            })
+            .zip(inventory_devices)
+            .map(
+                |((device, presentation), inventory_device)| AuthenticatorSummary {
+                    inspection: store.display_for(inventory_device),
+                    display_name: presentation.name,
+                    display_detail: presentation.detail,
+                    pin_check_passed: device
+                        .verification_history_id
+                        .is_some_and(|id| passed.contains(&id)),
+                    handle: inventory_device.handle.as_wire(),
+                    generation: inventory_device.generation.0.to_string(),
+                    vendor_id: device.vendor_id,
+                    product_id: device.product_id,
+                    manufacturer: device.manufacturer,
+                    product: device.product,
+                    aaguid: device
+                        .aaguid
+                        .map(|value| format!("{:032x}", u128::from_be_bytes(*value.as_bytes()))),
+                    versions: device.versions,
+                    extensions: device.extensions,
+                    transports: presentation.transports,
+                    options: device
+                        .options
+                        .into_iter()
+                        .map(|option| AuthenticatorOption {
+                            name: option.name,
+                            enabled: option.enabled,
+                        })
+                        .collect(),
+                    max_message_size: device.max_message_size.map(|value| value.to_string()),
+                    firmware_version: device.firmware_version.map(|value| value.to_string()),
+                    read_status: device.read_status.as_wire_name().to_owned(),
+                    freshness: device.freshness.as_wire_name().to_owned(),
+                },
+            )
             .collect();
 
-        Ok(AuthenticatorList {
-            enumeration_epoch: snapshot.enumeration_epoch.0.to_string(),
-            devices,
+        Ok(DiscoveryPresentation::Fresh {
+            list: AuthenticatorList {
+                enumeration_epoch: snapshot.enumeration_epoch.0.to_string(),
+                devices,
+            },
         })
     })
     .await
-    .map_err(|error| format!("native discovery task failed: {error}"))?
+    .unwrap_or(Err(()))
+    .unwrap_or_else(|()| {
+        // Even lock poisoning/task failure must purge inventories and return no raw error text.
+        state
+            .inspection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        DiscoveryPresentation::Unavailable {}
+    }))
+}
+
+/// BooGooCypher readiness status only. Takes no renderer input, reads no FIDO state and returns
+/// a bare typed status. The backend serves a cached result and bounds any network request.
+#[tauri::command]
+pub async fn boogoocypher_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<boogoocypher_status::ReadinessStatus, String> {
+    let readiness = Arc::clone(&state.boogoocypher);
+    Ok(readiness.status().await)
 }

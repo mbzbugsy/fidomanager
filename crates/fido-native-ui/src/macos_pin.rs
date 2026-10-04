@@ -135,7 +135,7 @@ pub unsafe fn present(
         }
     });
     alert.setInformativeText(&NSString::from_str(&format!(
-        "Selected key: {target_label}. Validate credential inspection authorization. No credentials will be read or changed. Enter this key's PIN. {retry_text} One submission makes one attempt; there is no automatic retry."
+        "Selected key: {target_label}. Inspect stored credentials and passkeys. This read-only operation will not change credentials. Enter this key's PIN. {retry_text} One submission makes one attempt; there is no automatic retry."
     )));
     let cancel = alert.addButtonWithTitle(&NSString::from_str("Cancel"));
     cancel.setKeyEquivalent(&NSString::from_str("\r"));

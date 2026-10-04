@@ -1,6 +1,8 @@
 //! Backend-only native menu entry. The WebView cannot invoke it or provide any parameters.
 use crate::AppState;
+use fido_service::activity::{self, ActivityOutcome};
 use fido_service::authentication;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
@@ -17,7 +19,7 @@ impl NativeTarget {
     ) -> Self {
         Self {
             // Backend-owned event identity only; never displayed or accepted from the renderer.
-            id: format!("validate-authentication-{:032x}", handle.as_raw()),
+            id: format!("inspect-credentials-{:032x}", handle.as_raw()),
             handle,
             label: presentation.label(),
         }
@@ -32,13 +34,31 @@ fn select_target(targets: &[NativeTarget], id: &str) -> Option<NativeTarget> {
 pub struct AuthenticationMenu {
     submenu: tauri::menu::Submenu<tauri::Wry>,
     targets: Arc<Mutex<Vec<NativeTarget>>>,
+    // Presentation only: the inspect items are greyed while an inspection runs. The backend gate
+    // stays the authority, and a selection that still arrives is suppressed or refused there.
+    enabled: Arc<AtomicBool>,
 }
 impl AuthenticationMenu {
     pub fn new(submenu: tauri::menu::Submenu<tauri::Wry>) -> Self {
         Self {
             submenu,
             targets: Arc::new(Mutex::new(Vec::new())),
+            enabled: Arc::new(AtomicBool::new(true)),
         }
+    }
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::SeqCst);
+        let owned = self.clone();
+        let _ = self.submenu.app_handle().run_on_main_thread(move || {
+            let has_targets = owned.targets.lock().is_ok_and(|t| !t.is_empty());
+            if let Ok(items) = owned.submenu.items() {
+                for item in items {
+                    if let Some(item) = item.as_menuitem() {
+                        let _ = item.set_enabled(enabled && has_targets);
+                    }
+                }
+            }
+        });
     }
     pub fn update(&self, targets: Vec<NativeTarget>) {
         let owned = self.clone();
@@ -63,8 +83,8 @@ impl AuthenticationMenu {
                         let item = tauri::menu::MenuItem::with_id(
                             &callback_app,
                             &target.id,
-                            format!("Authenticate {}…", target.label),
-                            true,
+                            format!("Inspect credentials on {}…", target.label),
+                            owned.enabled.load(Ordering::SeqCst),
                             None::<&str>,
                         )?;
                         owned.submenu.append(&item)?;
@@ -83,77 +103,140 @@ impl AuthenticationMenu {
     }
 }
 
-fn notice(app: &tauri::AppHandle, message: &'static str) {
-    if let Ok(mut value) = app.state::<AppState>().authentication_notice.lock() {
-        // Presentation revision only: it cannot identify or authorize an acquisition.
-        value.0 = value.0.saturating_add(1);
-        value.1 = Some(message);
+/// Greys the native inspect items for exactly the lifetime of one start attempt.
+struct MenuBusy(Option<AuthenticationMenu>);
+impl MenuBusy {
+    fn new(menu: Option<AuthenticationMenu>) -> Self {
+        if let Some(menu) = &menu {
+            menu.set_enabled(false);
+        }
+        Self(menu)
+    }
+}
+impl Drop for MenuBusy {
+    fn drop(&mut self) {
+        if let Some(menu) = &self.0 {
+            menu.set_enabled(true);
+        }
     }
 }
 
 pub fn start(app: &tauri::AppHandle, id: &str) {
     let state = app.state::<AppState>();
-    let target = state
+    let menu = state
         .authentication_menu
         .lock()
         .ok()
-        .and_then(|menu| menu.as_ref()?.select(id));
-    let Some(target) = target else {
+        .and_then(|menu| menu.clone());
+    let Some(target) = menu.as_ref().and_then(|menu| menu.select(id)) else {
         return;
     };
+    // Presentation-level reentrancy guard. A duplicate or reentrant menu event while one start is
+    // running is dropped silently; it would only be refused by the gate below anyway. This guard
+    // authorizes nothing: every start that is not dropped here still needs gate admission.
+    let Some(claim) = state.activity.try_claim() else {
+        eprintln!("[authentication] duplicate start suppressed");
+        return;
+    };
+    let menu_busy = MenuBusy::new(menu);
     let authority = Arc::clone(&state.authentication);
     let reservation = match authority.reserve() {
         Ok(reservation) => reservation,
         Err(error) => {
             eprintln!("[authentication] admission={error}");
-            notice(
-                app,
-                "Authentication cannot start while another workflow, cooldown or recovery barrier is active.",
-            );
+            claim.finish(ActivityOutcome::Issue(activity::admission_message(error)));
             return;
         }
     };
     let discovery = Arc::clone(&state.discovery);
     let app = app.clone();
     std::thread::spawn(move || {
+        let _menu_busy = menu_busy;
         let mut supervisor = match discovery.lock() {
             Ok(supervisor) => supervisor,
             // Retain gate on poisoned owner; never imply cleanup.
             Err(_) => {
                 eprintln!("[authentication] authority unavailable");
-                notice(&app, "Authentication unavailable. Recovery is required.");
+                claim.finish(ActivityOutcome::Issue(activity::RESTART_NEEDED));
                 return;
             }
         };
         // Refresh before using the native-menu selection. Stale handles are rejected, never
         // rebound to another key. Other connected keys cannot change the selected target.
         let snapshot = match supervisor.refresh() {
-            Ok(snapshot) if snapshot.devices.iter().any(|d| d.handle == target.handle) => snapshot,
-            _ => {
-                authority.cancel_unpresented(&mut supervisor, reservation);
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                if let Ok(mut store) = app.state::<AppState>().inspection.lock() {
+                    // A native selection during a proven restart gap must not turn normal
+                    // teardown into discovery failure. This grants no operation authority.
+                    let _ = store.discovery_problem::<()>(error);
+                }
+                let quiescent = authority.cancel_unpresented(&mut supervisor, reservation);
+                if quiescent != fido_service::inspection::ExecutionQuiescence::Quiescent {
+                    if let Ok(mut store) = app.state::<AppState>().inspection.lock() {
+                        store.clear();
+                    }
+                }
                 eprintln!("[authentication] selected key is unavailable");
-                notice(
-                    &app,
-                    "The selected security key is no longer available. Select it again from the native menu after discovery recovers.",
-                );
+                claim.finish(ActivityOutcome::Issue(activity::KEY_UNAVAILABLE));
                 return;
             }
+        };
+        let Some(worker_generation) = supervisor.status().worker_generation else {
+            authority.cancel_unpresented(&mut supervisor, reservation);
+            claim.finish(ActivityOutcome::Issue(activity::KEY_UNAVAILABLE));
+            return;
+        };
+        let inventory_devices = {
+            let state = app.state::<AppState>();
+            let prepared = state.inspection.lock().ok().and_then(|mut store| {
+                store
+                    .reconcile_connected(&snapshot.devices, worker_generation)
+                    .ok()
+            });
+            let Some(devices) = prepared else {
+                authority.cancel_unpresented(&mut supervisor, reservation);
+                claim.finish(ActivityOutcome::Issue(activity::INVENTORY_UNAVAILABLE));
+                return;
+            };
+            devices
         };
         let Some(index) = snapshot
             .devices
             .iter()
             .position(|d| d.handle == target.handle)
         else {
+            let quiescent = authority.cancel_unpresented(&mut supervisor, reservation);
+            if let Ok(mut store) = app.state::<AppState>().inspection.lock() {
+                if quiescent == fido_service::inspection::ExecutionQuiescence::Quiescent {
+                    store.proven_retirement(worker_generation);
+                } else {
+                    store.clear();
+                }
+            }
+            claim.finish(ActivityOutcome::Issue(activity::KEY_DISCONNECTED));
             return;
         };
+        let inventory_device = inventory_devices[index];
+        if let Ok(mut store) = app.state::<AppState>().inspection.lock() {
+            // Retire ONLY this key's prior view, before PIN/acquisition.
+            store.invalidate(inventory_device);
+        } else {
+            authority.cancel_unpresented(&mut supervisor, reservation);
+            claim.finish(ActivityOutcome::Issue(activity::INVENTORY_UNAVAILABLE));
+            return;
+        }
+        // Presentation only: attribute the running attempt to this key's card.
+        claim.target(inventory_device.handle);
         let device = &snapshot.devices[index];
         let handle = device.handle;
         let history_id = device.verification_history_id;
         let target_label =
             fido_service::presentation::authenticator_presentations(&snapshot.devices)[index]
                 .label();
+        let snapshot_label = target_label.clone();
         let presenter_app = app.clone();
-        let result = authority.validate(
+        let mut result = authority.inspect_with_progress(
             &mut supervisor,
             handle,
             reservation,
@@ -186,7 +269,36 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
                     })
                     .map_err(|_| "main thread unavailable")
             },
+            |progress| claim.progress(progress),
         );
+        if let Ok(mut store) = app.state::<AppState>().inspection.lock() {
+            if result.worker_quiescent {
+                store.proven_retirement(worker_generation);
+            } else {
+                store.clear();
+            }
+            if let Some(inventory) = result.inventory.take() {
+                let assessment = inventory.assess();
+                if store
+                    .replace(inventory_device, snapshot_label, inventory)
+                    .is_ok()
+                {
+                    eprintln!(
+                        "[inspection] snapshot={:?} total_kind={} mutation_issued=false",
+                        assessment.completeness,
+                        match assessment.total {
+                            fido_service::inspection::CredentialTotal::Exact(_) => "exact",
+                            fido_service::inspection::CredentialTotal::AtLeast(_) => "at_least",
+                            _ => "unknown",
+                        }
+                    );
+                } else {
+                    result.status = authentication::Status::Uncertain;
+                }
+            }
+        } else {
+            result.status = authentication::Status::Uncertain;
+        }
         // Only typed categories and booleans. No native paths, PIN, tokens, account metadata.
         eprintln!(
             "[authentication] status={:?} grant={:?} attached_puat_cleared={} worker_quiescent={} prompt_torn_down={}",
@@ -208,34 +320,8 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
                 }
             }
         }
-        // This message is display history, never durable authenticated/approved state. Only
-        // fixed backend text crosses the existing read-only foundation-status DTO.
-        let message = if !result.worker_quiescent || !result.prompt_torn_down {
-            "Authentication outcome uncertain. Recovery is required before another attempt."
-        } else {
-            use authentication::Status;
-            match result.status {
-                Status::Validated if result.attached_puat_cleared => {
-                    "Authentication validated. Temporary authorization cleared; no credentials were read or changed."
-                }
-                Status::WrongPin => {
-                    "Incorrect PIN. The attempt ended; no automatic retry was made."
-                }
-                Status::PinBlocked => "PIN blocked. The attempt ended.",
-                Status::PinAuthBlocked => "PIN authentication blocked. The attempt ended.",
-                Status::Cancelled => "Authentication cancelled.",
-                Status::Revoked => "Authentication ended because local authority was lost.",
-                Status::TimedOut => "Authentication timed out. No automatic retry was made.",
-                Status::Unsupported => {
-                    "Authentication is unavailable for this key or native session."
-                }
-                Status::CleanupFailed => {
-                    "Temporary authorization cleanup could not be proven. The worker was discarded."
-                }
-                _ => "Authentication outcome uncertain. No automatic retry was made.",
-            }
-        };
-        notice(&app, message);
+        // Presentation only; never durable approved state. Only typed categories reach the UI.
+        claim.finish(activity::outcome_for(&result));
     });
 }
 
@@ -256,8 +342,8 @@ mod tests {
         let targets = [first.clone(), second.clone()];
         assert_eq!(first.label, "Security Key(F829) · Thetis · USB");
         assert_eq!(first.label, second.label);
-        assert!(!format!("Authenticate {}…", first.label).contains("00000009"));
-        assert!(!format!("Authenticate {}…", second.label).contains("0000000a"));
+        assert!(!format!("Inspect credentials on {}…", first.label).contains("00000009"));
+        assert!(!format!("Inspect credentials on {}…", second.label).contains("0000000a"));
         assert_eq!(
             select_target(&targets, &first.id).map(|t| t.handle),
             Some(first.handle)

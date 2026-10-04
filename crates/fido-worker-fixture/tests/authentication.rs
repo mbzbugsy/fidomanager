@@ -274,3 +274,178 @@ fn host_deadline_kills_and_reaps_without_claiming_authenticator_cancel() -> Test
     assert!(!common::pid_exists(pid));
     Ok(())
 }
+
+#[test]
+fn complete_inspection_transaction_clears_reaps_and_restarts_fresh() -> TestResult {
+    let mut supervisor = DiscoverySupervisor::new(
+        launcher(&["--authentication"])?,
+        DiscoveryPolicy::default(),
+        RestartPolicy::default(),
+    )?;
+    let authority = AuthenticationAuthority::default();
+    let mut previous_worker = 0;
+    for _ in 0..2 {
+        let snapshot = supervisor.refresh()?;
+        let generation = supervisor
+            .status()
+            .worker_generation
+            .ok_or("missing generation")?
+            .0;
+        assert!(generation > previous_worker);
+        previous_worker = generation;
+        let reservation = authority.reserve()?;
+        let result = authority.inspect(
+            &mut supervisor,
+            snapshot.devices[0].handle,
+            reservation,
+            |request, controller, sender, retries, _, _| {
+                assert_eq!(retries, Some(8));
+                let binding = request.binding();
+                let mut controller = controller.lock().map_err(|_| "controller")?;
+                controller
+                    .resolve(PromptOutcome::Approved(binding), Instant::now())
+                    .map_err(|_| "resolve")?;
+                controller
+                    .did_teardown(binding, Instant::now())
+                    .map_err(|_| "teardown")?;
+                let pin = PinSecret::collect(|b| {
+                    b[..4].copy_from_slice(b"fake");
+                    Some(4)
+                })
+                .map_err(|_| "pin")?;
+                sender
+                    .send(PinCompletion {
+                        binding,
+                        outcome: PromptOutcome::Approved(binding),
+                        pin: Some(pin),
+                    })
+                    .map_err(|_| "send")
+            },
+        );
+        assert_eq!(result.status, Status::Validated);
+        assert_eq!(
+            result.inventory.ok_or("inventory")?.assess().total,
+            fido_core::inventory::CredentialTotal::Exact(0)
+        );
+        assert!(result.attached_puat_cleared && result.worker_quiescent && result.prompt_torn_down);
+        assert!(
+            supervisor
+                .resolve_handle(snapshot.devices[0].handle)
+                .is_none()
+        );
+        std::thread::sleep(Duration::from_millis(1_020));
+    }
+    Ok(())
+}
+
+#[test]
+fn two_inspected_inventories_survive_real_worker_retirement_and_cancel() -> TestResult {
+    use fido_service::inspection::InspectionStore;
+    let mut supervisor = DiscoverySupervisor::new(
+        launcher(&["--authentication", "--two-devices"])?,
+        DiscoveryPolicy::default(),
+        RestartPolicy::default(),
+    )?;
+    let authority = AuthenticationAuthority::default();
+    let mut store = InspectionStore::default();
+    let mut epochs = [None, None];
+    for (selected, cancel) in [(0, false), (1, false), (0, false), (0, true)] {
+        let snapshot = supervisor.refresh()?;
+        let worker = supervisor.status().worker_generation.ok_or("generation")?;
+        let ids = store
+            .reconcile_connected(&snapshot.devices, worker)
+            .map_err(|_| "reconcile")?;
+        for i in 0..2 {
+            assert_eq!(store.snapshot_for(ids[i]).map(|s| s.epoch), epochs[i]);
+        }
+        store.invalidate(ids[selected]);
+        let mut result = authority.inspect(
+            &mut supervisor,
+            snapshot.devices[selected].handle,
+            authority.reserve()?,
+            |request, controller, sender, _, _, _| {
+                let binding = request.binding();
+                let outcome = if cancel {
+                    PromptOutcome::Cancelled(binding)
+                } else {
+                    PromptOutcome::Approved(binding)
+                };
+                let mut controller = controller.lock().map_err(|_| "controller")?;
+                controller
+                    .resolve(outcome, Instant::now())
+                    .map_err(|_| "resolve")?;
+                controller
+                    .did_teardown(binding, Instant::now())
+                    .map_err(|_| "teardown")?;
+                let pin = if cancel {
+                    None
+                } else {
+                    Some(
+                        PinSecret::collect(|b| {
+                            b[..4].copy_from_slice(b"fake");
+                            Some(4)
+                        })
+                        .map_err(|_| "pin")?,
+                    )
+                };
+                sender
+                    .send(PinCompletion {
+                        binding,
+                        outcome,
+                        pin,
+                    })
+                    .map_err(|_| "send")
+            },
+        );
+        assert!(result.worker_quiescent && result.prompt_torn_down);
+        assert_eq!(
+            result.status,
+            if cancel {
+                Status::Cancelled
+            } else {
+                Status::Validated
+            }
+        );
+        for device in &snapshot.devices {
+            assert!(supervisor.resolve_handle(device.handle).is_none());
+        }
+        store.proven_retirement(worker);
+        let settling_error = supervisor
+            .refresh()
+            .err()
+            .ok_or("expected restart settling")?;
+        assert_eq!(
+            store.discovery_problem::<()>(settling_error),
+            fido_service::discovery_presentation::DiscoveryPresentation::Settling {}
+        );
+        if let Some(inventory) = result.inventory.take() {
+            store
+                .replace(ids[selected], "Identical label".into(), inventory)
+                .map_err(|_| "replace")?;
+        }
+        assert!(ids.iter().all(|d| store.snapshot_for(*d).is_none()));
+        std::thread::sleep(Duration::from_millis(1_020));
+        let next = supervisor.refresh()?;
+        let new_ids = store
+            .reconcile_connected(
+                &next.devices,
+                supervisor.status().worker_generation.ok_or("generation")?,
+            )
+            .map_err(|_| "reconcile")?;
+        assert_eq!(ids, new_ids);
+        let new_epoch = store.snapshot_for(new_ids[selected]).map(|s| s.epoch);
+        if !cancel {
+            assert!(new_epoch.is_some());
+            assert_ne!(new_epoch, epochs[selected]);
+        } else {
+            assert!(new_epoch.is_none());
+        }
+        epochs[selected] = new_epoch;
+        assert_eq!(
+            store.snapshot_for(new_ids[1 - selected]).map(|s| s.epoch),
+            epochs[1 - selected]
+        );
+    }
+    assert!(epochs[0].is_none() && epochs[1].is_some());
+    Ok(())
+}

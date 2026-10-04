@@ -18,8 +18,13 @@ type DiscoveryAuthority = fido_service::DiscoverySupervisor<fido_service::Proces
 
 pub(crate) struct AppState {
     discovery: Arc<Mutex<DiscoveryAuthority>>,
-    // Presentation history only; never consulted for authorization or workflow admission.
-    authentication_notice: Arc<Mutex<(u64, Option<&'static str>)>>,
+    inspection: Arc<Mutex<fido_service::inspection::InspectionStore>>,
+    // Status only. Isolated from every FIDO type; nothing here is consulted by any local
+    // operation, and no value from it is ever an input to authentication.
+    boogoocypher: Arc<boogoocypher_status::ReadinessService<boogoocypher_status::ReqwestTransport>>,
+    // Presentation only: start-slot suppression, per-key activity and outcome text. Never
+    // consulted for authorization or admission; the sensitive-workflow gate stays authoritative.
+    activity: Arc<fido_service::activity::ActivityTracker>,
     // Historical display facts only; not grants and never checked by authentication admission.
     verification_history: Arc<Mutex<std::collections::BTreeSet<[u8; 32]>>>,
     #[cfg(all(
@@ -79,7 +84,13 @@ pub fn run() {
         }))
         .manage(AppState {
             discovery: Arc::clone(&discovery),
-            authentication_notice: Arc::new(Mutex::new((0, None))),
+            inspection: Arc::new(Mutex::new(
+                fido_service::inspection::InspectionStore::default(),
+            )),
+            boogoocypher: Arc::new(boogoocypher_status::ReadinessService::new(
+                boogoocypher_status::ReqwestTransport::new(),
+            )),
+            activity: Arc::new(fido_service::activity::ActivityTracker::default()),
             verification_history: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
             #[cfg(all(
                 feature = "native-pin",
@@ -97,6 +108,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::foundation_status,
             commands::list_authenticators,
+            commands::boogoocypher_status,
         ]);
     #[cfg(all(
         feature = "native-pin",
@@ -111,7 +123,7 @@ pub fn run() {
             let menu = tauri::menu::Menu::default(app.handle())?;
             let item = tauri::menu::MenuItem::with_id(
                 app.handle(),
-                "validate-authentication",
+                "inspect-credentials",
                 "No security key available",
                 false,
                 None::<&str>,
@@ -128,7 +140,7 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| {
-            if event.id().as_ref().starts_with("validate-authentication-") {
+            if event.id().as_ref().starts_with("inspect-credentials-") {
                 authentication::start(app, event.id().as_ref());
             }
         })

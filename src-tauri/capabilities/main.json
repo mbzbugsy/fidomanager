@@ -1,7 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Milestone 1 renderer capability: foundation status and read-only authenticator discovery only.",
+  "description": "Milestone 1 renderer capability: foundation status, read-only authenticator discovery and the BooGooCypher readiness status only.",
   "windows": ["main"],
-  "permissions": ["allow-foundation-status", "allow-list-authenticators"]
+  "permissions": [
+    "allow-foundation-status",
+    "allow-list-authenticators",
+    "allow-boogoocypher-status"
+  ]
 }

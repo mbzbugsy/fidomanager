@@ -96,6 +96,22 @@ impl fido_libfido2::NativeAuthenticationSession for AuthFixture {
     fn pin_retries(&self) -> Option<u8> {
         Some(8)
     }
+    fn inspect(
+        self: Box<Self>,
+        binding: fido_auth::AcquisitionBinding,
+        pin: fido_auth::PinSecret,
+        deadline: NativeDeadline,
+    ) -> fido_libfido2::inspection::NativeInspection {
+        let evidence = self.validate(binding, pin, deadline);
+        fido_libfido2::inspection::NativeInspection {
+            evidence,
+            inventory: Some(fido_core::inventory::OwnedInventory {
+                metadata_existing: 0,
+                rps: Vec::new(),
+            }),
+            error: None,
+        }
+    }
     fn validate(
         self: Box<Self>,
         binding: fido_auth::AcquisitionBinding,
