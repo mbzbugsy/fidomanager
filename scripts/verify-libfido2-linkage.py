@@ -32,6 +32,19 @@ def verify_credman_symbols(symbols, content, object_id):
             raise RuntimeError("Production credman symbol is not attributed to the private archive: " + symbol)
 
 
+def verify_pin_symbol(symbols, content, archive_path):
+    symbol = "fido_dev_set_pin"
+    live = content.split("# Dead Stripped Symbols:", 1)[0]
+    match = re.search(
+        r"^\[\s*(\d+)\]\s+" + re.escape(archive_path) + r"\(pin\.c\.o\)$",
+        content, re.M,
+    )
+    if (not match
+            or not re.search(r"\bT _" + symbol + r"$", symbols, re.M)
+            or not re.search(r"\[\s*" + match.group(1) + r"\]\s+_" + symbol + r"$", live, re.M)):
+        raise RuntimeError("PIN mutation symbol is not a live definition from the exact pinned private archive")
+
+
 def verify(worker):
     if platform.system() != "Darwin":
         raise RuntimeError("Production linkage verification currently requires macOS")
@@ -60,7 +73,7 @@ def verify(worker):
         if linked_binary.is_file() and builder.sha256(linked_binary) == worker_hash:
             matching.append(content)
     if not matching:
-        raise RuntimeError("No matching Cargo link map; build the production fido-worker first")
+        raise RuntimeError("No matching Cargo link map; run cargo clean -p fido-worker then cargo build -p fido-worker --locked")
     for content in matching:
         object_match = re.search(r"^\[\s*(\d+)\]\s+(.+libfidomanager_fido2_bounded\.a)\(credman\.c\.o\)$", content, re.M)
         if not object_match:
@@ -70,6 +83,7 @@ def verify(worker):
         if not re.search(r"\[\s*" + object_id + r"\]\s+_" + re.escape(spec["identity_symbol"]) + r"$", content, re.M):
             continue
         verify_credman_symbols(symbols, content, object_id)
+        verify_pin_symbol(symbols, content, archive_path)
         archive = Path(archive_path).resolve(strict=True)
         if archive.parent.name != "private-libfido2":
             raise RuntimeError("Native object did not come from Cargo's private build")
@@ -82,7 +96,7 @@ def verify(worker):
         }
         if any(metadata.get(key) != value for key, value in expected.items()):
             raise RuntimeError("Linked private archive identity mismatch")
-        print("PASS: worker statically links pinned patched libfido2 1.17.0; limit=256; all 16 used credman symbols attributed; no libfido2 dylib")
+        print("PASS: worker statically links pinned patched libfido2 1.17.0; limit=256; all 16 used credman symbols and fido_dev_set_pin attributed; no libfido2 dylib")
         return
     raise RuntimeError("Link map does not bind the worker probe to the reviewed credman object")
 

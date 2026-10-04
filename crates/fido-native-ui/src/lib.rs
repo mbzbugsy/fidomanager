@@ -15,6 +15,12 @@ use thiserror::Error;
 pub mod macos_pin;
 
 /// Trusted native completion, delivered only after acknowledged sheet teardown. Never a DTO.
+pub struct MutationCompletion {
+    pub binding: PromptBinding,
+    pub outcome: PromptOutcome,
+    pub secrets: Option<fido_auth::mutation::PinMutationSecrets>,
+}
+
 pub struct PinCompletion {
     pub binding: PromptBinding,
     pub outcome: PromptOutcome,
@@ -62,7 +68,7 @@ impl PromptOutcome {
 }
 
 /// An owned request minted by the controller, never deserialized from renderer input.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PromptRequest {
     binding: PromptBinding,
     deadline: Instant,
@@ -235,6 +241,74 @@ impl Drop for PromptController {
     }
 }
 
+/// Native confirmation is discarded here; only current/new ownership proceeds to the worker.
+pub fn confirmed_mutation_secrets(
+    operation: fido_auth::mutation::PinOperation,
+    current: Option<fido_auth::PinSecret>,
+    new: fido_auth::PinSecret,
+    confirm: fido_auth::PinSecret,
+) -> Option<fido_auth::mutation::PinMutationSecrets> {
+    use fido_auth::mutation::{PinMutationSecrets, PinOperation};
+    if new.as_c_str() != confirm.as_c_str() {
+        return None;
+    }
+    drop(confirm);
+    // CTAP counts Unicode scalar values; the pinned API also requires 4..63 UTF-8 bytes.
+    if new.as_c_str().to_str().ok()?.chars().count() < 4 {
+        return None;
+    }
+    match operation {
+        PinOperation::SetPin if current.is_none() => Some(PinMutationSecrets::Set { new }),
+        PinOperation::ChangePin => Some(PinMutationSecrets::Change {
+            current: current?,
+            new,
+        }),
+        _ => None,
+    }
+}
+
+/// The actual native sheet uses these descriptions and acknowledgement requirements.
+pub fn mutation_description(
+    operation: fido_auth::mutation::PinOperation,
+    target: &str,
+    retries: Option<u8>,
+) -> String {
+    use fido_auth::mutation::PinOperation;
+    let change = operation == PinOperation::ChangePin;
+    let retry = if change {
+        retries.map_or("Retry count unavailable.".into(), |n| {
+            format!(
+                "PIN retries remaining: {n}.{}",
+                if n <= 3 {
+                    " Warning: few retries remain."
+                } else {
+                    ""
+                }
+            )
+        })
+    } else {
+        String::new()
+    };
+    format!(
+        "Selected key: {target}. {} This is a persistent change. {} {retry} One submission makes one attempt; there is no automatic retry.",
+        if change {
+            "The PIN on this physical security key will change."
+        } else {
+            "A PIN will be configured on this physical security key."
+        },
+        if change {
+            "Enter the current PIN and confirm the new PIN."
+        } else {
+            "Enter and confirm the new PIN."
+        }
+    )
+}
+pub fn last_retry_ack_required(
+    operation: fido_auth::mutation::PinOperation,
+    retries: Option<u8>,
+) -> bool {
+    operation == fido_auth::mutation::PinOperation::ChangePin && retries == Some(1)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +320,98 @@ mod tests {
         }
     }
 
+    fn synthetic_pin(text: &[u8]) -> fido_auth::PinSecret {
+        fido_auth::PinSecret::collect(|b| {
+            b[..text.len()].copy_from_slice(text);
+            Some(text.len())
+        })
+        .unwrap_or_else(|_| panic!("synthetic"))
+    }
+
+    #[test]
+    fn mutation_description_and_last_retry_policy_are_exact() {
+        use fido_auth::mutation::PinOperation;
+        let set = mutation_description(PinOperation::SetPin, "Trusted key A", None);
+        let change = mutation_description(PinOperation::ChangePin, "Trusted key B", Some(1));
+        assert!(
+            set.contains("Trusted key A")
+                && set.contains("PIN will be configured")
+                && set.contains("persistent change")
+                && !set.contains("current PIN")
+        );
+        assert!(
+            change.contains("Trusted key B")
+                && change.contains("PIN on this physical security key will change")
+                && change.contains("current PIN")
+                && change.contains("remaining: 1")
+        );
+        for op in [PinOperation::SetPin, PinOperation::ChangePin] {
+            for retries in [None, Some(0), Some(1), Some(2), Some(8)] {
+                assert_eq!(
+                    last_retry_ack_required(op, retries),
+                    op == PinOperation::ChangePin && retries == Some(1)
+                );
+            }
+        }
+    }
+    #[test]
+    fn mutation_confirmation_is_native_only_exact_and_discards_third_secret() {
+        use fido_auth::mutation::PinOperation;
+        assert!(
+            confirmed_mutation_secrets(
+                PinOperation::SetPin,
+                None,
+                synthetic_pin(b"fake"),
+                synthetic_pin(b"fake")
+            )
+            .is_some()
+        );
+        assert!(
+            confirmed_mutation_secrets(
+                PinOperation::ChangePin,
+                Some(synthetic_pin(b"fake")),
+                synthetic_pin(b"next"),
+                synthetic_pin(b"next")
+            )
+            .is_some()
+        );
+        assert!(
+            confirmed_mutation_secrets(
+                PinOperation::SetPin,
+                None,
+                synthetic_pin(b"fake"),
+                synthetic_pin(b"next")
+            )
+            .is_none()
+        );
+        assert!(
+            confirmed_mutation_secrets(
+                PinOperation::ChangePin,
+                None,
+                synthetic_pin(b"next"),
+                synthetic_pin(b"next")
+            )
+            .is_none()
+        );
+        assert!(
+            confirmed_mutation_secrets(
+                PinOperation::SetPin,
+                Some(synthetic_pin(b"fake")),
+                synthetic_pin(b"next"),
+                synthetic_pin(b"next")
+            )
+            .is_none()
+        );
+        assert!(
+            confirmed_mutation_secrets(
+                PinOperation::SetPin,
+                None,
+                synthetic_pin("éé".as_bytes()),
+                synthetic_pin("éé".as_bytes())
+            )
+            .is_none()
+        );
+    }
     #[test]
     fn zero_queue_reservation_lasts_until_teardown_and_delivers_once() {
         let now = Instant::now();

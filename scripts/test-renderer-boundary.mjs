@@ -294,7 +294,7 @@ try {
         'pub enum WorkerRequest {',
         'pub enum WorkerRequest {\n    SetPin,',
       ),
-    /must not add an executable mutation worker request/,
+    /must not add an unreviewed executable mutation worker request/,
     'executable SetPin worker request',
   );
   mutate(
@@ -309,6 +309,76 @@ try {
     /authority or recovery data must not enter renderer/,
     'renderer permit reference',
   );
+  for (const [path, type] of [
+    ['crates/fido-auth/src/mutation.rs', 'PinMutationSecrets'],
+    ['crates/fido-service/src/mutation.rs', 'OperationPermit'],
+    ['crates/fido-service/src/mutation.rs', 'PinMutationDispatchPermit'],
+  ]) {
+    for (const trait of ['Serialize', 'Clone', 'Debug']) {
+      mutate(
+        path,
+        (text) =>
+          text.replace(
+            new RegExp('((?:pub )?(?:struct|enum) ' + type + ')'),
+            `#[derive(${trait})]\n$1`,
+          ),
+        /secret\/permit traits must remain forbidden/,
+        `${type} derives ${trait}`,
+      );
+    }
+  }
+  mutate(
+    'crates/fido-service/src/mutation.rs',
+    (text) =>
+      text.replace(
+        'struct PinMutationDispatchPermit',
+        'pub struct PinMutationDispatchPermit',
+      ),
+    /dispatch authority must remain private/,
+    'public dispatch capability',
+  );
+  mutate(
+    'crates/fido-service/src/mutation.rs',
+    (text) =>
+      text.replace(
+        'self.mark_dispatch_capable(supervisor, &mut r, permit)?;',
+        '// bypass durable marker',
+      ),
+    /requires durable Pending and DispatchCapable ordering/,
+    'dispatch before durable acknowledgement',
+  );
+  mutate(
+    'crates/fido-auth/src/mutation.rs',
+    (text) => text + '\nimpl serde::Serialize for PinMutationSecrets {}\n',
+    /secret\/permit traits must remain forbidden/,
+    'manually implemented secret serialization',
+  );
+  for (const control of [
+    'cancel.setKeyEquivalent(&NSString::from_str("\\r"))',
+    'makeFirstResponder(Some(&cancel))',
+    '!default_cancel',
+  ]) {
+    mutate(
+      'crates/fido-native-ui/src/macos_pin.rs',
+      (text) => text.replace(control, 'unsafe_default'),
+      /must prove Cancel is the safe default/,
+      'unsafe native sheet default',
+    );
+  }
+  for (const name of [
+    'PinMutationSecrets',
+    'PinMutationDispatchPermit',
+    'current_pin',
+    'new_pin',
+    'confirm_pin',
+  ]) {
+    mutate(
+      'src/App.svelte',
+      (text) => text + `\n<!-- ${name} -->\n`,
+      /authority or recovery data must not enter renderer/,
+      `renderer ${name}`,
+    );
+  }
   assert.equal(check().status, 0, 'All restored M4 fixtures must pass.');
   console.log(
     `Renderer boundary regression checks passed (${checks} checker executions; 8 denied crates, command/permission allowlists, service separation and M4 controls).`,

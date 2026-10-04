@@ -139,6 +139,7 @@ where
         if matches!(
             request.request,
             fido_worker_protocol::WorkerRequest::PrepareAuthentication { .. }
+                | fido_worker_protocol::WorkerRequest::PreparePinMutation { .. }
         ) {
             // Finite even if the parent/UI stalls after prepare; independent of native execution.
             if expiry
@@ -153,6 +154,10 @@ where
                 exit_immediately(exit::PROTOCOL);
             }
         }
+        let retire_after_response = matches!(
+            request.request,
+            fido_worker_protocol::WorkerRequest::ExecutePinMutation { .. }
+        );
         let response = engine.handle(request);
 
         // Cleared before the response is written: the service cannot send its next request until
@@ -160,6 +165,9 @@ where
         busy.store(false, Ordering::Release);
         if write_message(&mut output, &response, MAX_WORKER_FRAME_BYTES).is_err() {
             exit_immediately(exit::PARENT_GONE);
+        }
+        if retire_after_response {
+            exit_immediately(exit::ORDERLY);
         }
     }
 }

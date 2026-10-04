@@ -1064,6 +1064,7 @@ dependencies = [
  "fido-service",
  "fido-worker",
  "fido-worker-protocol",
+ "serde_json",
 ]
 
 [[package]]

@@ -24,3 +24,6 @@ path = "src/bin/fido-worker-fixture.rs"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

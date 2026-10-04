@@ -26,22 +26,40 @@ use std::{
     time::Instant,
 };
 
+use fido_auth::mutation::{PinMutationSecrets, PinOperation};
+#[derive(Clone, Copy)]
+enum Purpose {
+    Inspection,
+    Mutation(PinOperation),
+    Recovery(PinOperation),
+}
+enum Reply {
+    Inspection(Sender<PinCompletion>),
+    Mutation(Sender<crate::MutationCompletion>),
+}
+
 pub type Controller = Arc<Mutex<PromptController>>;
 struct Sheet {
     binding: PromptBinding,
     deadline: Instant,
     parent: Retained<NSWindow>,
     alert: Retained<NSAlert>,
+    approve: Retained<NSButton>,
     input: Retained<NSSecureTextField>,
     last_retry_ack: Option<Retained<NSButton>>,
     controller: Controller,
-    reply: Option<Sender<PinCompletion>>,
+    reply: Option<Reply>,
+    purpose: Purpose,
+    new_input: Option<Retained<NSSecureTextField>>,
+    confirm_input: Option<Retained<NSSecureTextField>>,
+    secrets: Option<PinMutationSecrets>,
     decision: Option<PromptOutcome>,
     pin: Option<fido_auth::PinSecret>,
     timer: Retained<NSTimer>,
     close_observer: Retained<ProtocolObject<dyn NSObjectProtocol>>,
     epoch: Arc<AtomicU64>,
     expected_epoch: u64,
+    approve_after: Instant,
 }
 impl Drop for Sheet {
     fn drop(&mut self) {
@@ -51,6 +69,9 @@ impl Drop for Sheet {
             NSNotificationCenter::defaultCenter().removeObserver(self.close_observer.as_ref())
         };
         self.input.setStringValue(&NSString::from_str(""));
+        for field in [&self.new_input, &self.confirm_input].into_iter().flatten() {
+            field.setStringValue(&NSString::from_str(""));
+        }
     }
 }
 type Observer = (
@@ -106,6 +127,77 @@ pub unsafe fn present(
     revocation: (Arc<AtomicU64>, u64),
     target_label: &str,
 ) -> Result<(), &'static str> {
+    // SAFETY: the trusted caller's main-window contract is forwarded unchanged.
+    unsafe {
+        present_sheet(
+            parent,
+            request,
+            controller,
+            Reply::Inspection(reply),
+            retries,
+            revocation,
+            (target_label, Purpose::Inspection),
+        )
+    }
+}
+/// # Safety
+/// Parent must be the live trusted main NSWindow, called on AppKit's main thread.
+pub unsafe fn present_mutation(
+    parent: *mut c_void,
+    request: PromptRequest,
+    controller: Controller,
+    reply: Sender<crate::MutationCompletion>,
+    operation_and_retries: (PinOperation, Option<u8>),
+    revocation: (Arc<AtomicU64>, u64),
+    target_label: &str,
+) -> Result<(), &'static str> {
+    // SAFETY: forwarded trusted NSWindow contract; no renderer target or operation input.
+    unsafe {
+        present_sheet(
+            parent,
+            request,
+            controller,
+            Reply::Mutation(reply),
+            operation_and_retries.1,
+            revocation,
+            (target_label, Purpose::Mutation(operation_and_retries.0)),
+        )
+    }
+}
+/// # Safety
+/// Parent must be the live trusted main NSWindow, called on AppKit's main thread.
+pub unsafe fn present_recovery(
+    parent: *mut c_void,
+    request: PromptRequest,
+    controller: Controller,
+    reply: Sender<crate::MutationCompletion>,
+    operation: PinOperation,
+    revocation: (Arc<AtomicU64>, u64),
+    evidence: &str,
+) -> Result<(), &'static str> {
+    // SAFETY: forwarded trusted NSWindow contract; this sheet collects no secret or probe.
+    unsafe {
+        present_sheet(
+            parent,
+            request,
+            controller,
+            Reply::Mutation(reply),
+            None,
+            revocation,
+            (evidence, Purpose::Recovery(operation)),
+        )
+    }
+}
+unsafe fn present_sheet(
+    parent: *mut c_void,
+    request: PromptRequest,
+    controller: Controller,
+    reply: Reply,
+    retries: Option<u8>,
+    revocation: (Arc<AtomicU64>, u64),
+    description: (&str, Purpose),
+) -> Result<(), &'static str> {
+    let (target_label, purpose) = description;
     let (epoch, expected_epoch) = revocation;
     let mtm = MainThreadMarker::new().ok_or("AppKit presentation requires main thread")?;
     if ACTIVE.with(|a| a.borrow().is_some()) {
@@ -126,7 +218,11 @@ pub unsafe fn present(
     }
     let binding = request.binding();
     let alert = NSAlert::new(mtm);
-    alert.setMessageText(&NSString::from_str("Authenticate security key"));
+    alert.setMessageText(&NSString::from_str(match purpose {
+        Purpose::Inspection => "Authenticate security key",
+        Purpose::Mutation(op) => op.title(),
+        Purpose::Recovery(_) => "Acknowledge uncertain PIN operation",
+    }));
     let retry_text = retries.map_or("Retry count unavailable.".to_owned(), |n| {
         if n <= 3 {
             format!("Warning: only {n} PIN retries remain.")
@@ -134,40 +230,100 @@ pub unsafe fn present(
             format!("PIN retries remaining: {n}.")
         }
     });
-    alert.setInformativeText(&NSString::from_str(&format!(
-        "Selected key: {target_label}. Inspect stored credentials and passkeys. This read-only operation will not change credentials. Enter this key's PIN. {retry_text} One submission makes one attempt; there is no automatic retry."
-    )));
+    let text = match purpose {
+        Purpose::Inspection => format!(
+            "Selected key: {target_label}. Inspect stored credentials and passkeys. This read-only operation will not change credentials. Enter this key's PIN. {retry_text} One submission makes one attempt; there is no automatic retry."
+        ),
+        Purpose::Mutation(op) => crate::mutation_description(op, target_label, retries),
+        Purpose::Recovery(op) => format!(
+            "The previous {} result could not be confirmed. {} {} Acknowledging allows future security key operations but preserves the uncertain historical result. This does not confirm success or failure and makes no PIN attempt.",
+            op.title(),
+            if op == PinOperation::ChangePin {
+                "Fido Manager cannot determine whether the old or new PIN is active without consuming an authentication attempt. Neither PIN will be tested."
+            } else {
+                "A configured PIN does not prove the exact PIN value. The proposed PIN will not be tested."
+            },
+            target_label
+        ),
+    };
+    alert.setInformativeText(&NSString::from_str(&text));
     let cancel = alert.addButtonWithTitle(&NSString::from_str("Cancel"));
     cancel.setKeyEquivalent(&NSString::from_str("\r"));
-    alert
-        .addButtonWithTitle(&NSString::from_str("Authenticate"))
-        .setKeyEquivalent(&NSString::from_str(""));
+    let approve = alert.addButtonWithTitle(&NSString::from_str(match purpose {
+        Purpose::Inspection => "Authenticate",
+        Purpose::Mutation(op) => op.title(),
+        Purpose::Recovery(_) => "Acknowledge uncertainty",
+    }));
+    approve.setKeyEquivalent(&NSString::from_str(""));
+    approve.setEnabled(matches!(purpose, Purpose::Inspection));
     let input = NSSecureTextField::initWithFrame(
         NSSecureTextField::alloc(mtm),
         NSRect::new(NSPoint::new(0., 0.), NSSize::new(300., 26.)),
     );
     input.setPlaceholderString(Some(&NSString::from_str("Security key PIN")));
-    let last_retry_ack = if retries == Some(1) {
+    let last_retry_ack = if match purpose {
+        Purpose::Inspection => retries == Some(1),
+        Purpose::Mutation(op) => crate::last_retry_ack_required(op, retries),
+        Purpose::Recovery(_) => true,
+    } {
         let button = NSButton::new(mtm);
         button.setButtonType(NSButtonType::Switch);
         button.setTitle(&NSString::from_str(
-            "I understand this is the last PIN retry",
+            if matches!(purpose, Purpose::Recovery(_)) {
+                "I acknowledge the PIN result is unknown"
+            } else {
+                "I understand this is the last PIN retry"
+            },
         ));
         button.setFrame(NSRect::new(NSPoint::new(0., 30.), NSSize::new(340., 26.)));
         Some(button)
     } else {
         None
     };
+    let mutation = matches!(purpose, Purpose::Mutation(_));
+    let field = |placeholder: &str, y: f64| {
+        let field = NSSecureTextField::initWithFrame(
+            NSSecureTextField::alloc(mtm),
+            NSRect::new(NSPoint::new(0., y), NSSize::new(340., 26.)),
+        );
+        field.setPlaceholderString(Some(&NSString::from_str(placeholder)));
+        field
+    };
+    let new_input = mutation.then(|| field("New PIN", 30.));
+    let confirm_input = mutation.then(|| field("Confirm new PIN", 60.));
     let accessory = NSView::initWithFrame(
         NSView::alloc(mtm),
         NSRect::new(
             NSPoint::new(0., 0.),
-            NSSize::new(340., if last_retry_ack.is_some() { 60. } else { 26. }),
+            NSSize::new(340., if mutation { 120. } else { 60. }),
         ),
     );
-    accessory.addSubview(&input);
-    if let Some(button) = &last_retry_ack {
-        accessory.addSubview(button);
+    if !matches!(purpose, Purpose::Recovery(_)) {
+        input.setPlaceholderString(Some(&NSString::from_str(
+            if matches!(purpose, Purpose::Mutation(PinOperation::ChangePin)) {
+                "Current PIN"
+            } else {
+                "Security key PIN"
+            },
+        )));
+        if !matches!(purpose, Purpose::Mutation(PinOperation::SetPin)) {
+            accessory.addSubview(&input);
+        }
+        for field in [&new_input, &confirm_input].into_iter().flatten() {
+            accessory.addSubview(field);
+        }
+        if let Some(button) = &last_retry_ack {
+            button.setFrame(NSRect::new(
+                NSPoint::new(0., if mutation { 90. } else { 30. }),
+                NSSize::new(340., 26.),
+            ));
+            accessory.addSubview(button);
+        }
+    }
+    if matches!(purpose, Purpose::Recovery(_)) {
+        if let Some(button) = &last_retry_ack {
+            accessory.addSubview(button);
+        }
     }
     alert.setAccessoryView(Some(&accessory));
     alert.layout();
@@ -197,16 +353,22 @@ pub unsafe fn present(
             deadline: request.deadline(),
             parent: parent.clone(),
             alert: alert.clone(),
+            approve,
             input,
             last_retry_ack,
             controller,
             reply: Some(reply),
+            purpose,
+            new_input,
+            confirm_input,
+            secrets: None,
             decision: None,
             pin: None,
             timer,
             close_observer,
             epoch,
             expected_epoch,
+            approve_after: Instant::now() + std::time::Duration::from_millis(500),
         })
     });
     let completion = RcBlock::new(move |response: NSModalResponse| {
@@ -227,7 +389,8 @@ pub unsafe fn present(
         })
     });
     eprintln!(
-        "[authentication] prompt main=true secure_control=true window_modal={} default_cancel={default_cancel}",
+        "[authentication] prompt main=true secure_control={} window_modal={} default_cancel={default_cancel}",
+        !matches!(purpose, Purpose::Recovery(_)),
         associated && attached
     );
     if !associated || !attached || !default_cancel {
@@ -260,6 +423,9 @@ fn poll(binding: PromptBinding) {
                 } else if !s.parent.isVisible() {
                     Some(PromptOutcome::ParentLost(binding))
                 } else {
+                    if Instant::now() >= s.approve_after {
+                        s.approve.setEnabled(true);
+                    }
                     None
                 }
             })
@@ -278,6 +444,7 @@ fn dismiss(binding: PromptBinding, outcome: PromptOutcome) {
         if let Some(s) = a.borrow_mut().as_mut().filter(|s| s.binding == binding) {
             s.decision = Some(outcome);
             s.pin = None;
+            s.secrets = None;
             if let Ok(mut c) = s.controller.lock() {
                 let _ = c.revoke(outcome);
             }
@@ -308,37 +475,52 @@ fn complete(binding: PromptBinding, response: Option<NSModalResponse>) {
                     PromptOutcome::ParentLost(binding)
                 } else if Instant::now() >= s.deadline {
                     PromptOutcome::TimedOut(binding)
-                } else if response != NSAlertSecondButtonReturn
+                } else if (!matches!(s.purpose, Purpose::Inspection)
+                    && Instant::now() < s.approve_after)
+                    || response != NSAlertSecondButtonReturn
                     || s.last_retry_ack
                         .as_ref()
                         .is_some_and(|button| button.state() != NSControlStateValueOn)
                 {
                     PromptOutcome::Cancelled(binding)
                 } else {
-                    let value = s.input.stringValue();
-                    let len = value.lengthOfBytesUsingEncoding(NSUTF8StringEncoding);
-                    s.pin = fido_auth::PinSecret::collect(|bytes| {
-                        if len > fido_auth::MAX_PIN_BYTES {
-                            return None;
+                    let approved = match s.purpose {
+                        Purpose::Inspection => {
+                            s.pin = collect_field(&s.input);
+                            s.pin.is_some()
                         }
-                        // SAFETY: fixed writable 64-byte storage; NSString cannot write beyond it.
-                        unsafe {
-                            value.getCString_maxLength_encoding(
-                                NonNull::new(bytes.as_mut_ptr().cast())?,
-                                bytes.len(),
-                                NSUTF8StringEncoding,
-                            )
+                        Purpose::Recovery(_) => true,
+                        Purpose::Mutation(op) => {
+                            s.secrets = s
+                                .new_input
+                                .as_ref()
+                                .and_then(collect_field)
+                                .zip(s.confirm_input.as_ref().and_then(collect_field))
+                                .and_then(|(new, confirm)| {
+                                    crate::confirmed_mutation_secrets(
+                                        op,
+                                        if op == PinOperation::ChangePin {
+                                            collect_field(&s.input)
+                                        } else {
+                                            None
+                                        },
+                                        new,
+                                        confirm,
+                                    )
+                                });
+                            s.secrets.is_some()
                         }
-                        .then_some(len)
-                    })
-                    .ok();
-                    if s.pin.is_some() {
+                    };
+                    if approved {
                         PromptOutcome::Approved(binding)
                     } else {
                         PromptOutcome::Cancelled(binding)
                     }
                 };
                 s.input.setStringValue(&NSString::from_str(""));
+                for field in [&s.new_input, &s.confirm_input].into_iter().flatten() {
+                    field.setStringValue(&NSString::from_str(""));
+                }
                 s.decision = Some(outcome);
                 if let Ok(mut c) = s.controller.lock() {
                     let _ = c.resolve(outcome, Instant::now());
@@ -379,12 +561,10 @@ fn complete(binding: PromptBinding, response: Option<NSModalResponse>) {
         }
         if !matches!(outcome, PromptOutcome::Approved(_)) {
             s.pin = None;
+            s.secrets = None;
         }
-        let completion = PinCompletion {
-            binding,
-            outcome,
-            pin: s.pin.take(),
-        };
+        let pin = s.pin.take();
+        let secrets = s.secrets.take();
         let reply = s.reply.take();
         let controller = Arc::clone(&s.controller);
         drop(s); // Invalidate timer, remove observer, clear native control BEFORE acknowledgement.
@@ -396,9 +576,43 @@ fn complete(binding: PromptBinding, response: Option<NSModalResponse>) {
             let _ = c.did_teardown(binding, Instant::now());
         }
         if let Some(reply) = reply {
-            let _ = reply.send(completion);
+            match reply {
+                Reply::Inspection(reply) => {
+                    let _ = reply.send(PinCompletion {
+                        binding,
+                        outcome,
+                        pin,
+                    });
+                }
+                Reply::Mutation(reply) => {
+                    let _ = reply.send(crate::MutationCompletion {
+                        binding,
+                        outcome,
+                        secrets,
+                    });
+                }
+            }
         }
     }
+}
+fn collect_field(field: &Retained<NSSecureTextField>) -> Option<fido_auth::PinSecret> {
+    let value = field.stringValue();
+    let len = value.lengthOfBytesUsingEncoding(NSUTF8StringEncoding);
+    fido_auth::PinSecret::collect(|bytes| {
+        if len > fido_auth::MAX_PIN_BYTES {
+            return None;
+        }
+        // SAFETY: fixed bounded writable allocation; no intermediate Rust String or logging.
+        unsafe {
+            value.getCString_maxLength_encoding(
+                NonNull::new(bytes.as_mut_ptr().cast())?,
+                bytes.len(),
+                NSUTF8StringEncoding,
+            )
+        }
+        .then_some(len)
+    })
+    .ok()
 }
 pub fn shutdown() {
     let binding = ACTIVE.with(|a| a.borrow().as_ref().map(|s| s.binding));

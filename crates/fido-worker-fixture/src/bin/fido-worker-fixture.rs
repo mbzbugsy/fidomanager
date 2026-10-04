@@ -67,6 +67,7 @@ struct ScriptedBackend {
     cleanup_failed: bool,
     wrong_pin: bool,
     two_devices: bool,
+    mutation_mode: Option<String>,
 }
 
 fn apply(step: Step) {
@@ -133,7 +134,60 @@ impl fido_libfido2::NativeAuthenticationSession for AuthFixture {
         }
     }
 }
+struct MutationFixture {
+    operation: fido_auth::mutation::PinOperation,
+    mode: String,
+}
+impl fido_libfido2::NativePinMutationSession for MutationFixture {
+    fn operation(&self) -> fido_auth::mutation::PinOperation {
+        self.operation
+    }
+    fn pin_retries(&self) -> Option<u8> {
+        (self.operation == fido_auth::mutation::PinOperation::ChangePin).then_some(1)
+    }
+    fn execute(
+        self: Box<Self>,
+        secrets: fido_auth::mutation::PinMutationSecrets,
+        _: NativeDeadline,
+    ) -> fido_auth::mutation::PinMutationResult {
+        assert_eq!(secrets.operation(), self.operation);
+        drop(secrets);
+        match self.mode.as_str() {
+            "crash" => exit_immediately(134),
+            "hang" => apply(Step::Hang),
+            _ => {}
+        }
+        fido_auth::mutation::PinMutationResult::from_code(
+            self.operation,
+            self.mode != "pre-entry",
+            match self.mode.as_str() {
+                "reject" => 0x37,
+                "unknown" => -2,
+                _ => 0,
+            },
+            self.mode != "cleanup",
+        )
+    }
+}
 impl NativeDiscoveryBackend for ScriptedBackend {
+    fn prepare_pin_mutation(
+        &mut self,
+        _: &NativeDeviceKey,
+        operation: fido_auth::mutation::PinOperation,
+        _: NativeDeadline,
+    ) -> Result<Box<dyn fido_libfido2::NativePinMutationSession>, NativeError> {
+        let mode = self.mutation_mode.clone().ok_or(NativeError::new(
+            fido_libfido2::NativeErrorKind::Unsupported,
+            None,
+        ))?;
+        if mode == "prepare-failure" {
+            return Err(NativeError::new(
+                fido_libfido2::NativeErrorKind::Unsupported,
+                None,
+            ));
+        }
+        Ok(Box::new(MutationFixture { operation, mode }))
+    }
     fn prepare_authentication(
         &mut self,
         key: &NativeDeviceKey,
@@ -178,7 +232,14 @@ impl NativeDiscoveryBackend for ScriptedBackend {
             versions: vec!["FIDO_2_1".to_owned()],
             extensions: Vec::new(),
             transports: vec!["usb".to_owned()],
-            options: Vec::new(),
+            options: if self.mutation_mode.is_some() {
+                vec![fido_libfido2::NativeDeviceOption {
+                    name: "clientPin".into(),
+                    enabled: true,
+                }]
+            } else {
+                Vec::new()
+            },
             max_message_size: Some(1_200),
             firmware_version: Some(1),
         })
@@ -187,6 +248,7 @@ impl NativeDiscoveryBackend for ScriptedBackend {
 
 fn main() {
     let mut authentication = false;
+    let mut mutation_mode = None;
     let mut cleanup_failed = false;
     let mut wrong_pin = false;
     let mut two_devices = false;
@@ -196,6 +258,8 @@ fn main() {
     for argument in std::env::args().skip(1) {
         if argument == "--authentication" {
             authentication = true;
+        } else if let Some(mode) = argument.strip_prefix("--mutation=") {
+            mutation_mode = Some(mode.to_owned());
         } else if argument == "--cleanup-failed" {
             cleanup_failed = true;
         } else if argument == "--wrong-pin" {
@@ -241,6 +305,7 @@ fn main() {
                 cleanup_failed,
                 wrong_pin,
                 two_devices,
+                mutation_mode,
             },
             RuntimeConfig::default(),
             Some(Box::new(channel)),
@@ -261,6 +326,7 @@ fn main() {
                 cleanup_failed,
                 wrong_pin,
                 two_devices,
+                mutation_mode,
             },
             RuntimeConfig::default(),
         ),

@@ -451,10 +451,23 @@ After a mutating libfido2 call is entered, generic `FIDO_ERR_TX`, `FIDO_ERR_RX`,
 
 Acquire application-managed authorization in a separate earlier step where the workflow allows it. This removes authentication/token acquisition from the mutating call for operations such as token-backed credential deletion and makes evidence easier to classify.
 
-`fido_dev_set_pin`/PIN change remains multi-exchange. The non-dispatching M4
-foundation records the exact pinned-source evidence table and initial recovery
-contracts in [ADR-010](adr/ADR-010-MUTATION-OUTCOME-RECOVERY.md). It adds no
-executable mutation request or renderer authority.
+`fido_dev_set_pin`/PIN change remains multi-exchange. The production macOS M4
+adapter uses the exact pinned-source allowlist in
+[ADR-010](adr/ADR-010-MUTATION-OUTCOME-RECOVERY.md). Passive preparation obtains
+no PUAT and consumes no PIN attempt. The same unique native object is revalidated
+immediately before one high-level call. A private consumed handoff exists only
+after exact native approval, teardown, Pending, permit consumption and durable
+DispatchCapable. Worker protocol 4 carries only typed non-secret bindings;
+FMPIN003 carries fixed zeroizing PIN buffers outside JSON. Confirmation stays in
+native UI. The renderer has no mutation or recovery-clear authority.
+
+Every completion path retires and reaps the child independently of outcome.
+Confirmed success/rejection is resolved durably after teardown and quiescence;
+failed resolution preserves that native outcome while admission remains blocked.
+After the durable marker, any later host abort retains uncertainty and the barrier.
+Native sheet controls are cleared; AppKit/NSString internal copies are not promised
+zeroized. Production evidence is recorded in
+[M4 macOS validation](validation/M4-pin-mutation-macos.md).
 
 Reset response loss remains uncertain even when the device re-enumerates quickly.
 
@@ -561,6 +574,17 @@ For each mutation, the recovery table specifies:
 - historical outcome retained when safe continuation is allowed without proof of original completion.
 
 When exact historical outcome cannot be proven but safe continuation is possible, a high-friction native acknowledgement may clear the admission barrier while the original incident remains recorded as historically unknown using privacy-minimized metadata.
+
+macOS M4 implements this acknowledgement for valid unresolved PIN incidents only.
+The native sheet states the exact historical operation and uncertainty, defaults
+to Cancel, requires an explicit checkbox/action and a brief action delay, and
+collects no PIN. It retires the worker first and durably records
+AcknowledgedUnknown only after bound native approval/teardown. Corrupt, unreadable
+or runtime-poisoned storage has no acknowledgement bypass. The privacy-minimized
+record does not identify a reconnected physical key. M4 therefore makes no passive
+recovery read or old/new PIN verification; historical success is never inferred
+from reconnect or acknowledgement.
+
 
 ### Delete
 

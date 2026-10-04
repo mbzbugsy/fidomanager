@@ -1,15 +1,20 @@
 # ADR-010: PIN mutation outcome evidence and persistent recovery
 
-Status: Proposed for independent review (M4 foundation, no mutation dispatch).
-Baseline: main `7422a04010793fe095f0a0fc8c1c99c530f5cd52`, merged PR #25.
+Status: Proposed for independent review (M4 production macOS PIN mutation).
+Production baseline: main `96b7ebc1482c457b725a134601e9002f320c4493`, merged PR #26.
+The original non-dispatching foundation was based on PR #25 at
+`7422a04010793fe095f0a0fc8c1c99c530f5cd52`.
 
 ## Scope and evidence labels
 
 [SOURCE] means inspected, checksum-verified pinned source, not a hardware observation.
 [SPEC] means the linked CTAP algorithm. [POLICY] means an application decision.
-This foundation adds no PIN mutation FFI, worker request, native mutation dialog,
+The production macOS implementation adds operation-specific PIN mutation requests,
+AppKit sheets and one private native call site on top of PR #26. It adds no PIN
 verification/probing, reset or credential deletion. The existing opt-in, non-shipping
 M1.5 manual deletion probe is unchanged and excluded from production dependencies.
+Linux and Windows do not gain native PIN mutation support. Hardware evidence is
+recorded separately in [M4 macOS validation](../validation/M4-pin-mutation-macos.md).
 
 The architecture's sections 17–20, 23 and Milestone 4, the security model, ADR-009,
 and merged [M2](../validation/M2-macos-native-auth.md),
@@ -109,7 +114,10 @@ The existing 30-second prompt limit also bounds intent lifetime. An owned
 `OperationPermit` has a **10-second TTL**, capped by intent expiry. It binds the
 canonical digest, is non-serde/non-Clone/non-Copy with private construction, and
 is minted only after an exact Approved outcome arrives on the authority's native
-teardown channel. There is no mutation presenter installed in this PR.
+teardown channel. The production presenter shows the exact trusted target and
+operation, collects matching native PIN inputs, defaults to Cancel and clears its
+secure controls before acknowledging teardown. Change PIN shows passive retry
+evidence and requires acknowledgement when exactly one remains.
 
 Consumption checks active workflow, exact digest, live authority identity/epoch,
 prompt binding, expiration, registered target/generations and durable Pending
@@ -119,11 +127,14 @@ rejects replay. Epoch changes during sync and expiry before acknowledgement fail
 closed with the durable marker retained. Lock/sleep/session-switch/shutdown use
 the existing M2 epoch; disconnect/worker replacement invalidate exact targets.
 
-`mark_dispatch_capable` returns only a policy result, never a dispatch token,
-request or callback. A future mutation implementation must separately review the
-actual worker handoff, preserving generation/epoch validation through that
-handoff. This foundation cannot be mistaken for an already reviewed native
-mutation implementation.
+`mark_dispatch_capable` still returns only a policy result. The production
+`mutate_pin` continuation holds the canonical supervisor exclusively and constructs
+a private, non-clone/non-serde `PinMutationDispatchPermit` only after successful
+durable acknowledgement. Its only consumer rechecks exact target/generations,
+intent digest, lifecycle epoch and expiry, then sends the one-use secret frame and
+typed execution request. A host failure or revocation after the marker retains
+uncertainty and the barrier even if the native call was never reached. No public
+API turns the foundation transition into reusable execution authority.
 
 ## Durable journal and startup admission
 
@@ -139,7 +150,9 @@ journal admission. If bytes were published before sync failed, startup reads the
 conservatively; dispatch was never authorized by the failed acknowledgement.
 
 NoRecord, valid Pending and valid Resolved start Open. Pending means no claimed
-mutation dispatch and may be deliberately resolved as NotDispatched. Unresolved
+mutation dispatch and may be resolved as NotDispatched. Before creating a new
+incident, a valid Pending-only startup record is durably tombstoned as
+NotDispatched; failure poisons admission and prevents the new incident. Unresolved
 DispatchCapable, malformed/unsupported/oversized bytes, unsafe storage or read
 failure start Barrier. No ordinary inspection, SetPin or ChangePin bypasses it.
 A persistent latch prevents ordinary completion evidence, reconnect, worker
@@ -149,14 +162,17 @@ All authority constructors start blocked until storage is evaluated.
 
 A resolved record is an atomic tombstone rather than unlink: it preserves the
 opaque incident and, for deliberate continuation, `acknowledged_unknown` history.
-Future adapter evidence may record definitive Rejected/ConfirmedSuccessful.
-This foundation's trusted Recovery primitive only accepts exact native approval,
+The production adapter resolves definitive Rejected/ConfirmedSuccessful only
+after worker retirement and prompt teardown. Failed resolution preserves the
+definitive native outcome independently while storage/admission stays blocked.
+The trusted Recovery primitive only accepts exact native approval,
 proven teardown/quiescence and either Pending/NotDispatched or
 DispatchCapable/AcknowledgedUnknown. It implements no success verification and
 cannot clear corrupt state. Failed resolution sync retains Barrier. Failed clearance
 retains the owned reservation, allowing trusted code to release exclusion after
-quiescence without clearing admission; another deliberate Recovery can then start. A final native
-Recovery UI and a reviewed procedure for storage corruption remain future work.
+quiescence without clearing admission; another deliberate Recovery can then start.
+The native Recovery UI now offers a deliberate checkbox plus Acknowledge uncertainty action;
+a reviewed procedure for storage corruption remains future work.
 
 Persisted fields are exactly schema, application-format identifier, opaque random
 incident ID, operation class, timestamp, phase and optional resolution. No PIN,
@@ -197,10 +213,55 @@ still ADR-013/#20 work; this PR does not implement them.
 [POLICY] After quiescence, SetPin may permit passive `clientPin` reconciliation:
 configured state is evidence that a PIN exists, not evidence of the exact value
 or actor responsible. This does not automatically resolve a historical incident.
-ChangePin has no non-destructive read-back proving old/new validity; automatic
+This implementation performs no passive recovery read: the privacy-minimized
+incident cannot identify a reconnected physical key. The sheet states that PIN
+configuration of the previous key cannot be established and makes no exact-value
+claim. ChangePin has no non-destructive read-back proving old/new validity; automatic
 old/new probing and ordinary retry-consuming inspection remain prohibited while
 unresolved. Any future verification requires an explicit Recovery workflow with
 remaining retries visible. There is no probing or verification implementation here.
+A valid unresolved incident exposes only trusted native acknowledgement. It writes
+AcknowledgedUnknown, preserving the historical uncertainty, and reopens admission
+only after durable resolution and teardown/quiescence. Corrupt, unreadable or
+poisoned storage offers no acknowledgement bypass.
+
+## Production preparation, secret transport and native execution
+
+[SOURCE] Fresh-object `fido_dev_open` performs HID INIT and GetInfo in `dev.c`
+97–245. Preparation then re-reads bounded GetInfo and, for Change PIN only,
+`fido_dev_get_retry_count` (`pin.c` 550–578, ClientPIN subcommand 1). These
+exchanges supply no PIN, acquire no PUAT and do not mutate or consume a PIN
+attempt. Passive flags must advertise PIN support and protocol 1 or 2.
+
+[POLICY] The same uniquely owned native object stays in the sole worker native
+thread from preparation through execution; it is never reopened. Immediately
+before the high-level call, bounded GetInfo must still explicitly select the
+approved operation. Change PIN also re-reads retries and refuses a count different
+from the one shown in the sheet. GetInfo, retry revalidation and the mutating call
+share the execution request's normal five-second NativeDeadline. Set supplies a
+NULL current PIN; Change supplies the current PIN. The high-level call occurs
+exactly once, with no automatic retry. Session ownership and Rust secrets are
+consumed; the service retires and kill/reaps the child on every completion path.
+A response's native outcome never substitutes for independent process quiescence.
+
+[POLICY] Worker protocol version 4 adds only PreparePinMutation (SensitiveRead)
+and ExecutePinMutation (Mutation), with matching typed responses. The worker
+consumes preparation and its secret channel on the first execution attempt and
+exits after the execution response. Binding covers operation, worker/device
+incarnation, workflow, prompt, acquisition session, exact execution request and
+approved intent digest. Unknown fields and generic/raw CTAP requests fail closed.
+
+FMPIN003 is a distinct fixed binary contract from inspection's FMPIN002. Its
+107-byte header binds those identities and distinguishes Set's single new PIN
+from Change's current/new PIN pair. Each PIN uses a fixed 64-byte zeroizing Rust
+allocation, supports valid NUL-free UTF-8 within 4–63 bytes, and a new PIN must
+contain at least four Unicode scalar values. Authenticator policy may reject it;
+no extra complexity rule is invented. Matching confirmation is discarded by
+native UI and never transported. EOF seals the one frame: wrong binding, malformed
+encoding, truncation, excess length, trailing bytes and a second frame are rejected.
+Secret types have no Clone, Copy, Debug, Display or serde representation.
+AppKit/NSString internal copies cannot be guaranteed zeroized; native field values
+are cleared and Rust-owned secret buffers are zeroized on every exit.
 
 ## Native deadline ceiling and validation
 
@@ -210,5 +271,7 @@ fallback. Existing production 1–5-second native budgets and remaining-time sha
 are unchanged. Tests cover zero, exact maximum, maximum plus one nanosecond and
 Duration::MAX, along with the existing timeout shrink/rounding tests.
 
-Deterministic coverage and exact command results are recorded in
-[M4 foundation validation](../validation/M4-mutation-foundation.md).
+Foundation coverage remains recorded in
+[M4 foundation validation](../validation/M4-mutation-foundation.md). Production
+coverage and exact command results are recorded in
+[M4 macOS validation](../validation/M4-pin-mutation-macos.md).

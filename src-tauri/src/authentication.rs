@@ -6,11 +6,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum NativeAction {
+    Inspect,
+    Pin(fido_service::recovery::PinOperation),
+    Recovery,
+}
 #[derive(Clone, PartialEq, Eq)]
 pub struct NativeTarget {
     id: String,
-    handle: authentication::DeviceHandle,
-    label: String,
+    pub(super) handle: authentication::DeviceHandle,
+    pub(super) label: String,
+    pub(super) action: NativeAction,
 }
 impl NativeTarget {
     pub fn new(
@@ -22,6 +29,32 @@ impl NativeTarget {
             id: format!("inspect-credentials-{:032x}", handle.as_raw()),
             handle,
             label: presentation.label(),
+            action: NativeAction::Inspect,
+        }
+    }
+}
+
+impl NativeTarget {
+    pub fn for_device(
+        device: &authentication::NativeDeviceSnapshot,
+        presentation: &fido_service::presentation::AuthenticatorPresentation,
+    ) -> Vec<Self> {
+        let mut targets = vec![Self::new(device.handle, presentation)];
+        if let Some(op) = fido_service::mutation::native_pin_operation(device) {
+            targets.push(Self {
+                id: format!("pin-mutation-{op:?}-{:032x}", device.handle.as_raw()),
+                handle: device.handle,
+                label: presentation.label(),
+                action: NativeAction::Pin(op),
+            });
+        }
+        targets
+    }
+    fn title(&self) -> String {
+        match self.action {
+            NativeAction::Inspect => format!("Inspect credentials on {}…", self.label),
+            NativeAction::Pin(op) => format!("{} on {}…", op.title(), self.label),
+            NativeAction::Recovery => "Review uncertain PIN operation…".into(),
         }
     }
 }
@@ -34,7 +67,7 @@ fn select_target(targets: &[NativeTarget], id: &str) -> Option<NativeTarget> {
 pub struct AuthenticationMenu {
     submenu: tauri::menu::Submenu<tauri::Wry>,
     targets: Arc<Mutex<Vec<NativeTarget>>>,
-    // Presentation only: the inspect items are greyed while an inspection runs. The backend gate
+    // Presentation only: all sensitive items are greyed while a workflow runs. The backend gate
     // stays the authority, and a selection that still arrives is suppressed or refused there.
     enabled: Arc<AtomicBool>,
 }
@@ -60,7 +93,25 @@ impl AuthenticationMenu {
             }
         });
     }
-    pub fn update(&self, targets: Vec<NativeTarget>) {
+    pub fn update(
+        &self,
+        mut targets: Vec<NativeTarget>,
+        authority: &fido_service::authentication::AuthenticationAuthority,
+    ) {
+        let barrier = authority.sensitive_blocked();
+        let recoverable = authority.recoverable_pin_operation().is_some();
+        if barrier {
+            targets = if recoverable {
+                vec![NativeTarget {
+                    id: "recover-pin".into(),
+                    handle: authentication::DeviceHandle::from_raw(0),
+                    label: String::new(),
+                    action: NativeAction::Recovery,
+                }]
+            } else {
+                Vec::new()
+            };
+        }
         let owned = self.clone();
         let app = self.submenu.app_handle().clone();
         let callback_app = app.clone();
@@ -73,7 +124,11 @@ impl AuthenticationMenu {
                 if targets.is_empty() {
                     let item = tauri::menu::MenuItem::new(
                         &callback_app,
-                        "No security key available",
+                        if barrier {
+                            "Security key operations blocked: recovery storage needs review"
+                        } else {
+                            "No security key available"
+                        },
                         false,
                         None::<&str>,
                     )?;
@@ -83,7 +138,7 @@ impl AuthenticationMenu {
                         let item = tauri::menu::MenuItem::with_id(
                             &callback_app,
                             &target.id,
-                            format!("Inspect credentials on {}…", target.label),
+                            target.title(),
                             owned.enabled.load(Ordering::SeqCst),
                             None::<&str>,
                         )?;
@@ -103,10 +158,10 @@ impl AuthenticationMenu {
     }
 }
 
-/// Greys the native inspect items for exactly the lifetime of one start attempt.
-struct MenuBusy(Option<AuthenticationMenu>);
+/// Greys all native sensitive items for exactly the lifetime of one start attempt.
+pub(super) struct MenuBusy(Option<AuthenticationMenu>);
 impl MenuBusy {
-    fn new(menu: Option<AuthenticationMenu>) -> Self {
+    pub(super) fn new(menu: Option<AuthenticationMenu>) -> Self {
         if let Some(menu) = &menu {
             menu.set_enabled(false);
         }
@@ -131,6 +186,10 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
     let Some(target) = menu.as_ref().and_then(|menu| menu.select(id)) else {
         return;
     };
+    if target.action != NativeAction::Inspect {
+        crate::pin_mutation::start(app, target, menu);
+        return;
+    }
     // Presentation-level reentrancy guard. A duplicate or reentrant menu event while one start is
     // running is dropped silently; it would only be refused by the gate below anyway. This guard
     // authorizes nothing: every start that is not dropped here still needs gate admission.
