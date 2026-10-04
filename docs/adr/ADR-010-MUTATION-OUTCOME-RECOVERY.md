@@ -153,7 +153,9 @@ Future adapter evidence may record definitive Rejected/ConfirmedSuccessful.
 This foundation's trusted Recovery primitive only accepts exact native approval,
 proven teardown/quiescence and either Pending/NotDispatched or
 DispatchCapable/AcknowledgedUnknown. It implements no success verification and
-cannot clear corrupt state. Failed resolution sync retains Barrier. A final native
+cannot clear corrupt state. Failed resolution sync retains Barrier. Failed clearance
+retains the owned reservation, allowing trusted code to release exclusion after
+quiescence without clearing admission; another deliberate Recovery can then start. A final native
 Recovery UI and a reviewed procedure for storage corruption remain future work.
 
 Persisted fields are exactly schema, application-format identifier, opaque random

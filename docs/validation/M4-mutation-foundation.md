@@ -70,7 +70,7 @@ no automatic retry or old/new PIN probing is implemented.
   fields, actual reservation workflow/prompt changes, wrong/absent device and
   worker generations, teardown-bound approval, expiry, one-shot/replay rejection,
   lifecycle epochs, successor/other-authority rejection, Pending restart,
-  DispatchCapable restart, deliberate resolution, resolution rejection/failure,
+  DispatchCapable restart, deliberate resolution, resolution rejection/failure with quiescent release and fresh Recovery admission,
   unreadable/corrupt/unsupported records, Pending/write/sync failures, revocation
   during sync and an ordinary finish attempting to clear the persistent latch.
 - Platform: 3 concrete durable-storage tests for replacement/reopen, bounded
@@ -114,7 +114,7 @@ The initial sandboxed full-suite attempt stopped at an unchanged BooGooCypher
 localhost redirect test because loopback binding was denied. The complete suite
 passed outside the sandbox, including existing process-visibility/containment
 checks. No test was skipped or weakened and no external service was contacted
-by that loopback fixture. The final suite was rerun after storage-ordering changes.
+by that loopback fixture. The final suite was rerun after storage-ordering and recovery-clearance ownership changes.
 
 Final Rust breakdown:
 

@@ -399,13 +399,15 @@ impl AuthenticationAuthority {
         self.finish_sensitive(r.reservation, completion, quiescence)
     }
 
+    /// A rejected clearance retains the reservation so trusted code can finish/cancel the
+    /// quiescent workflow without clearing its incident barrier. Approval remains one-shot.
     /// Future native recovery may deliberately acknowledge uncertainty or resolve a Pending-only
     /// incident as NotDispatched. No automatic probing or passive read implementation. A corrupt
     /// journal cannot be cleared by this primitive. Remaining-retry display belongs to the future
     /// explicit verification workflow, which is not implemented here.
     pub fn resolve_recovery(
         &self,
-        r: RecoveryReservation,
+        r: &mut RecoveryReservation,
         resolution: Resolution,
         quiescence: ExecutionQuiescence,
     ) -> Result<(), MutationError> {
@@ -781,10 +783,10 @@ mod tests {
                 Err(MutationError::Admission(AdmissionError::RecoveryBarrier))
             ));
         }
-        let recovery = restarted.reserve_recovery()?;
+        let mut recovery = restarted.reserve_recovery()?;
         native_teardown(&restarted, recovery.prompt().binding(), true);
         restarted.resolve_recovery(
-            recovery,
+            &mut recovery,
             Resolution::AcknowledgedUnknown,
             ExecutionQuiescence::Quiescent,
         )?;
@@ -804,10 +806,10 @@ mod tests {
         )?;
         let restarted = AuthenticationAuthority::awaiting_recovery_startup();
         restarted.initialize_recovery(Box::new(disk.clone()))?;
-        let recovery = restarted.reserve_recovery()?;
+        let mut recovery = restarted.reserve_recovery()?;
         native_teardown(&restarted, recovery.prompt().binding(), true);
         restarted.resolve_recovery(
-            recovery,
+            &mut recovery,
             Resolution::NotDispatched,
             ExecutionQuiescence::Quiescent,
         )?;
@@ -934,7 +936,7 @@ mod tests {
                 WorkflowCompletion::Succeeded,
                 ExecutionQuiescence::Quiescent,
             )?;
-            let recovery = a.reserve_recovery()?;
+            let mut recovery = a.reserve_recovery()?;
             native_teardown(&a, recovery.prompt().binding(), failure != 0);
             let quiescence = if failure == 1 {
                 ExecutionQuiescence::Active
@@ -950,13 +952,22 @@ mod tests {
                 Resolution::AcknowledgedUnknown
             };
             assert!(
-                a.resolve_recovery(recovery, resolution, quiescence)
+                a.resolve_recovery(&mut recovery, resolution, quiescence)
                     .is_err()
             );
             assert_eq!(
                 a.gate.lock().map_err(|_| "gate")?.recovery_admission(),
                 RecoveryAdmission::Barrier
             );
+            // After independent quiescence proof, failure can release exclusion without
+            // clearing admission. No restart is needed to admit another deliberate Recovery.
+            a.finish_recovery_foundation(
+                recovery,
+                WorkflowCompletion::Failed,
+                ExecutionQuiescence::Quiescent,
+            )?;
+            assert!(matches!(a.reserve(), Err(AdmissionError::RecoveryBarrier)));
+            assert!(a.reserve_recovery().is_ok());
         }
         Ok(())
     }
