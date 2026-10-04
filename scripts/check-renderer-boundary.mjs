@@ -160,8 +160,7 @@ assertExactArray(
     'phase',
     'worker_protocol_version',
     'reviewed_libfido2_baseline',
-    'authentication_notice',
-    'authentication_notice_revision',
+    'inspection_activity',
   ],
   'FoundationStatus contains an unreviewed renderer field.',
 );
@@ -274,6 +273,36 @@ assertExactArray(
   [...EXPECTED_COMMANDS].sort(),
   'Renderer invoke surface does not match the approved Milestone 1 command allowlist.',
 );
+
+// Start suppression is presentation only: the sensitive-workflow gate stays the sole admission
+// authority, and the native menu start must still reserve through it after the presentation claim.
+if (
+  !commandSource.includes(
+    'inspection_activity: fido_service::activity::ActivityView',
+  )
+) {
+  throw new Error(
+    'Only the reviewed ActivityView may cross foundation_status as inspection activity.',
+  );
+}
+const nativeStartSource = readFileSync(
+  'src-tauri/src/authentication.rs',
+  'utf8',
+);
+const claimAt = nativeStartSource.indexOf('.activity.try_claim()');
+const reserveAt = nativeStartSource.indexOf('authority.reserve()');
+if (claimAt < 0 || reserveAt < 0 || claimAt > reserveAt) {
+  throw new Error(
+    'Native inspection start must claim the presentation slot and then still reserve through the gate.',
+  );
+}
+for (const file of rendererFiles) {
+  if (/Authentication result/i.test(readFileSync(file, 'utf8'))) {
+    throw new Error(
+      `Generic "Authentication result" wording returned: ${file}`,
+    );
+  }
+}
 
 // BooGooCypher readiness is status only and is structurally separated from every FIDO path.
 const READINESS_URL = 'https://boogoocypher.foladigroup.com/health/ready';

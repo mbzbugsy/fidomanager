@@ -10,8 +10,7 @@ pub struct FoundationStatus {
     phase: &'static str,
     worker_protocol_version: u16,
     reviewed_libfido2_baseline: &'static str,
-    authentication_notice: Option<&'static str>,
-    authentication_notice_revision: String,
+    inspection_activity: fido_service::activity::ActivityView,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,17 +54,11 @@ struct AuthenticatorOption {
 #[tauri::command]
 pub fn foundation_status(state: tauri::State<'_, AppState>) -> FoundationStatus {
     let info = fido_service::foundation_info();
-    let (revision, notice) = state
-        .authentication_notice
-        .lock()
-        .map(|n| *n)
-        .unwrap_or((0, None));
     FoundationStatus {
         phase: info.phase,
         worker_protocol_version: info.worker_protocol_version,
         reviewed_libfido2_baseline: info.reviewed_libfido2_baseline,
-        authentication_notice: notice,
-        authentication_notice_revision: revision.to_string(),
+        inspection_activity: state.activity.view(),
     }
 }
 
@@ -76,6 +69,7 @@ pub async fn list_authenticators(
     let discovery = Arc::clone(&state.discovery);
     let inspection = Arc::clone(&state.inspection);
     let verification_history = Arc::clone(&state.verification_history);
+    let activity = Arc::clone(&state.activity);
     #[cfg(all(
         feature = "native-pin",
         not(feature = "native-ui-spike"),
@@ -116,6 +110,13 @@ pub async fn list_authenticators(
         let inventory_devices = store
             .reconcile_connected(&snapshot.devices, worker)
             .map_err(|_| "connected inventory unavailable")?;
+        // A remembered problem belongs to a connected key's card; drop it when that key is gone.
+        activity.retain_connected(
+            &inventory_devices
+                .iter()
+                .map(|device| device.handle)
+                .collect::<Vec<_>>(),
+        );
         let presentations =
             fido_service::presentation::authenticator_presentations(&snapshot.devices);
         // Keep history only for uniquely identified currently connected macOS IORegistry entries.

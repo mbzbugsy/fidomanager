@@ -24,3 +24,21 @@ export type InspectionSnapshot = {
 export type InspectionDisplay =
   | { state: 'not_inspected' }
   | { state: 'inspected'; snapshot: InspectionSnapshot };
+
+// Presentation-only activity of the native credential inspection (fixed backend wording).
+export type InspectionActivity = {
+  device: string | null;
+  phase: 'waiting_for_pin' | 'reading_credentials' | null;
+  issue: { device: string; message: string } | null;
+  notice: {
+    revision: string;
+    tone: 'success' | 'problem';
+    message: string;
+  } | null;
+};
+
+export type DeviceActivity =
+  | { state: 'idle' }
+  | { state: 'waiting_for_pin' }
+  | { state: 'reading_credentials' }
+  | { state: 'attention'; message: string };

@@ -26,6 +26,16 @@ pub use fido_native_ui::PinCompletion as NativePinCompletion;
 pub use fido_native_ui::PromptRequest as NativePinRequest;
 pub type NativeController = Arc<Mutex<PromptController>>;
 
+/// Presentation-only milestones of one inspection. They carry no data and grant nothing; the
+/// authority never reads anything back from the observer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    /// The native PIN sheet has been presented and the user is being asked for the PIN.
+    PinRequested,
+    /// The PIN was approved and the read-only credential reads / cleanup are starting.
+    PinSubmitted,
+}
+
 /// Deliberately contains no grant/acquisition/worker identity, token or PIN.
 #[derive(Debug)]
 pub struct AuthenticationResult {
@@ -181,7 +191,7 @@ impl AuthenticationAuthority {
             u64,
         ) -> Result<(), &'static str>,
     ) -> AuthenticationResult {
-        self.run(supervisor, handle, reservation, false, present)
+        self.run(supervisor, handle, reservation, false, present, &mut |_| {})
     }
 
     pub fn inspect(
@@ -198,7 +208,33 @@ impl AuthenticationAuthority {
             u64,
         ) -> Result<(), &'static str>,
     ) -> AuthenticationResult {
-        self.run(supervisor, handle, reservation, true, present)
+        self.run(supervisor, handle, reservation, true, present, &mut |_| {})
+    }
+
+    /// Same transaction as [`Self::inspect`], reporting presentation-only [`Progress`] milestones.
+    pub fn inspect_with_progress(
+        &self,
+        supervisor: &mut DiscoverySupervisor<ProcessWorkerLauncher>,
+        handle: DeviceHandle,
+        reservation: AuthenticationReservation,
+        present: impl FnOnce(
+            PromptRequest,
+            NativeController,
+            Sender<PinCompletion>,
+            Option<u8>,
+            Arc<AtomicU64>,
+            u64,
+        ) -> Result<(), &'static str>,
+        mut progress: impl FnMut(Progress),
+    ) -> AuthenticationResult {
+        self.run(
+            supervisor,
+            handle,
+            reservation,
+            true,
+            present,
+            &mut progress,
+        )
     }
 
     fn run(
@@ -215,6 +251,7 @@ impl AuthenticationAuthority {
             Arc<AtomicU64>,
             u64,
         ) -> Result<(), &'static str>,
+        progress: &mut dyn FnMut(Progress),
     ) -> AuthenticationResult {
         let AuthenticationReservation {
             admission,
@@ -321,6 +358,7 @@ impl AuthenticationAuthority {
             )
             .map_err(|_| Status::Cancelled)?;
             presented = true;
+            progress(Progress::PinRequested);
             let completion = rx
                 .recv_timeout(Duration::from_secs(fido_auth::PROMPT_LIFETIME_SECS + 2))
                 .map_err(|_| Status::TimedOut)?;
@@ -343,6 +381,7 @@ impl AuthenticationAuthority {
                 });
             }
             let pin = completion.pin.ok_or(Status::InvalidSecret)?;
+            progress(Progress::PinSubmitted);
             let request_id = coordinator
                 .take_request_id()
                 .map_err(|_| Status::Uncertain)?;

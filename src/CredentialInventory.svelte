@@ -1,6 +1,11 @@
 <script lang="ts">
-  import type { InspectionDisplay, InspectionSnapshot } from './inspection';
+  import type {
+    DeviceActivity,
+    InspectionDisplay,
+    InspectionSnapshot,
+  } from './inspection';
   export let inspection: InspectionDisplay;
+  export let activity: DeviceActivity = { state: 'idle' };
 
   type Assessment = InspectionSnapshot['assessment'];
 
@@ -44,7 +49,24 @@
 </script>
 
 <section class="credential-section" aria-label="Credential inspection">
-  {#if inspection.state === 'inspected'}
+  {#if activity.state === 'waiting_for_pin' || activity.state === 'reading_credentials'}
+    <div class="credential-head">
+      <h4 class="credential-label">Credentials</h4>
+      <strong class="credential-total active" role="status"
+        ><i aria-hidden="true"></i>{activity.state === 'waiting_for_pin'
+          ? 'Waiting for PIN…'
+          : 'Reading credentials…'}</strong
+      >
+    </div>
+    <p class="credential-note">
+      {#if activity.state === 'waiting_for_pin'}
+        Enter your PIN in the native Security key sheet. Fido Manager never sees
+        it in this window.
+      {:else}
+        Keep the security key connected. This only takes a moment.
+      {/if}
+    </p>
+  {:else if inspection.state === 'inspected'}
     {@const inventory = inspection.snapshot}
     {@const warning = inventoryWarning(inventory.assessment)}
     <div class="credential-head">
@@ -115,6 +137,11 @@
     <p class="credential-note">
       Inspection is started from the native Security key menu. Enter your PIN
       only in the native sheet.
+    </p>
+  {/if}
+  {#if activity.state === 'attention'}
+    <p class="credential-note caution" role="alert">
+      <span aria-hidden="true">!</span>{activity.message}
     </p>
   {/if}
 </section>

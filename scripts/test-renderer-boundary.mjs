@@ -105,6 +105,24 @@ try {
     assert.notEqual(result.status, 0, `${label} must fail.`);
     assert.match(result.stderr, pattern, label);
   };
+  mutate(
+    'src-tauri/src/authentication.rs',
+    (text) => text.replace('authority.reserve()', 'authority.skip_gate()'),
+    /still reserve through the gate/,
+    'a native start that bypasses the gate',
+  );
+  mutate(
+    'src-tauri/src/authentication.rs',
+    (text) => text.replace('.activity.try_claim()', '.activity.skip_claim()'),
+    /claim the presentation slot/,
+    'a native start without the presentation claim',
+  );
+  mutate(
+    'src/App.svelte',
+    (text) => `${text}\n<strong>Authentication result</strong>`,
+    /Authentication result/,
+    'the generic Authentication result wording',
+  );
   const statusManifestPath = 'crates/boogoocypher-status/Cargo.toml';
   mutate(
     statusManifestPath,

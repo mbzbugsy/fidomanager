@@ -2,15 +2,18 @@
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
   import CredentialInventory from './CredentialInventory.svelte';
-  import type { InspectionDisplay } from './inspection';
+  import type {
+    DeviceActivity,
+    InspectionActivity,
+    InspectionDisplay,
+  } from './inspection';
   import logoUrl from './assets/fidomanager-logo.png';
 
   type FoundationStatus = {
     phase: string;
     workerProtocolVersion: number;
     reviewedLibfido2Baseline: string;
-    authenticationNotice: string | null;
-    authenticationNoticeRevision: string;
+    inspectionActivity: InspectionActivity;
   };
 
   // Readiness of the BooGooCypher service only; says nothing about local security keys.
@@ -67,15 +70,23 @@
   // The backend caches the result (30 s) and owns every network request; this only re-reads it.
   const boogoocypherPollMs = 5000;
 
-  function updateNotice(revision: string | null, message: string | null) {
+  // A brief confirmation (success) or a problem that has no card to attach to. Per-key progress
+  // and per-key problems are shown in that key's card, never in a replacement view.
+  function updateNotice(
+    revision: string | null,
+    tone: 'success' | 'problem' | null,
+  ) {
     if (revision === activeNoticeRevision) return;
     activeNoticeRevision = revision;
     if (noticeTimer) clearTimeout(noticeTimer);
-    noticeVisible = Boolean(message);
+    noticeVisible = revision !== null;
     if (noticeVisible) {
-      noticeTimer = setTimeout(() => {
-        noticeVisible = false;
-      }, 10_000);
+      noticeTimer = setTimeout(
+        () => {
+          noticeVisible = false;
+        },
+        tone === 'success' ? 4_000 : 10_000,
+      );
     }
   }
 
@@ -84,10 +95,21 @@
     if (noticeTimer) clearTimeout(noticeTimer);
   }
 
-  $: updateNotice(
-    foundation?.authenticationNoticeRevision ?? null,
-    foundation?.authenticationNotice ?? null,
-  );
+  $: notice = foundation?.inspectionActivity?.notice ?? null;
+  $: updateNotice(notice?.revision ?? null, notice?.tone ?? null);
+
+  function activityFor(
+    handle: string,
+    activity: InspectionActivity | undefined,
+  ): DeviceActivity {
+    if (activity?.device === handle && activity.phase) {
+      return { state: activity.phase };
+    }
+    if (activity?.issue?.device === handle) {
+      return { state: 'attention', message: activity.issue.message };
+    }
+    return { state: 'idle' };
+  }
 
   function hex16(value: number) {
     return value.toString(16).padStart(4, '0');
@@ -356,7 +378,13 @@
                   </div>
                 </div>
               {/if}
-              <CredentialInventory inspection={device.inspection} />
+              <CredentialInventory
+                inspection={device.inspection}
+                activity={activityFor(
+                  device.handle,
+                  foundation?.inspectionActivity,
+                )}
+              />
             </article>
           {/each}
         </div>
@@ -389,16 +417,21 @@
   </footer>
 </div>
 
-{#if noticeVisible && foundation?.authenticationNotice}
-  <div class="authentication-toast" role="status" aria-live="polite">
-    <div>
-      <strong>Authentication result</strong>
-      <p>{foundation.authenticationNotice}</p>
-    </div>
+{#if noticeVisible && notice}
+  <div
+    class="inspection-toast"
+    class:problem={notice.tone === 'problem'}
+    role="status"
+    aria-live="polite"
+  >
+    <span class="toast-mark" aria-hidden="true"
+      >{notice.tone === 'success' ? '✓' : '!'}</span
+    >
+    <p>{notice.message}</p>
     <button
       class="notice-dismiss"
       type="button"
-      aria-label="Dismiss authentication result"
+      aria-label="Dismiss message"
       onclick={dismissNotice}>Dismiss</button
     >
   </div>

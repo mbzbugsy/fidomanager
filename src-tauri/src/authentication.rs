@@ -1,6 +1,8 @@
 //! Backend-only native menu entry. The WebView cannot invoke it or provide any parameters.
 use crate::AppState;
+use fido_service::activity::{self, ActivityOutcome};
 use fido_service::authentication;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
@@ -32,13 +34,31 @@ fn select_target(targets: &[NativeTarget], id: &str) -> Option<NativeTarget> {
 pub struct AuthenticationMenu {
     submenu: tauri::menu::Submenu<tauri::Wry>,
     targets: Arc<Mutex<Vec<NativeTarget>>>,
+    // Presentation only: the inspect items are greyed while an inspection runs. The backend gate
+    // stays the authority, and a selection that still arrives is suppressed or refused there.
+    enabled: Arc<AtomicBool>,
 }
 impl AuthenticationMenu {
     pub fn new(submenu: tauri::menu::Submenu<tauri::Wry>) -> Self {
         Self {
             submenu,
             targets: Arc::new(Mutex::new(Vec::new())),
+            enabled: Arc::new(AtomicBool::new(true)),
         }
+    }
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::SeqCst);
+        let owned = self.clone();
+        let _ = self.submenu.app_handle().run_on_main_thread(move || {
+            let has_targets = owned.targets.lock().is_ok_and(|t| !t.is_empty());
+            if let Ok(items) = owned.submenu.items() {
+                for item in items {
+                    if let Some(item) = item.as_menuitem() {
+                        let _ = item.set_enabled(enabled && has_targets);
+                    }
+                }
+            }
+        });
     }
     pub fn update(&self, targets: Vec<NativeTarget>) {
         let owned = self.clone();
@@ -64,7 +84,7 @@ impl AuthenticationMenu {
                             &callback_app,
                             &target.id,
                             format!("Inspect credentials on {}…", target.label),
-                            true,
+                            owned.enabled.load(Ordering::SeqCst),
                             None::<&str>,
                         )?;
                         owned.submenu.append(&item)?;
@@ -83,45 +103,61 @@ impl AuthenticationMenu {
     }
 }
 
-fn notice(app: &tauri::AppHandle, message: &'static str) {
-    if let Ok(mut value) = app.state::<AppState>().authentication_notice.lock() {
-        // Presentation revision only: it cannot identify or authorize an acquisition.
-        value.0 = value.0.saturating_add(1);
-        value.1 = Some(message);
+/// Greys the native inspect items for exactly the lifetime of one start attempt.
+struct MenuBusy(Option<AuthenticationMenu>);
+impl MenuBusy {
+    fn new(menu: Option<AuthenticationMenu>) -> Self {
+        if let Some(menu) = &menu {
+            menu.set_enabled(false);
+        }
+        Self(menu)
+    }
+}
+impl Drop for MenuBusy {
+    fn drop(&mut self) {
+        if let Some(menu) = &self.0 {
+            menu.set_enabled(true);
+        }
     }
 }
 
 pub fn start(app: &tauri::AppHandle, id: &str) {
     let state = app.state::<AppState>();
-    let target = state
+    let menu = state
         .authentication_menu
         .lock()
         .ok()
-        .and_then(|menu| menu.as_ref()?.select(id));
-    let Some(target) = target else {
+        .and_then(|menu| menu.clone());
+    let Some(target) = menu.as_ref().and_then(|menu| menu.select(id)) else {
         return;
     };
+    // Presentation-level reentrancy guard. A duplicate or reentrant menu event while one start is
+    // running is dropped silently; it would only be refused by the gate below anyway. This guard
+    // authorizes nothing: every start that is not dropped here still needs gate admission.
+    let Some(claim) = state.activity.try_claim() else {
+        eprintln!("[authentication] duplicate start suppressed");
+        return;
+    };
+    let menu_busy = MenuBusy::new(menu);
     let authority = Arc::clone(&state.authentication);
     let reservation = match authority.reserve() {
         Ok(reservation) => reservation,
         Err(error) => {
             eprintln!("[authentication] admission={error}");
-            notice(
-                app,
-                "Authentication cannot start while another workflow, cooldown or recovery barrier is active.",
-            );
+            claim.finish(ActivityOutcome::Issue(activity::admission_message(error)));
             return;
         }
     };
     let discovery = Arc::clone(&state.discovery);
     let app = app.clone();
     std::thread::spawn(move || {
+        let _menu_busy = menu_busy;
         let mut supervisor = match discovery.lock() {
             Ok(supervisor) => supervisor,
             // Retain gate on poisoned owner; never imply cleanup.
             Err(_) => {
                 eprintln!("[authentication] authority unavailable");
-                notice(&app, "Authentication unavailable. Recovery is required.");
+                claim.finish(ActivityOutcome::Issue(activity::RESTART_NEEDED));
                 return;
             }
         };
@@ -135,15 +171,13 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
                 }
                 authority.cancel_unpresented(&mut supervisor, reservation);
                 eprintln!("[authentication] selected key is unavailable");
-                notice(
-                    &app,
-                    "The selected security key is no longer available. Select it again from the native menu after discovery recovers.",
-                );
+                claim.finish(ActivityOutcome::Issue(activity::KEY_UNAVAILABLE));
                 return;
             }
         };
         let Some(worker_generation) = supervisor.status().worker_generation else {
             authority.cancel_unpresented(&mut supervisor, reservation);
+            claim.finish(ActivityOutcome::Issue(activity::KEY_UNAVAILABLE));
             return;
         };
         let inventory_devices = {
@@ -155,10 +189,7 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
             });
             let Some(devices) = prepared else {
                 authority.cancel_unpresented(&mut supervisor, reservation);
-                notice(
-                    &app,
-                    "Inspection unavailable. Connected inventory could not be validated.",
-                );
+                claim.finish(ActivityOutcome::Issue(activity::INVENTORY_UNAVAILABLE));
                 return;
             };
             devices
@@ -176,10 +207,7 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
                     store.clear();
                 }
             }
-            notice(
-                &app,
-                "The selected security key is no longer connected. Select a current key from the native menu.",
-            );
+            claim.finish(ActivityOutcome::Issue(activity::KEY_DISCONNECTED));
             return;
         };
         let inventory_device = inventory_devices[index];
@@ -188,8 +216,11 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
             store.invalidate(inventory_device);
         } else {
             authority.cancel_unpresented(&mut supervisor, reservation);
+            claim.finish(ActivityOutcome::Issue(activity::INVENTORY_UNAVAILABLE));
             return;
         }
+        // Presentation only: attribute the running attempt to this key's card.
+        claim.target(inventory_device.handle);
         let device = &snapshot.devices[index];
         let handle = device.handle;
         let history_id = device.verification_history_id;
@@ -198,7 +229,7 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
                 .label();
         let snapshot_label = target_label.clone();
         let presenter_app = app.clone();
-        let mut result = authority.inspect(
+        let mut result = authority.inspect_with_progress(
             &mut supervisor,
             handle,
             reservation,
@@ -231,6 +262,7 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
                     })
                     .map_err(|_| "main thread unavailable")
             },
+            |progress| claim.progress(progress),
         );
         if let Ok(mut store) = app.state::<AppState>().inspection.lock() {
             if result.worker_quiescent {
@@ -281,60 +313,8 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
                 }
             }
         }
-        // This message is display history, never durable authenticated/approved state. Only
-        // fixed backend text crosses the existing read-only foundation-status DTO.
-        let message = if result.inspection_error.is_some() {
-            match result.inspection_error {
-                Some(fido_service::inspection::InspectionError::BoundExceeded) => {
-                    "Credential inventory exceeds supported application bounds. No snapshot was stored."
-                }
-                Some(fido_service::inspection::InspectionError::Malformed) => {
-                    "The authenticator returned malformed inventory. No snapshot was stored."
-                }
-                Some(fido_service::inspection::InspectionError::CleanupFailed) => {
-                    "Cleanup could not be proven. The worker was discarded; no snapshot was stored."
-                }
-                Some(fido_service::inspection::InspectionError::Unsupported) => {
-                    "Credential inspection is unsupported for this authenticator."
-                }
-                Some(fido_service::inspection::InspectionError::DeviceAbsent) => {
-                    "The authenticator disconnected during inspection."
-                }
-                Some(
-                    fido_service::inspection::InspectionError::Busy
-                    | fido_service::inspection::InspectionError::AccessDenied,
-                ) => "The authenticator is busy or access was denied.",
-                Some(fido_service::inspection::InspectionError::TimedOut) => {
-                    "Credential inspection timed out; the worker was discarded."
-                }
-                _ => "Credential inspection failed. No successful empty inventory was substituted.",
-            }
-        } else if !result.worker_quiescent || !result.prompt_torn_down {
-            "Authentication outcome uncertain. Recovery is required before another attempt."
-        } else {
-            use authentication::Status;
-            match result.status {
-                Status::Validated if result.attached_puat_cleared => {
-                    "Credential inspection finished. Temporary authorization cleared; the read-only inventory is available below."
-                }
-                Status::WrongPin => {
-                    "Incorrect PIN. The attempt ended; no automatic retry was made."
-                }
-                Status::PinBlocked => "PIN blocked. The attempt ended.",
-                Status::PinAuthBlocked => "PIN authentication blocked. The attempt ended.",
-                Status::Cancelled => "Authentication cancelled.",
-                Status::Revoked => "Authentication ended because local authority was lost.",
-                Status::TimedOut => "Authentication timed out. No automatic retry was made.",
-                Status::Unsupported => {
-                    "Authentication is unavailable for this key or native session."
-                }
-                Status::CleanupFailed => {
-                    "Temporary authorization cleanup could not be proven. The worker was discarded."
-                }
-                _ => "Authentication outcome uncertain. No automatic retry was made.",
-            }
-        };
-        notice(&app, message);
+        // Presentation only; never durable approved state. Only typed categories reach the UI.
+        claim.finish(activity::outcome_for(&result));
     });
 }
 

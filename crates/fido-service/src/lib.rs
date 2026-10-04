@@ -3,6 +3,7 @@
 #[cfg(all(feature = "native-ui-spike", target_os = "macos"))]
 pub mod native_ui_spike;
 
+pub mod activity;
 pub mod authentication;
 pub mod inspection;
 pub mod presentation;

@@ -5,7 +5,11 @@ import { pathToFileURL } from 'node:url';
 import { compile } from 'svelte/compiler';
 import { render } from 'svelte/server';
 import type { Component } from 'svelte';
-import type { InspectionDisplay, InspectionSnapshot } from '../src/inspection';
+import type {
+  InspectionActivity,
+  InspectionDisplay,
+  InspectionSnapshot,
+} from '../src/inspection';
 
 // Compile the actual component for server rendering; this needs neither a browser nor secrets.
 const require = createRequire(import.meta.url);
@@ -51,6 +55,10 @@ const appSource = readFileSync(
   .replace(
     "let boogoocypher: BooGooCypherStatus = 'checking';",
     "export let boogoocypher: BooGooCypherStatus = 'checking';",
+  )
+  .replace(
+    'let foundation: FoundationStatus | null = null;',
+    'export let foundation: FoundationStatus | null = null;',
   );
 const appCode = compile(appSource, {
   generate: 'server',
@@ -68,10 +76,27 @@ const App = (
 const appHtml = (
   inspections: InspectionDisplay[],
   boogoocypher?: 'checking' | 'online' | 'offline',
+  activity?: Partial<InspectionActivity>,
 ) =>
   render(App, {
     props: {
       ...(boogoocypher ? { boogoocypher } : {}),
+      ...(activity
+        ? {
+            foundation: {
+              phase: 'Milestone 3',
+              workerProtocolVersion: 3,
+              reviewedLibfido2Baseline: '1.17.0',
+              inspectionActivity: {
+                device: null,
+                phase: null,
+                issue: null,
+                notice: null,
+                ...activity,
+              },
+            },
+          }
+        : {}),
       snapshot: {
         enumerationEpoch: '1',
         devices: inspections.map((inspection, i) => ({
@@ -337,5 +362,124 @@ describe('BooGooCypher readiness chip', () => {
   });
   it('states that it is readiness only', () => {
     expect(chip('online')).toContain('Readiness status only');
+  });
+});
+
+describe('inspection activity presentation', () => {
+  const flat = (result: string) =>
+    result.replace(/<!--.*?-->/g, '').replace(/\s+/g, ' ');
+  const none: InspectionDisplay = { state: 'not_inspected' };
+  const INTERNAL =
+    /workflow|admission|cooldown|cooling|recovery|barrier|acquisition|binding|authentication result/i;
+
+  it('shows Waiting for PIN on the targeted key only and keeps every card visible', () => {
+    const result = flat(
+      appHtml([none, inspected(1), none], undefined, {
+        device: 'opaque-device-0',
+        phase: 'waiting_for_pin',
+      }),
+    );
+    expect(result.match(/Waiting for PIN…/g)?.length).toBe(1);
+    expect(result).toContain('Enter your PIN in the native Security key sheet');
+    expect(result.match(/class="device-card"/g)?.length).toBe(3);
+    expect(result).toContain('Authenticators');
+    expect(result).toContain('1 credential');
+    expect(result.match(/Not inspected/g)?.length).toBe(1);
+    expect(result).not.toMatch(INTERNAL);
+    expect(result).not.toContain('Authentication result');
+  });
+  it('shows Reading credentials after the PIN and hides the stale inventory', () => {
+    const result = flat(
+      appHtml([inspected(1)], undefined, {
+        device: 'opaque-device-0',
+        phase: 'reading_credentials',
+      }),
+    );
+    expect(result).toContain('Reading credentials…');
+    expect(result).not.toContain('Waiting for PIN…');
+    expect(result).not.toContain('example.com');
+    expect(result).toContain('class="device-card"');
+  });
+  it('an activity for another key never marks this card', () => {
+    const result = flat(
+      appHtml([none], undefined, {
+        device: 'some-other-handle',
+        phase: 'waiting_for_pin',
+      }),
+    );
+    expect(result).not.toContain('Waiting for PIN…');
+    expect(result).toContain('Not inspected');
+  });
+  it('success returns to the normal inventory in place with a small confirmation', () => {
+    const result = flat(
+      appHtml([inspected(2), none], undefined, {
+        notice: {
+          revision: '1',
+          tone: 'success',
+          message: 'Credentials refreshed',
+        },
+      }),
+    );
+    expect(result).toContain('Credentials refreshed');
+    expect(result).toContain('class="inspection-toast"');
+    expect(result).toContain('1 credential');
+    expect(result).not.toContain('Waiting for PIN…');
+    expect(result).not.toContain('Reading credentials…');
+    expect(result.match(/class="device-card"/g)?.length).toBe(2);
+    expect(result).not.toContain('Authentication result');
+  });
+  it('cancellation is quiet: no toast, no alert, back to the normal state', () => {
+    const result = flat(appHtml([none], undefined, {}));
+    expect(result).toContain('Not inspected');
+    expect(result).not.toContain('inspection-toast');
+    expect(result).not.toContain('role="alert"');
+    expect(result).not.toContain('Waiting for PIN…');
+  });
+  it('a problem is shown contextually on its own key', () => {
+    const result = flat(
+      appHtml([none, none], undefined, {
+        issue: {
+          device: 'opaque-device-1',
+          message: 'Incorrect PIN. No retry was made.',
+        },
+      }),
+    );
+    expect(result.match(/Incorrect PIN\. No retry was made\./g)?.length).toBe(
+      1,
+    );
+    expect(result.match(/role="alert"/g)?.length).toBe(1);
+    expect(result).not.toContain('inspection-toast');
+  });
+  it('a genuine concurrent attempt shows only plain wording', () => {
+    const result = flat(
+      appHtml([none], undefined, {
+        notice: {
+          revision: '2',
+          tone: 'problem',
+          message:
+            'Security key operation still finishing. Try again in a moment.',
+        },
+      }),
+    );
+    expect(result).toContain(
+      'Security key operation still finishing. Try again in a moment.',
+    );
+    expect(result).toContain('class="inspection-toast problem"');
+    expect(result).not.toMatch(INTERNAL);
+    expect(result).toContain('Not inspected');
+  });
+  it('the inventory component renders each activity state on its own', () => {
+    for (const [state, text] of [
+      ['waiting_for_pin', 'Waiting for PIN…'],
+      ['reading_credentials', 'Reading credentials…'],
+    ] as const) {
+      const result = flat(
+        render(Inventory, {
+          props: { inspection: none, activity: { state } },
+        }).body,
+      );
+      expect(result).toContain(text);
+      expect(result).not.toContain('Not inspected');
+    }
   });
 });

@@ -256,16 +256,16 @@ h1 {
   font-weight: 600;
 }
 
-.authentication-toast {
+.inspection-toast {
   position: fixed;
   z-index: 10;
   right: 1.25rem;
   bottom: 3.5rem;
-  width: min(440px, calc(100vw - 2.5rem));
+  width: min(380px, calc(100vw - 2.5rem));
   display: flex;
-  align-items: start;
-  gap: 1rem;
-  padding: 1rem;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
   border: 1px solid var(--line-strong);
   border-radius: 8px;
   color: var(--text);
@@ -274,10 +274,33 @@ h1 {
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
 }
 
-.authentication-toast p {
-  color: var(--muted);
-  margin: 0.4rem 0 0;
+.inspection-toast p {
+  flex: 1;
+  margin: 0;
+  color: #c8d0cc;
   line-height: 1.5;
+}
+
+.toast-mark {
+  flex: none;
+  width: 1.2rem;
+  height: 1.2rem;
+  border: 1px solid var(--good);
+  border-radius: 50%;
+  color: var(--good);
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1.05rem;
+  text-align: center;
+}
+
+.inspection-toast.problem {
+  border-color: #654a2b;
+}
+
+.inspection-toast.problem .toast-mark {
+  border-color: var(--warn);
+  color: var(--warn);
 }
 
 .notice-dismiss {
@@ -729,6 +752,27 @@ h1 {
 
 .credential-total.muted {
   color: var(--muted);
+}
+
+.credential-total.active {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--accent);
+}
+
+.credential-total.active i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .credential-total.active i {
+    animation: none;
+  }
 }
 
 .credential-total.caution,

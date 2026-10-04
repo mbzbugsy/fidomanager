@@ -209,6 +209,59 @@ displayName primary and userName subdued; a single available value is shown alon
 yields “Passkey”. Credential IDs and opaque CredentialHandles are never rendered (the
 handle remains only the internal list key).
 
+## Inspection start suppression and activity presentation
+
+**Why the “cannot start” message appeared.** That text was emitted only when
+`AuthenticationAuthority::reserve()` refused a native-menu start. From the code, the cause is
+established as follows: the “Inspect credentials on …” items were always enabled and nothing
+suppressed them while an inspection ran. A window-modal AppKit sheet does not disable the application
+menu bar, so any second selection or duplicate menu event while the first start was still
+active (PIN sheet, credential reads, cleanup) reached `reserve()` and was refused with
+`OperationInProgress`. The refusal also set a 10-second toast, so a toast produced at the moment of a
+duplicate event could still be on screen when the PIN sheet closed, which reads as “after PIN
+submission”. Whether the platform ever delivers two events for one physical click cannot be proven
+without hardware; the stderr line `[authentication] admission=…` (refusal) versus the new
+`[authentication] duplicate start suppressed` (presentation guard) now distinguishes them. The gate,
+cooldown and recovery barrier behavior is unchanged and remains authoritative.
+
+**Presentation-layer suppression.** `fido_service::activity::ActivityTracker` holds one start slot.
+The native start claims it before calling `reserve()`; a start that cannot claim it is dropped
+silently. The claim is an RAII guard released on every return path. It authorizes nothing: every
+claimed start still needs gate admission, the tracker is never read by the gate, prompt
+controller, supervisor or worker, and it cannot extend or release any of them. The native inspect
+items are also greyed for the lifetime of the claim (and rebuilt items inherit that state);
+an event that still arrives is suppressed by the claim or refused by the gate. A boundary check
+enforces that the claim precedes `reserve()` and that `reserve()` remains.
+
+**Per-key state, no replacement view.** The authenticator cards stay visible throughout. The
+`inspectionActivity` field of the parameter-free, non-blocking `foundation_status` DTO carries only
+display-handle/phase/message values, because `list_authenticators` intentionally holds the discovery
+lock for the entire inspection:
+
+| Moment | Card of the inspected key |
+| --- | --- |
+| PIN sheet shown | “Waiting for PIN…” with native-sheet hint |
+| PIN submitted, reads and cleanup | “Reading credentials…” |
+| Success | inventory updates in place; small transient “Credentials refreshed” |
+| Cancelled | quiet: no toast, no alert; card returns to its normal state |
+| Failure | one plain-language message inside that key's card until the next attempt or disconnect |
+| No key resolved yet (e.g. key vanished) | transient notice |
+| Genuine concurrent refusal | “Security key operation still finishing. Try again in a moment.” |
+
+Phases come from a data-free `Progress` callback (`PinRequested`, `PinSubmitted`) on the new
+`inspect_with_progress`; `inspect` and `validate` are unchanged. All user-visible wording is fixed
+backend text and a test asserts it never contains internal terms (workflow, admission, cooldown,
+recovery, barrier, acquisition, binding, PUAT, worker, authentication, snapshot). The generic
+“Authentication result” toast and its `authenticationNotice` DTO fields were removed.
+
+Deterministic tests: duplicate/reentrant start suppression, slot release on drop, phase
+transitions and per-key attribution, success transition, quiet cancellation, per-key problem
+lifetime, wording, the exact serialized renderer shape, and SSR rendering of each state in the real
+`App.svelte` with several keys. Because the native glue is macOS-only, it was type-checked and linted for
+`aarch64-apple-darwin` from Linux (`cargo clippy -p fidomanager-app -p fido-service --all-targets`
+with a stub C compiler for objc build scripts); it could not be run here and needs a macOS hardware
+confirmation (menu greying while the sheet is open, and one click producing one sheet).
+
 ## Private-library linkage
 
 The existing pinned private build, digest/identity probe and allocation patch are
@@ -262,11 +315,13 @@ touched and no wrong-PIN, mutation or reset operation was performed:
 
 - cargo fmt --all --check: passed.
 - cargo clippy --workspace --all-targets --locked -- -D warnings: passed.
-- cargo test --workspace --all-targets --locked: 269 passed, 0 failed, 0 ignored on Linux
-  (15 new `boogoocypher-status` tests; macOS-only native tests are not compiled here).
+- cargo test --workspace --all-targets --locked: 280 passed, 0 failed, 0 ignored on Linux
+  (15 `boogoocypher-status` and 11 inspection-activity tests; macOS-only native tests are not compiled here).
+- cargo clippy for `aarch64-apple-darwin` on `fidomanager-app` and `fido-service` (type-checks the
+  macOS-only native menu/start code from Linux; not executed).
 - node scripts/check-renderer-boundary.mjs (including the resolved generated ACL after a build)
   and test-renderer-boundary.mjs: passed, with new BooGooCypher separation controls.
-- pnpm check: 0 errors / 0 warnings; pnpm test: 18 passed (was 5); pnpm build and
+- pnpm check: 0 errors / 0 warnings; pnpm test: 26 passed (was 5); pnpm build and
   pnpm exec prettier --check .: passed; git diff --check: passed.
 - python3 scripts/test-credman-linkage.py: passed. No native library, FFI or linkage code changed, so
   the private libfido2 rebuild and the macOS binary linkage verifier were not re-run.
@@ -375,6 +430,7 @@ reinspection, cancellation and stale/cross-key resolution.
 - `src/inspection.ts`
 - `tests/CredentialInventory.test.ts`
 - `src/styles.css`
+- `crates/fido-service/src/activity.rs` (new), `crates/fido-service/src/authentication.rs`, `crates/fido-service/src/lib.rs`
 - `crates/boogoocypher-status/` (new: Cargo.toml, src/lib.rs, src/http.rs, src/tests.rs)
 - `docs/validation/M3-boogoocypher-readiness.md`
 - `src-tauri/build.rs`
