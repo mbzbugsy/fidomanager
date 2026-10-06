@@ -5,6 +5,8 @@
 
 pub mod inspection;
 #[cfg(any(test, all(feature = "native-libfido2", target_os = "macos")))]
+mod deletion;
+#[cfg(any(test, all(feature = "native-libfido2", target_os = "macos")))]
 mod mutation;
 
 use std::fmt;
@@ -208,6 +210,17 @@ pub trait NativePinMutationSession: Send {
     ) -> fido_auth::mutation::PinMutationResult;
 }
 
+pub trait NativeCredentialDeletionSession: Send {
+    fn kind(&self) -> fido_auth::GrantKind;
+    fn pin_retries(&self) -> u8;
+    fn execute(
+        self: Box<Self>,
+        credential_id: Vec<u8>,
+        pin: fido_auth::PinSecret,
+        deadline: NativeDeadline,
+    ) -> fido_auth::deletion::DeleteCredentialResult;
+}
+
 pub trait NativeDiscoveryBackend: Send {
     fn prepare_pin_mutation(
         &mut self,
@@ -215,6 +228,13 @@ pub trait NativeDiscoveryBackend: Send {
         _operation: fido_auth::mutation::PinOperation,
         _deadline: NativeDeadline,
     ) -> Result<Box<dyn NativePinMutationSession>, NativeError> {
+        Err(NativeError::new(NativeErrorKind::Unsupported, None))
+    }
+    fn prepare_credential_deletion(
+        &mut self,
+        _key: &NativeDeviceKey,
+        _deadline: NativeDeadline,
+    ) -> Result<Box<dyn NativeCredentialDeletionSession>, NativeError> {
         Err(NativeError::new(NativeErrorKind::Unsupported, None))
     }
     fn prepare_authentication(
@@ -250,6 +270,8 @@ mod native {
 
     #[cfg(target_os = "macos")]
     mod authentication;
+    #[cfg(target_os = "macos")]
+    mod deletion;
     #[cfg(target_os = "macos")]
     mod inspection;
     #[cfg(target_os = "macos")]
@@ -327,6 +349,14 @@ mod native {
             deadline: NativeDeadline,
         ) -> Result<Box<dyn super::NativePinMutationSession>, NativeError> {
             mutation::prepare(key, operation, deadline)
+        }
+        #[cfg(target_os = "macos")]
+        fn prepare_credential_deletion(
+            &mut self,
+            key: &NativeDeviceKey,
+            deadline: NativeDeadline,
+        ) -> Result<Box<dyn super::NativeCredentialDeletionSession>, NativeError> {
+            deletion::prepare(key, deadline)
         }
         #[cfg(target_os = "macos")]
         fn prepare_authentication(
