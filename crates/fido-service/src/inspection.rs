@@ -81,6 +81,8 @@ pub struct InspectionSnapshot {
 }
 struct Identity {
     handle: CredentialHandle,
+    authenticator: String,
+    completeness: Completeness,
     rp_hash: [u8; 32],
     credential_id: Vec<u8>,
     user_id: Option<Vec<u8>>,
@@ -120,6 +122,12 @@ impl ExactCredentialTarget {
     }
     pub(crate) fn handle(&self) -> &CredentialHandle {
         &self.handle
+    }
+    pub(crate) fn authenticator(&self) -> &str {
+        &self.authenticator
+    }
+    pub(crate) fn completeness(&self) -> Completeness {
+        self.completeness
     }
     pub(crate) fn rp_hash(&self) -> &[u8; 32] {
         &self.rp_hash
@@ -474,6 +482,8 @@ impl InspectionStore {
             },
             epoch: epoch.clone(),
             handle: handle.clone(),
+            authenticator: e.snapshot.authenticator.clone(),
+            completeness: e.snapshot.assessment.completeness,
             rp_hash: id.rp_hash,
             credential_id: id.credential_id.clone(),
             user_id: id.user_id.clone(),
@@ -498,6 +508,8 @@ impl InspectionStore {
         current.device == target.device
             && current.epoch == target.epoch
             && current.handle == target.handle
+            && current.authenticator == target.authenticator
+            && current.completeness == target.completeness
             && current.rp_hash == target.rp_hash
             && current.credential_id == target.credential_id
             && current.user_id == target.user_id
