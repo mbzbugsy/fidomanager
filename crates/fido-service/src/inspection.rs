@@ -93,7 +93,7 @@ struct StoredInspection {
 /// Owned, immutable exact credential identity resolved from one current inspection epoch.
 /// This is data only, never dispatch authority. Native worker/device authority must be resolved
 /// freshly under the sensitive-workflow gate immediately before permit consumption/dispatch.
-pub(crate) struct ExactCredentialTarget {
+pub struct ExactCredentialTarget {
     device: InventoryDevice,
     epoch: EnumerationEpoch,
     handle: CredentialHandle,
@@ -415,7 +415,7 @@ impl InspectionStore {
     /// Backend-only resolution for an exact current credential. Incomplete inventories may still
     /// contain exact listed credentials; inconsistent inventories cannot safely support deletion.
     /// The returned value is owned so no InspectionStore lock/borrow survives a native prompt.
-    pub(crate) fn resolve_for_mutation(
+    pub fn resolve_for_mutation(
         &self,
         device: DisplayDeviceHandle,
         generation: DeviceGeneration,
@@ -618,14 +618,12 @@ mod tests {
 
         let mut inconsistent = inventory();
         inconsistent.metadata_existing = 2;
-        inconsistent.rps[0]
-            .credentials
-            .push(OwnedCredential {
-                id: vec![17, 19, 23],
-                user_id: Some(vec![41]),
-                user_name: Some("Duplicate".into()),
-                display_name: None,
-            });
+        inconsistent.rps[0].credentials.push(OwnedCredential {
+            id: vec![17, 19, 23],
+            user_id: Some(vec![41]),
+            user_name: Some("Duplicate".into()),
+            display_name: None,
+        });
         assert_eq!(
             inconsistent.assess().completeness,
             Completeness::Inconsistent
@@ -692,8 +690,8 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_rejects_duplicate_live_display_handles()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn reconcile_rejects_duplicate_live_display_handles() -> Result<(), Box<dyn std::error::Error>>
+    {
         let mut store = InspectionStore::default();
         let first = device(1, 1, 1);
         store
