@@ -81,7 +81,7 @@ impl DeleteCredentialIntent {
     /// value is accepted here.
     fn canonical(&self) -> Vec<u8> {
         fn bytes(out: &mut Vec<u8>, value: &[u8]) {
-            let len = u32::try_from(value.len()).expect("bounded M5 intent field");
+            let len = u64::try_from(value.len()).unwrap_or(u64::MAX);
             out.extend(len.to_be_bytes());
             out.extend(value);
         }
