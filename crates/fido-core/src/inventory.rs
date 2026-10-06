@@ -100,9 +100,9 @@ impl OwnedInventory {
                     && r.credentials.iter().all(|c| {
                         !c.id.is_empty()
                             && c.id.len() <= MAX_CREDENTIAL_ID_BYTES
-                            && c.user_id.as_ref().is_none_or(|id| {
-                                !id.is_empty() && id.len() <= MAX_USER_ID_BYTES
-                            })
+                            && c.user_id
+                                .as_ref()
+                                .is_none_or(|id| !id.is_empty() && id.len() <= MAX_USER_ID_BYTES)
                             && [&c.user_name, &c.display_name].iter().all(|t| {
                                 t.as_ref().is_none_or(|t| safe_text(t, MAX_USER_TEXT_BYTES))
                             })
