@@ -552,7 +552,7 @@ for (const file of [
       /\bfido_credman_del_dev_rk\s*\(/.test(source))
   ) {
     throw new Error(
-      `M5 foundation must not declare or call unreviewed authenticator mutation: ${file}`,
+      `M5 must not declare or call authenticator mutation: ${file}`,
     );
   }
 }
