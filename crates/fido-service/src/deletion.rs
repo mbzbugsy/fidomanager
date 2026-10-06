@@ -9,14 +9,14 @@
 use crate::{
     AdmissionError, CompletionError, DiscoverySupervisor, MonotonicClock, ProcessWorkerLauncher,
     RegisteredDeviceTarget, WorkerGeneration, WorkflowCompletion, WorkflowReleaseEvidence,
-    authentication::{AuthenticationAuthority, AuthenticationReservation},
+    authentication::{AuthenticationAuthority, AuthenticationReservation, NativeController},
     inspection::{ExactCredentialTarget, InspectionStore, InventoryDevice},
     recovery::{JournalError, Resolution},
 };
 use fido_core::{
     DeviceHandle, ExecutionQuiescence, RecoveryAdmission, SensitiveWorkflowKind,
 };
-use fido_native_ui::{PromptBinding, PromptOutcome, PromptRequest};
+use fido_native_ui::{PinCompletion, PromptBinding, PromptOutcome, PromptRequest};
 use sha2::{Digest, Sha256};
 use std::{
     sync::{
@@ -251,6 +251,257 @@ pub enum DeleteCredentialError {
 }
 
 impl AuthenticationAuthority {
+    /// Execute one credential-deletion workflow through the killable worker. The renderer cannot
+    /// enter this path directly: target identity, native presentation, approval, durable authority
+    /// and worker addressing are all backend-owned.
+    pub fn delete_credential(
+        &self,
+        supervisor: &mut DiscoverySupervisor<ProcessWorkerLauncher>,
+        inspection: &InspectionStore,
+        mut reservation: DeleteCredentialReservation,
+        present: impl FnOnce(
+            PromptRequest,
+            NativeController,
+            std::sync::mpsc::Sender<PinCompletion>,
+            DeleteCredentialPresentation,
+            u8,
+            Arc<AtomicU64>,
+            u64,
+        ) -> Result<(), &'static str>,
+    ) -> DeleteCredentialWorkflowResult {
+        use fido_core::MutationOutcome;
+        use fido_worker_protocol::{WorkerRequest, WorkerResponse};
+
+        let binding = delete_binding(&reservation);
+        let mut result = DeleteCredentialWorkflowResult {
+            outcome: MutationOutcome::NotDispatched,
+            rejection: None,
+            worker_quiescent: false,
+            prompt_torn_down: false,
+            recovery_required: true,
+            cancelled: false,
+        };
+        let mut presented = false;
+
+        let transaction = (|| -> Result<(), DeleteCredentialError> {
+            if self.epoch.load(Ordering::SeqCst) != reservation.intent.lifecycle_epoch
+                || !inspection.matches_exact_target(&reservation.intent.target)
+                || inspection.operation_authority(&reservation.intent.target)
+                    != Some((
+                        reservation.intent.native_handle,
+                        reservation.intent.native_target.device_generation,
+                        reservation.intent.worker,
+                    ))
+            {
+                return Err(DeleteCredentialError::InvalidPermit);
+            }
+
+            let coordinator = supervisor
+                .coordinator
+                .as_mut()
+                .ok_or(DeleteCredentialError::InvalidPermit)?;
+            coordinator.endpoint.set_revocation(
+                Arc::clone(&self.epoch),
+                reservation.intent.lifecycle_epoch,
+            );
+            let request_id = coordinator
+                .take_request_id()
+                .map_err(|_| DeleteCredentialError::InvalidPermit)?;
+            let response = coordinator
+                .endpoint
+                .exchange(delete_envelope(
+                    binding,
+                    request_id,
+                    WorkerRequest::PrepareCredentialDeletion {
+                        device_id: reservation.intent.native_target.worker_device_id,
+                        binding,
+                    },
+                ))
+                .map_err(|_| DeleteCredentialError::InvalidPermit)?;
+
+            if response.device_generation != Some(binding.session.device_generation)
+                || response.evidence.execution_quiescence != ExecutionQuiescence::Quiescent
+                || response.evidence.mutation_outcome.is_some()
+            {
+                return Err(DeleteCredentialError::InvalidPermit);
+            }
+
+            let retries = match response.response {
+                WorkerResponse::CredentialDeletionPrepared {
+                    binding: echoed,
+                    grant_kind,
+                    pin_retries,
+                } if echoed == binding
+                    && matches!(
+                        grant_kind,
+                        fido_auth::GrantKind::CredMan | fido_auth::GrantKind::LegacyUnscoped
+                    )
+                    && (1..=8).contains(&pin_retries) =>
+                {
+                    pin_retries
+                }
+                _ => return Err(DeleteCredentialError::InvalidPermit),
+            };
+
+            let (reply, completion) = std::sync::mpsc::channel();
+            present(
+                reservation.reservation.prompt.clone(),
+                Arc::clone(&self.controller),
+                reply,
+                reservation.intent.presentation(),
+                retries,
+                Arc::clone(&self.epoch),
+                reservation.intent.lifecycle_epoch,
+            )
+            .map_err(|_| DeleteCredentialError::InvalidPermit)?;
+            presented = true;
+
+            let completion = completion
+                .recv_timeout(Duration::from_secs(fido_auth::PROMPT_LIFETIME_SECS + 2))
+                .map_err(|_| DeleteCredentialError::InvalidPermit)?;
+            if completion.binding != reservation.intent.binding
+                || completion.outcome.binding() != reservation.intent.binding
+            {
+                return Err(DeleteCredentialError::InvalidPermit);
+            }
+            result.cancelled = !matches!(completion.outcome, PromptOutcome::Approved(_));
+            if result.cancelled {
+                return Err(DeleteCredentialError::InvalidPermit);
+            }
+            let pin = completion.pin.ok_or(DeleteCredentialError::InvalidPermit)?;
+
+            let permit = self.approve_delete_credential(&mut reservation)?;
+            self.write_delete_pending(&mut reservation, &permit)?;
+            let dispatch = self.mark_delete_dispatch_capable(
+                supervisor,
+                inspection,
+                &mut reservation,
+                permit,
+            )?;
+
+            // From this point a lost worker/response is never advertised as NotDispatched.
+            result.outcome = MutationOutcome::OutcomeUnknown;
+            let native =
+                self.dispatch_delete(supervisor, inspection, &reservation, dispatch, pin)?;
+            if native.outcome != MutationOutcome::NotDispatched {
+                result.outcome = native.outcome;
+                result.rejection = native.rejection;
+            }
+            Ok(())
+        })();
+        let _ = transaction;
+
+        // A durable dispatch-capable marker dominates any host-side pre-result classification.
+        let phase = self
+            .recovery
+            .lock()
+            .ok()
+            .and_then(|journal| journal.as_ref().and_then(|journal| journal.phase()));
+        if phase == Some(crate::recovery::JournalPhase::DispatchCapable)
+            && result.outcome == MutationOutcome::NotDispatched
+        {
+            result.outcome = MutationOutcome::OutcomeUnknown;
+        }
+
+        result.worker_quiescent =
+            supervisor.retire_authentication() == ExecutionQuiescence::Quiescent;
+        if !presented {
+            if let Ok(mut controller) = self.controller.lock() {
+                let _ = controller.revoke(PromptOutcome::PresentationFailed(
+                    reservation.intent.binding,
+                ));
+                let _ = controller.did_teardown(reservation.intent.binding, Instant::now());
+            }
+        }
+        result.prompt_torn_down = self.controller.lock().is_ok_and(|c| !c.is_active());
+
+        if result.worker_quiescent && result.prompt_torn_down {
+            let resolution = match result.outcome {
+                MutationOutcome::ConfirmedSuccessful => Some(Resolution::ConfirmedSuccessful),
+                MutationOutcome::Rejected => Some(Resolution::Rejected),
+                MutationOutcome::NotDispatched if reservation.pending => {
+                    Some(Resolution::NotDispatched)
+                }
+                _ => None,
+            };
+            if let Some(resolution) = resolution {
+                let _ = self.resolve_delete_result(&reservation, resolution);
+            }
+
+            let completion = if result.cancelled {
+                WorkflowCompletion::Cancelled
+            } else if result.outcome == MutationOutcome::ConfirmedSuccessful {
+                WorkflowCompletion::Succeeded
+            } else {
+                WorkflowCompletion::Rejected
+            };
+            let _ = self.finish_delete_foundation(
+                reservation,
+                completion,
+                ExecutionQuiescence::Quiescent,
+            );
+        }
+
+        result.recovery_required = self.recovery_admission() != RecoveryAdmission::Open;
+        result
+    }
+
+    fn dispatch_delete(
+        &self,
+        supervisor: &mut DiscoverySupervisor<ProcessWorkerLauncher>,
+        inspection: &InspectionStore,
+        reservation: &DeleteCredentialReservation,
+        permit: CredentialDeletionDispatchPermit,
+        pin: fido_auth::PinSecret,
+    ) -> Result<fido_auth::deletion::DeleteCredentialResult, DeleteCredentialError> {
+        use fido_worker_protocol::{WorkerRequest, WorkerResponse};
+
+        self.validate_delete_dispatch(supervisor, inspection, reservation, &permit)?;
+        let coordinator = supervisor
+            .coordinator
+            .as_mut()
+            .ok_or(DeleteCredentialError::InvalidPermit)?;
+        let request_id = coordinator
+            .take_request_id()
+            .map_err(|_| DeleteCredentialError::InvalidPermit)?;
+
+        #[cfg(unix)]
+        coordinator
+            .endpoint
+            .submit_secret(permit.binding.session, request_id, pin)
+            .map_err(|_| DeleteCredentialError::InvalidPermit)?;
+        #[cfg(not(unix))]
+        {
+            drop(pin);
+            return Err(DeleteCredentialError::InvalidPermit);
+        }
+
+        let response = coordinator
+            .endpoint
+            .exchange(delete_envelope(
+                permit.binding,
+                request_id,
+                WorkerRequest::ExecuteCredentialDeletion {
+                    binding: permit.binding,
+                    credential_id: reservation.intent.target.credential_id().to_vec(),
+                },
+            ))
+            .map_err(|_| DeleteCredentialError::InvalidPermit)?;
+
+        match response.response {
+            WorkerResponse::CredentialDeletionCompleted { binding, result }
+                if binding == permit.binding
+                    && response.device_generation == Some(binding.session.device_generation)
+                    && response.evidence.execution_quiescence == ExecutionQuiescence::Quiescent
+                    && result.valid()
+                    && response.evidence.mutation_outcome == Some(result.outcome) =>
+            {
+                Ok(result)
+            }
+            _ => Err(DeleteCredentialError::InvalidPermit),
+        }
+    }
+
     /// Reserve one exact current credential for a future deletion workflow.
     ///
     /// `target` can only be produced by `InspectionStore::resolve_for_mutation`; it is an owned
@@ -628,6 +879,23 @@ impl AuthenticationAuthority {
             .lock()
             .map_err(|_| DeleteCredentialError::InvalidPermit)?;
         self.validate_delete_permit_with_gate(&gate, r, permit, now)
+    }
+}
+
+fn delete_envelope(
+    binding: fido_auth::deletion::DeleteCredentialBinding,
+    request_id: u64,
+    request: fido_worker_protocol::WorkerRequest,
+) -> fido_worker_protocol::WorkerRequestEnvelope {
+    fido_worker_protocol::WorkerRequestEnvelope {
+        protocol_version: fido_worker_protocol::WORKER_PROTOCOL_VERSION,
+        request_id: fido_worker_protocol::WorkerRequestId(request_id),
+        cancellation_id: fido_worker_protocol::CancellationId(request_id),
+        operation_class: request.operation_class(),
+        worker_generation: WorkerGeneration(binding.session.worker_generation),
+        device_generation: Some(binding.session.device_generation),
+        budget_ms: fido_worker_protocol::RequestBudgetMs(fido_auth::AUTH_NATIVE_BUDGET_MS),
+        request,
     }
 }
 
