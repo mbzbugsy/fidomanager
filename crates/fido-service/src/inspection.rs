@@ -459,6 +459,12 @@ mod tests {
         assert_eq!(a.epoch, snapshot(&store, ids[0]).epoch);
         let ah = &a.rps[0].credentials[0].handle;
         let bh = &b.rps[0].credentials[0].handle;
+        let exact = store
+            .resolve_for_mutation(ids[0].handle, ids[0].generation, &a.epoch, ah)
+            .ok_or("exact identity")?;
+        assert_eq!(exact.rp_hash, &Sha256::digest(b"example.com").into());
+        assert_eq!(exact.credential_id, &[17, 19, 23]);
+        assert_eq!(exact.user_id, Some([29, 31, 37].as_slice()));
         assert!(
             store
                 .resolve(ids[1].handle, ids[1].generation, &a.epoch, ah)
