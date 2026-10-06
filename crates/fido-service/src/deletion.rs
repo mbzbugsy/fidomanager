@@ -11,6 +11,7 @@ use crate::{
     RegisteredDeviceTarget, WorkerGeneration, WorkflowCompletion, WorkflowReleaseEvidence,
     authentication::{AuthenticationAuthority, AuthenticationReservation},
     inspection::{ExactCredentialTarget, InspectionStore, InventoryDevice},
+    recovery::{JournalError, JournalPhase, Resolution},
 };
 use fido_core::{
     DeviceHandle, ExecutionQuiescence, RecoveryAdmission, SensitiveWorkflowKind,
@@ -22,7 +23,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
 
@@ -148,6 +149,17 @@ pub struct DeleteCredentialReservation {
     reservation: AuthenticationReservation,
     intent: DeleteCredentialIntent,
     approved: Option<[u8; 32]>,
+    consumed: bool,
+    pending: bool,
+}
+
+/// Backend-private authority produced only after a successfully synced DispatchCapable journal
+/// transition. Ownership is consumed by the one native deletion attempt.
+struct CredentialDeletionDispatchPermit {
+    durable: crate::recovery::DurableCredentialDeletionDispatch,
+    binding: fido_auth::deletion::DeleteCredentialBinding,
+    lifecycle_epoch: u64,
+    expires_at: Instant,
 }
 
 impl DeleteCredentialReservation {
@@ -164,6 +176,8 @@ impl DeleteCredentialReservation {
 pub enum DeleteCredentialError {
     #[error(transparent)]
     Admission(#[from] AdmissionError),
+    #[error(transparent)]
+    Journal(#[from] JournalError),
     #[error(transparent)]
     Completion(#[from] CompletionError),
     #[error("deletion approval is stale, expired, replayed or revoked")]
@@ -235,6 +249,8 @@ impl AuthenticationAuthority {
             reservation,
             intent,
             approved: None,
+            consumed: false,
+            pending: false,
         })
     }
 
@@ -266,6 +282,7 @@ impl AuthenticationAuthority {
                 .is_active()
             || gate.recovery_admission() != RecoveryAdmission::Open
             || r.approved.is_some()
+            || r.consumed
             || now >= r.intent.expires_at
             || !Arc::ptr_eq(&self.epoch, &r.intent.authority_epoch)
             || self.epoch.load(Ordering::SeqCst) != r.intent.lifecycle_epoch
@@ -282,6 +299,190 @@ impl AuthenticationAuthority {
         let digest = r.intent.digest();
         r.approved = Some(digest);
         Ok(DeleteCredentialPermit { digest, expires_at })
+    }
+
+    pub fn write_delete_pending(
+        &self,
+        r: &mut DeleteCredentialReservation,
+        permit: &DeleteCredentialPermit,
+    ) -> Result<(), DeleteCredentialError> {
+        let mut gate = self
+            .gate
+            .lock()
+            .map_err(|_| DeleteCredentialError::InvalidPermit)?;
+        self.validate_delete_permit_with_gate(&gate, r, permit, Instant::now())?;
+        if r.pending {
+            return Err(DeleteCredentialError::InvalidPermit);
+        }
+        let mut slot = self
+            .recovery
+            .lock()
+            .map_err(|_| JournalError::Unavailable)?;
+        let journal = slot.as_mut().ok_or(JournalError::Unavailable)?;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| JournalError::Unavailable)?
+            .as_secs();
+        let result = journal.pending_credential_deletion(timestamp);
+        gate.set_persistent_barrier(journal.admission() == RecoveryAdmission::Barrier);
+        result?;
+        r.pending = true;
+        Ok(())
+    }
+
+    fn mark_delete_dispatch_capable<C: MonotonicClock + Clone>(
+        &self,
+        supervisor: &mut DiscoverySupervisor<ProcessWorkerLauncher, C>,
+        inspection: &InspectionStore,
+        r: &mut DeleteCredentialReservation,
+        permit: DeleteCredentialPermit,
+    ) -> Result<CredentialDeletionDispatchPermit, DeleteCredentialError> {
+        let current_target = supervisor.resolve_handle(r.intent.native_handle);
+        let worker = supervisor.status().worker_generation;
+        let inspection_matches = inspection.matches_exact_target(&r.intent.target)
+            && inspection.operation_authority(&r.intent.target)
+                == Some((
+                    r.intent.native_handle,
+                    r.intent.native_target.device_generation,
+                    r.intent.worker,
+                ));
+        self.consume_delete_at(
+            r,
+            permit,
+            current_target,
+            worker,
+            inspection_matches,
+            Instant::now(),
+        )
+    }
+
+    fn consume_delete_at(
+        &self,
+        r: &mut DeleteCredentialReservation,
+        permit: DeleteCredentialPermit,
+        current_target: Option<RegisteredDeviceTarget>,
+        worker: Option<WorkerGeneration>,
+        inspection_matches: bool,
+        now: Instant,
+    ) -> Result<CredentialDeletionDispatchPermit, DeleteCredentialError> {
+        let mut gate = self
+            .gate
+            .lock()
+            .map_err(|_| DeleteCredentialError::InvalidPermit)?;
+        let valid = self
+            .validate_delete_permit_with_gate(&gate, r, &permit, now)
+            .is_ok()
+            && r.pending
+            && !r.consumed
+            && inspection_matches
+            && current_target == Some(r.intent.native_target)
+            && worker == Some(r.intent.worker);
+        // Any consumption attempt destroys the approval, even when validation fails.
+        r.approved = None;
+        r.consumed = true;
+        if !valid {
+            return Err(DeleteCredentialError::InvalidPermit);
+        }
+
+        let mut slot = self
+            .recovery
+            .lock()
+            .map_err(|_| JournalError::Unavailable)?;
+        let journal = slot.as_mut().ok_or(JournalError::Unavailable)?;
+        let durable = journal.dispatch_capable_credential_deletion();
+        gate.set_persistent_barrier(journal.admission() == RecoveryAdmission::Barrier);
+        let durable = durable?;
+
+        // Revocation/expiry during durable sync retains the barrier but mints no native authority.
+        if self.epoch.load(Ordering::SeqCst) != r.intent.lifecycle_epoch
+            || Instant::now() >= permit.expires_at
+        {
+            return Err(DeleteCredentialError::InvalidPermit);
+        }
+
+        Ok(CredentialDeletionDispatchPermit {
+            durable,
+            binding: delete_binding(r),
+            lifecycle_epoch: r.intent.lifecycle_epoch,
+            expires_at: permit.expires_at,
+        })
+    }
+
+    fn validate_delete_dispatch<C: MonotonicClock + Clone>(
+        &self,
+        supervisor: &mut DiscoverySupervisor<ProcessWorkerLauncher, C>,
+        inspection: &InspectionStore,
+        r: &DeleteCredentialReservation,
+        permit: &CredentialDeletionDispatchPermit,
+    ) -> Result<(), DeleteCredentialError> {
+        let gate = self
+            .gate
+            .lock()
+            .map_err(|_| DeleteCredentialError::InvalidPermit)?;
+        let slot = self
+            .recovery
+            .lock()
+            .map_err(|_| JournalError::Unavailable)?;
+        let journal = slot.as_ref().ok_or(JournalError::Unavailable)?;
+        let now = Instant::now();
+
+        if !gate.matches(&r.reservation.admission)
+            || gate.recovery_admission() != RecoveryAdmission::Barrier
+            || !r.pending
+            || !r.consumed
+            || r.approved.is_some()
+            || !journal.matches_credential_deletion_dispatch(&permit.durable)
+            || !journal.has_unresolved_credential_deletion()
+            || self
+                .controller
+                .lock()
+                .map_err(|_| DeleteCredentialError::InvalidPermit)?
+                .is_active()
+            || !Arc::ptr_eq(&self.epoch, &r.intent.authority_epoch)
+            || self.epoch.load(Ordering::SeqCst) != permit.lifecycle_epoch
+            || permit.lifecycle_epoch != r.intent.lifecycle_epoch
+            || now >= permit.expires_at
+            || now >= r.intent.expires_at
+            || permit.binding != delete_binding(r)
+            || supervisor.resolve_handle(r.intent.native_handle) != Some(r.intent.native_target)
+            || supervisor.status().worker_generation != Some(r.intent.worker)
+            || !inspection.matches_exact_target(&r.intent.target)
+            || inspection.operation_authority(&r.intent.target)
+                != Some((
+                    r.intent.native_handle,
+                    r.intent.native_target.device_generation,
+                    r.intent.worker,
+                ))
+        {
+            return Err(DeleteCredentialError::InvalidPermit);
+        }
+        Ok(())
+    }
+
+    fn resolve_delete_result(
+        &self,
+        r: &DeleteCredentialReservation,
+        resolution: Resolution,
+    ) -> Result<(), DeleteCredentialError> {
+        let mut gate = self
+            .gate
+            .lock()
+            .map_err(|_| DeleteCredentialError::InvalidPermit)?;
+        if !gate.matches(&r.reservation.admission) {
+            return Err(DeleteCredentialError::InvalidPermit);
+        }
+        let mut slot = self
+            .recovery
+            .lock()
+            .map_err(|_| JournalError::Unavailable)?;
+        let journal = slot.as_mut().ok_or(JournalError::Unavailable)?;
+        if !journal.has_unresolved_credential_deletion() {
+            return Err(DeleteCredentialError::InvalidPermit);
+        }
+        let result = journal.resolve(resolution);
+        gate.set_persistent_barrier(journal.admission() == RecoveryAdmission::Barrier);
+        result?;
+        Ok(())
     }
 
     /// Release this foundation workflow only after native prompt teardown and independently proven
@@ -323,21 +524,18 @@ impl AuthenticationAuthority {
 
     /// Future dispatch code must consume the permit by value and compare this binding while holding
     /// the gate and freshly revalidating the exact inspection epoch plus native worker/device.
-    #[cfg(test)]
-    fn validate_delete_permit(
+    fn validate_delete_permit_with_gate(
         &self,
+        gate: &crate::SensitiveWorkflowGate,
         r: &DeleteCredentialReservation,
         permit: &DeleteCredentialPermit,
         now: Instant,
     ) -> Result<(), DeleteCredentialError> {
-        let gate = self
-            .gate
-            .lock()
-            .map_err(|_| DeleteCredentialError::InvalidPermit)?;
         let now = now.max(Instant::now());
         if !gate.matches(&r.reservation.admission)
             || gate.recovery_admission() != RecoveryAdmission::Open
             || r.approved != Some(permit.digest)
+            || r.consumed
             || permit.digest != r.intent.digest()
             || now >= permit.expires_at
             || now >= r.intent.expires_at
@@ -352,6 +550,35 @@ impl AuthenticationAuthority {
             return Err(DeleteCredentialError::InvalidPermit);
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn validate_delete_permit(
+        &self,
+        r: &DeleteCredentialReservation,
+        permit: &DeleteCredentialPermit,
+        now: Instant,
+    ) -> Result<(), DeleteCredentialError> {
+        let gate = self
+            .gate
+            .lock()
+            .map_err(|_| DeleteCredentialError::InvalidPermit)?;
+        self.validate_delete_permit_with_gate(&gate, r, permit, now)
+    }
+}
+
+fn delete_binding(
+    reservation: &DeleteCredentialReservation,
+) -> fido_auth::deletion::DeleteCredentialBinding {
+    fido_auth::deletion::DeleteCredentialBinding {
+        session: fido_auth::AcquisitionBinding {
+            worker_generation: reservation.intent.worker.0,
+            device_generation: reservation.intent.native_target.device_generation,
+            workflow_id: reservation.intent.binding.workflow_id,
+            prompt_instance_id: reservation.intent.binding.prompt_instance_id,
+            acquisition_id: reservation.reservation.acquisition,
+        },
+        intent_digest: reservation.intent.digest(),
     }
 }
 
