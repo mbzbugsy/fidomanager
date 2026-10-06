@@ -604,6 +604,7 @@ mod tests {
         // IDs serialize as three-digit JSON numbers plus separators. Controls are rejected.
         let credential = OwnedCredential {
             id: vec![255; MAX_CREDENTIAL_ID_BYTES],
+            user_id: Some(vec![255; MAX_USER_ID_BYTES]),
             user_name: Some("\\".repeat(MAX_USER_TEXT_BYTES)),
             display_name: Some("\\".repeat(MAX_USER_TEXT_BYTES)),
         };
