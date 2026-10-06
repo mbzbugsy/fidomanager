@@ -412,6 +412,104 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn credential_deletion_protocol_is_typed_bounded_and_strict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let binding = fido_auth::deletion::DeleteCredentialBinding {
+            session: AcquisitionBinding {
+                worker_generation: 3,
+                device_generation: DeviceGeneration(1),
+                workflow_id: fido_core::WorkflowId::from_raw(1),
+                prompt_instance_id: fido_core::PromptInstanceId::from_raw(2),
+                acquisition_id: fido_auth::AcquisitionId(3),
+            },
+            intent_digest: [9; 32],
+        };
+        for request in [
+            WorkerRequest::PrepareCredentialDeletion {
+                device_id: WorkerDeviceId(1),
+                binding,
+            },
+            WorkerRequest::ExecuteCredentialDeletion {
+                binding,
+                credential_id: vec![1, 2, 3],
+            },
+        ] {
+            let mutation = matches!(
+                request,
+                WorkerRequest::ExecuteCredentialDeletion { .. }
+            );
+            let env = request_envelope(request, Some(DeviceGeneration(1)));
+            assert_eq!(
+                env.operation_class,
+                if mutation {
+                    WorkerOperationClass::Mutation
+                } else {
+                    WorkerOperationClass::SensitiveRead
+                }
+            );
+            assert!(env.validate().is_ok());
+            let value = serde_json::to_value(&env)?;
+            assert_eq!(
+                serde_json::from_value::<WorkerRequestEnvelope>(value.clone())?,
+                env
+            );
+            for field in ["pin", "approval", "permit", "path", "raw_ctap"] {
+                let mut hostile = value.clone();
+                hostile["request"][field] = serde_json::json!("hostile");
+                assert!(serde_json::from_value::<WorkerRequestEnvelope>(hostile).is_err());
+                let mut hostile = value.clone();
+                hostile["request"]["binding"][field] = serde_json::json!("hostile");
+                assert!(serde_json::from_value::<WorkerRequestEnvelope>(hostile).is_err());
+            }
+            let mut no_generation = env.clone();
+            no_generation.device_generation = None;
+            assert_eq!(
+                no_generation.validate(),
+                Err(WorkerRequestValidationError::InvalidDeviceGeneration)
+            );
+            let mut wrong_class = env.clone();
+            wrong_class.operation_class = WorkerOperationClass::Reset;
+            assert_eq!(
+                wrong_class.validate(),
+                Err(WorkerRequestValidationError::OperationClassMismatch)
+            );
+        }
+
+        let mut zero_digest = request_envelope(
+            WorkerRequest::PrepareCredentialDeletion {
+                device_id: WorkerDeviceId(1),
+                binding,
+            },
+            Some(DeviceGeneration(1)),
+        );
+        if let WorkerRequest::PrepareCredentialDeletion { binding, .. } = &mut zero_digest.request {
+            binding.intent_digest = [0; 32];
+        }
+        assert_eq!(
+            zero_digest.validate(),
+            Err(WorkerRequestValidationError::InvalidIntentBinding)
+        );
+
+        for credential_id in [
+            Vec::new(),
+            vec![1; fido_core::inventory::MAX_CREDENTIAL_ID_BYTES + 1],
+        ] {
+            let invalid = request_envelope(
+                WorkerRequest::ExecuteCredentialDeletion {
+                    binding,
+                    credential_id,
+                },
+                Some(DeviceGeneration(1)),
+            );
+            assert_eq!(
+                invalid.validate(),
+                Err(WorkerRequestValidationError::InvalidCredentialId)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn generic_mutation_messages_are_not_protocol_requests()
     -> Result<(), Box<dyn std::error::Error>> {
         for kind in ["set_pin", "change_pin", "reset", "delete_credential"] {
