@@ -73,6 +73,7 @@ struct Identity {
     handle: CredentialHandle,
     rp_hash: [u8; 32],
     credential_id: Vec<u8>,
+    user_id: Option<Vec<u8>>,
 }
 struct StoredInspection {
     generation: DeviceGeneration,
@@ -292,6 +293,7 @@ impl InspectionStore {
                     handle: handle.clone(),
                     rp_hash: rp.hash,
                     credential_id: c.id,
+                    user_id: c.user_id,
                 });
                 credentials.push(CredentialDisplay {
                     handle,
@@ -377,6 +379,7 @@ mod tests {
                 issue: None,
                 credentials: vec![OwnedCredential {
                     id: vec![17, 19, 23],
+                    user_id: Some(vec![29, 31, 37]),
                     user_name: Some("Account".into()),
                     display_name: None,
                 }],
@@ -611,7 +614,9 @@ mod tests {
         let displays: Vec<_> = ids.iter().map(|d| store.display_for(*d)).collect();
         let value = serde_json::to_value(&displays)?;
         assert_eq!(value.as_array().ok_or("array")?.len(), 2);
-        assert!(!serde_json::to_string(&displays)?.contains("17,19,23"));
+        let serialized = serde_json::to_string(&displays)?;
+        assert!(!serialized.contains("17,19,23"));
+        assert!(!serialized.contains("29,31,37"));
         for field in [
             "id",
             "hash",
@@ -676,6 +681,7 @@ mod tests {
                         credentials: (0..2)
                             .map(|_| OwnedCredential {
                                 id: vec![255; 512],
+                                user_id: Some(vec![255; MAX_USER_ID_BYTES]),
                                 user_name: Some("\\".repeat(256)),
                                 display_name: Some("\\".repeat(256)),
                             })
