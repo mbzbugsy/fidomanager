@@ -45,14 +45,15 @@ fn eligible(device: &mut Device, deadline: &NativeDeadline) -> Result<GrantKind,
     let info = unsafe { extract_device_info(info.ptr) }?;
     let kind = select_delete_kind(
         &info.versions,
-        info.options.iter().map(|option| (option.name.as_str(), option.enabled)),
+        info.options
+            .iter()
+            .map(|option| (option.name.as_str(), option.enabled)),
     )
     .ok_or(NativeError::new(NativeErrorKind::Unsupported, None))?;
 
     // SAFETY: scalar accessor on the same live device. Full scoped CredMan must really use the
     // permissions path; legacy preview must really be unscoped. Never trust GetInfo alone.
-    if unsafe { fido_dev_supports_permissions(device.ptr) } != (kind != GrantKind::LegacyUnscoped)
-    {
+    if unsafe { fido_dev_supports_permissions(device.ptr) } != (kind != GrantKind::LegacyUnscoped) {
         return Err(NativeError::new(NativeErrorKind::Malformed, None));
     }
     Ok(kind)
