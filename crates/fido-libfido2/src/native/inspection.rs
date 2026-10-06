@@ -32,6 +32,8 @@ unsafe extern "C" {
     fn fido_credman_rk(r: *const c_void, i: usize) -> *const c_void;
     fn fido_cred_id_ptr(c: *const c_void) -> *const u8;
     fn fido_cred_id_len(c: *const c_void) -> usize;
+    fn fido_cred_user_id_ptr(c: *const c_void) -> *const u8;
+    fn fido_cred_user_id_len(c: *const c_void) -> usize;
     fn fido_cred_user_name(c: *const c_void) -> *const c_char;
     fn fido_cred_display_name(c: *const c_void) -> *const c_char;
 }
@@ -158,6 +160,18 @@ pub(super) fn read(
                                 MAX_CREDENTIAL_ID_BYTES,
                             )
                         }?;
+                        let user_id_len = unsafe { fido_cred_user_id_len(c) };
+                        let user_id = if user_id_len == 0 {
+                            None
+                        } else {
+                            Some(unsafe {
+                                copy_id(
+                                    fido_cred_user_id_ptr(c),
+                                    user_id_len,
+                                    MAX_USER_ID_BYTES,
+                                )
+                            }?)
+                        };
                         let user_name =
                             unsafe { copy_text(fido_cred_user_name(c), MAX_USER_TEXT_BYTES + 1) }?;
                         let display_name = unsafe {
@@ -165,6 +179,7 @@ pub(super) fn read(
                         }?;
                         rp.credentials.push(OwnedCredential {
                             id,
+                            user_id,
                             user_name,
                             display_name,
                         });
