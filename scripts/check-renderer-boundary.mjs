@@ -499,8 +499,7 @@ if (existsSync(generatedCapabilitiesPath) || existsSync(generatedAclPath)) {
   }
 }
 
-// M4/M5 permit only the reviewed typed PIN and credential-deletion worker paths. Reset and
-// generic mutation requests stay forbidden.
+// M4 permits only the reviewed typed PIN path; reset, deletion and generic mutation stay forbidden.
 const workerProtocol = readFileSync(
   'crates/fido-worker-protocol/src/lib.rs',
   'utf8',
@@ -524,7 +523,7 @@ assertExactArray(
     'InspectCredentials',
     'ValidateAuthentication',
   ],
-  'M5 must not add an unreviewed executable mutation worker request.',
+  'M4 must not add an unreviewed executable mutation worker request.',
 );
 for (const file of [
   ...listFiles('crates', (path) => path.endsWith('.rs')),
@@ -552,7 +551,7 @@ for (const file of [
       /\bfido_credman_del_dev_rk\s*\(/.test(source))
   ) {
     throw new Error(
-      `M5 must not declare or call authenticator mutation: ${file}`,
+      `M4 foundation must not declare or call authenticator mutation: ${file}`,
     );
   }
 }
@@ -563,7 +562,7 @@ for (const file of rendererFiles) {
     )
   ) {
     throw new Error(
-      `M5 authority or recovery data must not enter renderer: ${file}`,
+      `M4 foundation authority or recovery data must not enter renderer: ${file}`,
     );
   }
 }
@@ -610,7 +609,7 @@ for (const [file, name] of [
       '\\b',
   );
   if (unsafeDerive.test(text) || unsafeImpl.test(text))
-    throw new Error(`M4/M5 secret/permit traits must remain forbidden: ${name}`);
+    throw new Error(`M4 secret/permit traits must remain forbidden: ${name}`);
 }
 const nativeSheet = readFileSync(
   'crates/fido-native-ui/src/macos_pin.rs',
