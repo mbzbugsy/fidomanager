@@ -411,6 +411,65 @@ pub(crate) mod tests {
         Ok(())
     }
     #[test]
+    fn credential_deletion_uses_the_same_durable_barrier_contract() -> Result<(), JournalError> {
+        let disk = MemoryStorage::default();
+        let mut journal = RecoveryJournal::load(Box::new(disk.clone()));
+        journal.pending_credential_deletion(11)?;
+        assert!(journal.has_unresolved_credential_deletion());
+        assert_eq!(journal.phase(), Some(JournalPhase::Pending));
+        assert_eq!(journal.operation(), None);
+        assert_eq!(journal.admission(), RecoveryAdmission::Open);
+
+        let receipt = journal.dispatch_capable_credential_deletion()?;
+        assert!(journal.matches_credential_deletion_dispatch(&receipt));
+        assert!(journal.has_unresolved_credential_deletion());
+        assert_eq!(journal.admission(), RecoveryAdmission::Barrier);
+        assert!(journal.resolve(Resolution::NotDispatched).is_err());
+
+        journal.resolve(Resolution::AcknowledgedUnknown)?;
+        assert!(!journal.has_unresolved_credential_deletion());
+        assert!(!journal.matches_credential_deletion_dispatch(&receipt));
+        assert_eq!(journal.admission(), RecoveryAdmission::Open);
+
+        let restarted = RecoveryJournal::load(Box::new(disk));
+        assert_eq!(restarted.phase(), Some(JournalPhase::Resolved));
+        assert_eq!(restarted.operation(), None);
+        assert!(!restarted.has_unresolved_credential_deletion());
+        assert_eq!(restarted.admission(), RecoveryAdmission::Open);
+        Ok(())
+    }
+
+    #[test]
+    fn existing_m4_records_remain_schema_compatible() -> Result<(), JournalError> {
+        for operation in ["set_pin", "change_pin"] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "schema": 1,
+                "application": "fidomanager-m4-v1",
+                "incident": "0123456789abcdef0123456789abcdef",
+                "operation": operation,
+                "created_unix_secs": 7,
+                "phase": "dispatch_capable",
+                "resolution": null
+            }))
+            .map_err(|_| JournalError::Unavailable)?;
+            let disk = MemoryStorage::default();
+            disk.0.lock().unwrap_or_else(|_| panic!("disk")).bytes = Some(bytes);
+            let journal = RecoveryJournal::load(Box::new(disk));
+            assert_eq!(journal.admission(), RecoveryAdmission::Barrier);
+            assert_eq!(journal.phase(), Some(JournalPhase::DispatchCapable));
+            assert_eq!(
+                journal.operation(),
+                Some(if operation == "set_pin" {
+                    PinOperation::SetPin
+                } else {
+                    PinOperation::ChangePin
+                })
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn corrupt_unsupported_and_secret_extended_records_fail_closed() -> Result<(), JournalError> {
         let disk = MemoryStorage::default();
         let mut j = RecoveryJournal::load(Box::new(disk.clone()));
