@@ -13,9 +13,7 @@ use crate::{
     inspection::{ExactCredentialTarget, InspectionStore, InventoryDevice},
     recovery::{JournalError, Resolution},
 };
-use fido_core::{
-    DeviceHandle, ExecutionQuiescence, RecoveryAdmission, SensitiveWorkflowKind,
-};
+use fido_core::{DeviceHandle, ExecutionQuiescence, RecoveryAdmission, SensitiveWorkflowKind};
 use fido_native_ui::{PinCompletion, PromptBinding, PromptOutcome, PromptRequest};
 use sha2::{Digest, Sha256};
 use std::{
@@ -300,10 +298,9 @@ impl AuthenticationAuthority {
                 .coordinator
                 .as_mut()
                 .ok_or(DeleteCredentialError::InvalidPermit)?;
-            coordinator.endpoint.set_revocation(
-                Arc::clone(&self.epoch),
-                reservation.intent.lifecycle_epoch,
-            );
+            coordinator
+                .endpoint
+                .set_revocation(Arc::clone(&self.epoch), reservation.intent.lifecycle_epoch);
             let request_id = coordinator
                 .take_request_id()
                 .map_err(|_| DeleteCredentialError::InvalidPermit)?;
@@ -1053,8 +1050,7 @@ mod tests {
     #[test]
     fn intent_owns_exact_target_and_permit_is_single_mint() -> TestResult {
         let authority = test_authority();
-        let mut reservation =
-            reserve(&authority, target(vec![1, 2, 3], Some(vec![9, 8]))?)?;
+        let mut reservation = reserve(&authority, target(vec![1, 2, 3], Some(vec![9, 8]))?)?;
         assert_eq!(reservation.intent().rp_text(), "example.com");
         assert_eq!(reservation.intent().user_name(), Some("person@example.com"));
         assert_eq!(reservation.intent().display_name(), Some("Person"));
