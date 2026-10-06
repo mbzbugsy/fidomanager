@@ -167,7 +167,9 @@ impl RecoveryJournal {
         self.record.as_ref().map(|r| r.phase)
     }
     pub fn operation(&self) -> Option<PinOperation> {
-        self.record.as_ref().and_then(|record| record.operation.pin())
+        self.record
+            .as_ref()
+            .and_then(|record| record.operation.pin())
     }
     pub(crate) fn has_unresolved_credential_deletion(&self) -> bool {
         !self.poisoned
