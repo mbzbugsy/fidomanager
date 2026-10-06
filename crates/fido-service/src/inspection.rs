@@ -682,12 +682,19 @@ mod tests {
             credentials: Vec::new(),
         });
         assert_eq!(incomplete.assess().completeness, Completeness::Incomplete);
-        store.replace(ids[0], "Same label".into(), incomplete)?;
-        let snapshot = snapshot(&store, ids[0]);
-        let handle = &snapshot.rps[0].credentials[0].handle;
+        store
+            .replace(ids[0], "Same label".into(), incomplete)
+            .map_err(|_| "replace incomplete")?;
+        let incomplete_snapshot = snapshot(&store, ids[0]);
+        let handle = &incomplete_snapshot.rps[0].credentials[0].handle;
         assert!(
             store
-                .resolve_for_mutation(ids[0].handle, ids[0].generation, &snapshot.epoch, handle)
+                .resolve_for_mutation(
+                    ids[0].handle,
+                    ids[0].generation,
+                    &incomplete_snapshot.epoch,
+                    handle
+                )
                 .is_some()
         );
 
@@ -704,15 +711,17 @@ mod tests {
             Completeness::Inconsistent
         );
         assert!(inconsistent.assess().duplicate_credentials);
-        store.replace(ids[0], "Same label".into(), inconsistent)?;
-        let snapshot = snapshot(&store, ids[0]);
-        for credential in &snapshot.rps[0].credentials {
+        store
+            .replace(ids[0], "Same label".into(), inconsistent)
+            .map_err(|_| "replace inconsistent")?;
+        let inconsistent_snapshot = snapshot(&store, ids[0]);
+        for credential in &inconsistent_snapshot.rps[0].credentials {
             assert!(
                 store
                     .resolve_for_mutation(
                         ids[0].handle,
                         ids[0].generation,
-                        &snapshot.epoch,
+                        &inconsistent_snapshot.epoch,
                         &credential.handle
                     )
                     .is_none()
