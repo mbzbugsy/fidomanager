@@ -244,7 +244,10 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
                 code: WorkerErrorCode::DeviceAbsent,
             };
         };
-        match self.backend.prepare_credential_deletion(&slot.key, deadline) {
+        match self
+            .backend
+            .prepare_credential_deletion(&slot.key, deadline)
+        {
             Ok(native)
                 if matches!(
                     native.kind(),
@@ -1240,8 +1243,7 @@ mod tests {
         ) -> fido_auth::deletion::DeleteCredentialResult {
             assert_eq!(credential_id, vec![1, 2, 3]);
             drop(pin);
-            self.calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             fido_auth::deletion::DeleteCredentialResult::from_code(true, 0, true)
         }
     }
@@ -1300,8 +1302,7 @@ mod tests {
                 Some(4)
             })
             .map_err(|_| "pin")?;
-            fido_auth::send_secret(&mut secret, binding.session, 3, pin)
-                .map_err(|_| "secret")?;
+            fido_auth::send_secret(&mut secret, binding.session, 3, pin).map_err(|_| "secret")?;
             if scenario == 8 {
                 secret.pop();
             }
