@@ -7,7 +7,7 @@
 //! Pending -> DispatchCapable authority are added before any native delete symbol becomes reachable.
 
 use crate::{
-    AdmissionError, CompletionError, WorkflowCompletion, WorkflowReleaseEvidence,
+    AdmissionError, CompletionError, MonotonicClock, WorkflowCompletion, WorkflowReleaseEvidence,
     authentication::{AuthenticationAuthority, AuthenticationReservation},
     inspection::{ExactCredentialTarget, InventoryDevice},
 };
