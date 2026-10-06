@@ -592,10 +592,7 @@ for (const [file, name] of [
   ['crates/fido-service/src/mutation.rs', 'PinMutationDispatchPermit'],
   ['crates/fido-service/src/recovery.rs', 'DurablePinDispatch'],
   ['crates/fido-service/src/deletion.rs', 'DeleteCredentialPermit'],
-  [
-    'crates/fido-service/src/recovery.rs',
-    'DurableCredentialDeletionDispatch',
-  ],
+  ['crates/fido-service/src/recovery.rs', 'DurableCredentialDeletionDispatch'],
 ]) {
   const text = readFileSync(file, 'utf8');
   const unsafeDerive = new RegExp(
