@@ -448,12 +448,9 @@ impl InspectionStore {
         if !self.current {
             return None;
         }
-        let connected = self
-            .connected
-            .iter()
-            .find(|connected| {
-                connected.device.handle == device && connected.device.generation == generation
-            })?;
+        let connected = self.connected.iter().find(|connected| {
+            connected.device.handle == device && connected.device.generation == generation
+        })?;
         let e = self.entries.get(&device)?;
         if e.generation != generation
             || &e.snapshot.epoch != epoch
