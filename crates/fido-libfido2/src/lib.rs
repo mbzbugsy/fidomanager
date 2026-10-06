@@ -3,9 +3,9 @@
 //! The public API deliberately exposes owned values only. Native paths remain opaque inside the
 //! worker and libfido2 pointers never cross this crate boundary.
 
-pub mod inspection;
 #[cfg(any(test, all(feature = "native-libfido2", target_os = "macos")))]
 mod deletion;
+pub mod inspection;
 #[cfg(any(test, all(feature = "native-libfido2", target_os = "macos")))]
 mod mutation;
 
