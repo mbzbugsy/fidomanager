@@ -8,6 +8,8 @@ pub const MAX_RP_SCAN_BYTES: usize = MAX_RP_TEXT_BYTES + 1;
 pub const MAX_CREDENTIAL_ID_BYTES: usize = 512;
 pub const MAX_USER_ID_BYTES: usize = 64;
 pub const MAX_USER_TEXT_BYTES: usize = 256;
+// Derived architectural maxima. They are implied by the independently enforced item-count
+// and per-item bounds below; they are not separate runtime counters.
 pub const MAX_TOTAL_RP_TEXT_BYTES: usize = MAX_RPS * MAX_RP_TEXT_BYTES;
 pub const MAX_TOTAL_ID_BYTES: usize = MAX_CREDENTIALS * MAX_CREDENTIAL_ID_BYTES;
 pub const MAX_TOTAL_USER_ID_BYTES: usize = MAX_CREDENTIALS * MAX_USER_ID_BYTES;
