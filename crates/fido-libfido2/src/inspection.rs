@@ -237,6 +237,7 @@ mod tests {
                         issue: None,
                         credentials: vec![OwnedCredential {
                             id: vec![1],
+                            user_id: Some(vec![2]),
                             user_name: None,
                             display_name: None,
                         }],
