@@ -113,10 +113,6 @@ impl DeleteCredentialIntent {
         out.extend(self.lifecycle_epoch.to_be_bytes());
         out
     }
-
-    pub(crate) fn target(&self) -> &ExactCredentialTarget {
-        &self.target
-    }
 }
 
 /// One native approval for one exact deletion intent. It cannot be cloned, serialized, retargeted
@@ -289,7 +285,8 @@ impl AuthenticationAuthority {
 
     /// Future dispatch code must consume the permit by value and compare this binding while holding
     /// the gate and freshly revalidating the exact inspection epoch plus native worker/device.
-    pub(crate) fn validate_delete_permit(
+    #[cfg(test)]
+    fn validate_delete_permit(
         &self,
         r: &DeleteCredentialReservation,
         permit: &DeleteCredentialPermit,
@@ -451,7 +448,7 @@ mod tests {
         assert_eq!(reservation.intent().user_name(), Some("person@example.com"));
         assert_eq!(reservation.intent().display_name(), Some("Person"));
         assert_eq!(
-            reservation.intent().target().credential_id(),
+            reservation.intent().target.credential_id(),
             &[1, 2, 3]
         );
         let digest = reservation.intent().digest();
