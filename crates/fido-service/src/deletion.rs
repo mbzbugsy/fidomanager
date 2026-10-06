@@ -1,14 +1,14 @@
 //! M5 credential-deletion authority foundation.
 //!
-//! This module intentionally stops before durable deletion journaling or worker/native dispatch.
-//! An exact credential target is resolved from the trusted inspection store, moved into an
-//! immutable intent, and may receive at most one short-lived native-approval permit. The permit
-//! itself cannot delete anything. Final worker/device/epoch revalidation and durable
-//! Pending -> DispatchCapable authority are added before any native delete symbol becomes reachable.
+//! Production credential-deletion authority: exact current inventory identity, immutable intent,
+//! trusted-native approval, durable Pending -> DispatchCapable transition, one-shot worker
+//! dispatch, conservative outcome classification, worker quiescence and recovery barrier.
+//! Renderer input never supplies raw credential identity or approval evidence.
 
 use crate::{
     AdmissionError, CompletionError, DiscoverySupervisor, MonotonicClock, ProcessWorkerLauncher,
-    RegisteredDeviceTarget, WorkerGeneration, WorkflowCompletion, WorkflowReleaseEvidence,
+    RegisteredDeviceTarget, WorkerEndpoint, WorkerGeneration, WorkflowCompletion,
+    WorkflowReleaseEvidence,
     authentication::{AuthenticationAuthority, AuthenticationReservation, NativeController},
     inspection::{ExactCredentialTarget, InspectionStore, InventoryDevice},
     recovery::{JournalError, Resolution},
