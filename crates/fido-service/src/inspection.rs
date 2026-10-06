@@ -85,8 +85,15 @@ struct Identity {
     credential_id: Vec<u8>,
     user_id: Option<Vec<u8>>,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InspectionAuthority {
+    worker: WorkerGeneration,
+    native_handle: DeviceHandle,
+    native_generation: DeviceGeneration,
+}
 struct StoredInspection {
     generation: DeviceGeneration,
+    authority: InspectionAuthority,
     snapshot: InspectionSnapshot,
     identities: Vec<Identity>,
 }
@@ -324,9 +331,16 @@ impl InspectionStore {
             .map(|e| e.snapshot.epoch.clone());
         self.invalidate(device);
         // A completed inspection may publish only into its exact known connected generation.
-        if !self.connected.iter().any(|c| c.device == device) {
-            return Err(InspectionError::DeviceAbsent);
-        }
+        let connected = self
+            .connected
+            .iter()
+            .find(|connected| connected.device == device)
+            .ok_or(InspectionError::DeviceAbsent)?;
+        let authority = InspectionAuthority {
+            worker: connected.worker,
+            native_handle: connected.native_handle,
+            native_generation: connected.native_generation,
+        };
         if !inventory.within_bounds()
             || !safe_text(&label, 1024)
             || inventory.rps.iter().any(|rp| {
@@ -373,6 +387,7 @@ impl InspectionStore {
             device.handle,
             StoredInspection {
                 generation: device.generation,
+                authority,
                 identities,
                 snapshot: InspectionSnapshot {
                     device_handle: device.handle,
@@ -422,18 +437,25 @@ impl InspectionStore {
         epoch: &EnumerationEpoch,
         handle: &CredentialHandle,
     ) -> Option<ExactCredentialTarget> {
-        if !self.current
-            || !self
-                .connected
-                .iter()
-                .any(|c| c.device.handle == device && c.device.generation == generation)
-        {
+        if !self.current {
             return None;
         }
+        let connected = self
+            .connected
+            .iter()
+            .find(|connected| {
+                connected.device.handle == device && connected.device.generation == generation
+            })?;
         let e = self.entries.get(&device)?;
         if e.generation != generation
             || &e.snapshot.epoch != epoch
             || e.snapshot.assessment.completeness == Completeness::Inconsistent
+            || e.authority
+                != (InspectionAuthority {
+                    worker: connected.worker,
+                    native_handle: connected.native_handle,
+                    native_generation: connected.native_generation,
+                })
         {
             return None;
         }
@@ -482,6 +504,24 @@ impl InspectionStore {
             && current.rp_text == target.rp_text
             && current.user_name == target.user_name
             && current.display_name == target.display_name
+    }
+
+    /// Current native addressing for an exact credential that was enumerated under this same
+    /// worker/device authority. If the worker was orderly replaced, the card may remain visible
+    /// but mutation resolution fails until a fresh credential inspection creates a new epoch.
+    pub(crate) fn operation_authority(
+        &self,
+        target: &ExactCredentialTarget,
+    ) -> Option<(DeviceHandle, DeviceGeneration, WorkerGeneration)> {
+        if !self.matches_exact_target(target) {
+            return None;
+        }
+        let entry = self.entries.get(&target.device.handle)?;
+        Some((
+            entry.authority.native_handle,
+            entry.authority.native_generation,
+            entry.authority.worker,
+        ))
     }
 }
 
@@ -706,13 +746,34 @@ mod tests {
             .reconcile_connected(&[device(9, 1, 1)], WorkerGeneration(2))
             .map_err(|_| "refresh")?;
         assert_eq!(next, ids);
+        assert!(
+            store
+                .resolve_for_mutation(next[0].handle, next[0].generation, &before.epoch, known)
+                .is_none(),
+            "presentation continuity must not revive mutation authority"
+        );
+        assert!(!store.matches_exact_target(&target));
+
+        // A fresh inspection under worker 2 establishes a new epoch and new exact target.
+        replace(&mut store, next[0]);
+        let after = snapshot(&store, next[0]);
         let refreshed = store
-            .resolve_for_mutation(next[0].handle, next[0].generation, &before.epoch, known)
-            .ok_or("refreshed target")?;
-        assert_eq!(refreshed.device(), next[0]);
-        assert_eq!(refreshed.credential_id(), target.credential_id());
-        assert!(store.matches_exact_target(&target));
+            .resolve_for_mutation(
+                next[0].handle,
+                next[0].generation,
+                &after.epoch,
+                &after.rps[0].credentials[0].handle,
+            )
+            .ok_or("fresh target")?;
         assert!(store.matches_exact_target(&refreshed));
+        assert_eq!(
+            store.operation_authority(&refreshed),
+            Some((
+                DeviceHandle::from_raw(9),
+                DeviceGeneration(1),
+                WorkerGeneration(2)
+            ))
+        );
         Ok(())
     }
 
