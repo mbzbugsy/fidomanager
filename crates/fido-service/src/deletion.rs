@@ -320,11 +320,7 @@ impl AuthenticationAuthority {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        WorkerGeneration,
-        inspection::InspectionStore,
-        recovery::tests::MemoryStorage,
-    };
+    use crate::{WorkerGeneration, inspection::InspectionStore, recovery::tests::MemoryStorage};
     use fido_core::{
         DeviceGeneration, DeviceHandle, DeviceReadStatus, DeviceSnapshot, ViewFreshness,
         inventory::{OwnedCredential, OwnedInventory, OwnedRp},
@@ -380,7 +376,10 @@ mod tests {
         }
     }
 
-    fn target(id: Vec<u8>, user_id: Option<Vec<u8>>) -> Result<ExactCredentialTarget, &'static str> {
+    fn target(
+        id: Vec<u8>,
+        user_id: Option<Vec<u8>>,
+    ) -> Result<ExactCredentialTarget, &'static str> {
         let mut store = InspectionStore::default();
         let devices = store
             .reconcile_connected(&[device(1, 1, 1)], WorkerGeneration(1))
@@ -447,16 +446,17 @@ mod tests {
         assert_eq!(reservation.intent().rp_text(), "example.com");
         assert_eq!(reservation.intent().user_name(), Some("person@example.com"));
         assert_eq!(reservation.intent().display_name(), Some("Person"));
-        assert_eq!(
-            reservation.intent().target.credential_id(),
-            &[1, 2, 3]
-        );
+        assert_eq!(reservation.intent().target.credential_id(), &[1, 2, 3]);
         let digest = reservation.intent().digest();
 
         native_teardown(&authority, reservation.intent().binding(), true);
         let permit = authority.approve_delete_credential(&mut reservation)?;
         assert_eq!(permit.digest, digest);
-        assert!(authority.approve_delete_credential(&mut reservation).is_err());
+        assert!(
+            authority
+                .approve_delete_credential(&mut reservation)
+                .is_err()
+        );
         authority.validate_delete_permit(&reservation, &permit, Instant::now())?;
         authority.finish_delete_foundation(
             reservation,
@@ -469,8 +469,7 @@ mod tests {
     #[test]
     fn lifecycle_revocation_or_cancel_never_mints_a_permit() -> TestResult {
         let authority = authority();
-        let mut revoked =
-            authority.reserve_delete_credential(target(vec![4], Some(vec![5]))?)?;
+        let mut revoked = authority.reserve_delete_credential(target(vec![4], Some(vec![5]))?)?;
         native_teardown(&authority, revoked.intent().binding(), true);
         authority.revoke();
         assert!(authority.approve_delete_credential(&mut revoked).is_err());
@@ -478,11 +477,7 @@ mod tests {
         let authority = authority();
         let mut cancelled = authority.reserve_delete_credential(target(vec![6], None)?)?;
         native_teardown(&authority, cancelled.intent().binding(), false);
-        assert!(
-            authority
-                .approve_delete_credential(&mut cancelled)
-                .is_err()
-        );
+        assert!(authority.approve_delete_credential(&mut cancelled).is_err());
         authority.finish_delete_foundation(
             cancelled,
             WorkflowCompletion::Cancelled,
