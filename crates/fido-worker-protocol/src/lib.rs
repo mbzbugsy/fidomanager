@@ -19,7 +19,7 @@ use fido_auth::{AcquisitionBinding, AuthenticationEvidence, GrantKind};
 use fido_core::{Aaguid, DeviceGeneration, ExecutionQuiescence, MutationOutcome};
 use serde::{Deserialize, Serialize};
 
-pub const WORKER_PROTOCOL_VERSION: u16 = 4;
+pub const WORKER_PROTOCOL_VERSION: u16 = 5;
 /// Largest frame the service accepts from a worker (responses). Transport implementations must
 /// reject larger frames before deserialization, and before allocating their payload.
 pub const MAX_WORKER_FRAME_BYTES: usize = 1_048_576;
