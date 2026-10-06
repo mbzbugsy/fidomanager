@@ -10,9 +10,19 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EnumerationEpoch(String);
+impl EnumerationEpoch {
+    pub fn as_wire(&self) -> &str {
+        &self.0
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CredentialHandle(String);
+impl CredentialHandle {
+    pub fn as_wire(&self) -> &str {
+        &self.0
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CredentialDisplay {
@@ -82,9 +92,14 @@ struct StoredInspection {
 }
 /// Backend-only exact credential identity resolved from an opaque current-epoch handle.
 pub struct ResolvedCredentialIdentity<'a> {
+    pub native_handle: DeviceHandle,
+    pub native_generation: DeviceGeneration,
     pub rp_hash: &'a [u8; 32],
     pub credential_id: &'a [u8],
     pub user_id: Option<&'a [u8]>,
+    pub rp_text: Option<&'a str>,
+    pub user_name: Option<&'a str>,
+    pub display_name: Option<&'a str>,
 }
 
 struct ConnectedDevice {
@@ -363,15 +378,30 @@ impl InspectionStore {
         {
             return None;
         }
+        let connected = self
+            .connected
+            .iter()
+            .find(|c| c.device.handle == device && c.device.generation == generation)?;
         let e = self.entries.get(&device)?;
         if e.generation != generation || &e.snapshot.epoch != epoch {
             return None;
         }
         let id = e.identities.iter().find(|i| &i.handle == handle)?;
+        let (rp, credential) = e.snapshot.rps.iter().find_map(|rp| {
+            rp.credentials
+                .iter()
+                .find(|credential| &credential.handle == handle)
+                .map(|credential| (rp, credential))
+        })?;
         Some(ResolvedCredentialIdentity {
+            native_handle: connected.native_handle,
+            native_generation: connected.native_generation,
             rp_hash: &id.rp_hash,
             credential_id: &id.credential_id,
             user_id: id.user_id.as_deref(),
+            rp_text: rp.verified_text.as_deref(),
+            user_name: credential.user_name.as_deref(),
+            display_name: credential.display_name.as_deref(),
         })
     }
 }
@@ -462,9 +492,14 @@ mod tests {
         let exact = store
             .resolve_for_mutation(ids[0].handle, ids[0].generation, &a.epoch, ah)
             .ok_or("exact identity")?;
+        assert_eq!(exact.native_handle, DeviceHandle::from_raw(1));
+        assert_eq!(exact.native_generation, DeviceGeneration(1));
         assert_eq!(exact.rp_hash, &Sha256::digest(b"example.com").into());
         assert_eq!(exact.credential_id, &[17, 19, 23]);
         assert_eq!(exact.user_id, Some([29, 31, 37].as_slice()));
+        assert_eq!(exact.rp_text, Some("example.com"));
+        assert_eq!(exact.user_name, Some("Account"));
+        assert_eq!(exact.display_name, None);
         assert!(
             store
                 .resolve(ids[1].handle, ids[1].generation, &a.epoch, ah)
