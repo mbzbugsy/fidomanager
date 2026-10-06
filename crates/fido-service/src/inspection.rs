@@ -81,8 +81,6 @@ pub struct InspectionSnapshot {
 }
 struct Identity {
     handle: CredentialHandle,
-    authenticator: String,
-    completeness: Completeness,
     rp_hash: [u8; 32],
     credential_id: Vec<u8>,
     user_id: Option<Vec<u8>>,
@@ -106,6 +104,8 @@ pub struct ExactCredentialTarget {
     device: InventoryDevice,
     epoch: EnumerationEpoch,
     handle: CredentialHandle,
+    authenticator: String,
+    completeness: Completeness,
     rp_hash: [u8; 32],
     credential_id: Vec<u8>,
     user_id: Option<Vec<u8>>,
