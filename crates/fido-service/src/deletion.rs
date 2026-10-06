@@ -11,7 +11,7 @@ use crate::{
     RegisteredDeviceTarget, WorkerGeneration, WorkflowCompletion, WorkflowReleaseEvidence,
     authentication::{AuthenticationAuthority, AuthenticationReservation},
     inspection::{ExactCredentialTarget, InspectionStore, InventoryDevice},
-    recovery::{JournalError, JournalPhase, Resolution},
+    recovery::{JournalError, Resolution},
 };
 use fido_core::{
     DeviceHandle, ExecutionQuiescence, RecoveryAdmission, SensitiveWorkflowKind,
@@ -76,6 +76,27 @@ impl DeleteCredentialIntent {
         Sha256::digest(self.canonical()).into()
     }
 
+    pub fn presentation(&self) -> DeleteCredentialPresentation {
+        let fingerprint: [u8; 32] = Sha256::digest(self.target.credential_id()).into();
+        let credential_fingerprint = fingerprint[..6]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let account = self
+            .target
+            .display_name()
+            .or_else(|| self.target.user_name())
+            .map(ToOwned::to_owned);
+        DeleteCredentialPresentation {
+            authenticator: self.target.authenticator().to_owned(),
+            rp_id: self.target.rp_text().to_owned(),
+            account,
+            credential_fingerprint,
+            inventory_incomplete: self.target.completeness()
+                == fido_core::inventory::Completeness::Incomplete,
+        }
+    }
+
     /// Fixed, versioned, length-delimited representation of the exact approved target and the
     /// presentation derived from that same target. No native handle, path, secret, or renderer
     /// value is accepted here.
@@ -108,6 +129,12 @@ impl DeleteCredentialIntent {
         out.extend(self.worker.0.to_be_bytes());
         bytes(&mut out, self.target.epoch().as_wire().as_bytes());
         bytes(&mut out, self.target.handle().as_wire().as_bytes());
+        bytes(&mut out, self.target.authenticator().as_bytes());
+        out.push(match self.target.completeness() {
+            fido_core::inventory::Completeness::Complete => 1,
+            fido_core::inventory::Completeness::Incomplete => 2,
+            fido_core::inventory::Completeness::Inconsistent => 3,
+        });
 
         out.extend(self.target.rp_hash());
         bytes(&mut out, self.target.credential_id());
@@ -170,6 +197,43 @@ impl DeleteCredentialReservation {
     pub fn prompt(&self) -> &PromptRequest {
         &self.reservation.prompt
     }
+}
+
+/// Trusted-native presentation derived only from the immutable exact deletion intent.
+/// No renderer input or native addressing appears here.
+pub struct DeleteCredentialPresentation {
+    authenticator: String,
+    rp_id: String,
+    account: Option<String>,
+    credential_fingerprint: String,
+    inventory_incomplete: bool,
+}
+impl DeleteCredentialPresentation {
+    pub fn authenticator(&self) -> &str {
+        &self.authenticator
+    }
+    pub fn rp_id(&self) -> &str {
+        &self.rp_id
+    }
+    pub fn account(&self) -> Option<&str> {
+        self.account.as_deref()
+    }
+    pub fn credential_fingerprint(&self) -> &str {
+        &self.credential_fingerprint
+    }
+    pub fn inventory_incomplete(&self) -> bool {
+        self.inventory_incomplete
+    }
+}
+
+#[derive(Debug)]
+pub struct DeleteCredentialWorkflowResult {
+    pub outcome: fido_core::MutationOutcome,
+    pub rejection: Option<fido_auth::deletion::DeleteCredentialRejection>,
+    pub worker_quiescent: bool,
+    pub prompt_torn_down: bool,
+    pub recovery_required: bool,
+    pub cancelled: bool,
 }
 
 #[derive(Debug, Error)]
