@@ -80,6 +80,13 @@ struct StoredInspection {
     snapshot: InspectionSnapshot,
     identities: Vec<Identity>,
 }
+/// Backend-only exact credential identity resolved from an opaque current-epoch handle.
+pub struct ResolvedCredentialIdentity<'a> {
+    pub rp_hash: &'a [u8; 32],
+    pub credential_id: &'a [u8],
+    pub user_id: Option<&'a [u8]>,
+}
+
 struct ConnectedDevice {
     // Existing app/connection-scoped IORegistry display correlation; never operation authority.
     connection: Option<[u8; 32]>,
@@ -334,6 +341,20 @@ impl InspectionStore {
         epoch: &EnumerationEpoch,
         handle: &CredentialHandle,
     ) -> Option<(&[u8; 32], &[u8])> {
+        let identity = self.resolve_for_mutation(device, generation, epoch, handle)?;
+        Some((identity.rp_hash, identity.credential_id))
+    }
+
+    /// Backend-only resolution for an exact current credential. This exposes no renderer DTO and
+    /// grants no mutation authority by itself; M5 must still bind an immutable intent and one-use
+    /// dispatch permit to a freshly resolved worker/device authority.
+    pub fn resolve_for_mutation(
+        &self,
+        device: DisplayDeviceHandle,
+        generation: DeviceGeneration,
+        epoch: &EnumerationEpoch,
+        handle: &CredentialHandle,
+    ) -> Option<ResolvedCredentialIdentity<'_>> {
         if !self.current
             || !self
                 .connected
@@ -347,7 +368,11 @@ impl InspectionStore {
             return None;
         }
         let id = e.identities.iter().find(|i| &i.handle == handle)?;
-        Some((&id.rp_hash, &id.credential_id))
+        Some(ResolvedCredentialIdentity {
+            rp_hash: &id.rp_hash,
+            credential_id: &id.credential_id,
+            user_id: id.user_id.as_deref(),
+        })
     }
 }
 
