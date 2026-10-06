@@ -494,7 +494,8 @@ mod tests {
             .ok_or("exact identity")?;
         assert_eq!(exact.native_handle, DeviceHandle::from_raw(1));
         assert_eq!(exact.native_generation, DeviceGeneration(1));
-        assert_eq!(exact.rp_hash, &Sha256::digest(b"example.com").into());
+        let expected_rp_hash: [u8; 32] = Sha256::digest(b"example.com").into();
+        assert_eq!(exact.rp_hash, &expected_rp_hash);
         assert_eq!(exact.credential_id, &[17, 19, 23]);
         assert_eq!(exact.user_id, Some([29, 31, 37].as_slice()));
         assert_eq!(exact.rp_text, Some("example.com"));
