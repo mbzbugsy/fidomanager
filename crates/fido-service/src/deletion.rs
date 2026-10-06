@@ -944,7 +944,7 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    fn authority() -> AuthenticationAuthority {
+    fn test_authority() -> AuthenticationAuthority {
         let authority = AuthenticationAuthority::awaiting_recovery_startup();
         authority
             .initialize_recovery(Box::new(MemoryStorage::default()))
@@ -1052,7 +1052,7 @@ mod tests {
 
     #[test]
     fn intent_owns_exact_target_and_permit_is_single_mint() -> TestResult {
-        let authority = authority();
+        let authority = test_authority();
         let mut reservation =
             reserve(&authority, target(vec![1, 2, 3], Some(vec![9, 8]))?)?;
         assert_eq!(reservation.intent().rp_text(), "example.com");
@@ -1080,13 +1080,13 @@ mod tests {
 
     #[test]
     fn lifecycle_revocation_or_cancel_never_mints_a_permit() -> TestResult {
-        let authority = authority();
+        let authority = test_authority();
         let mut revoked = reserve(&authority, target(vec![4], Some(vec![5]))?)?;
         native_teardown(&authority, revoked.intent().binding(), true);
         authority.revoke();
         assert!(authority.approve_delete_credential(&mut revoked).is_err());
 
-        let authority = authority();
+        let authority = test_authority();
         let mut cancelled = reserve(&authority, target(vec![6], None)?)?;
         native_teardown(&authority, cancelled.intent().binding(), false);
         assert!(authority.approve_delete_credential(&mut cancelled).is_err());
@@ -1100,7 +1100,7 @@ mod tests {
 
     #[test]
     fn intent_digest_binds_exact_credential_and_presentation() -> TestResult {
-        let a = authority();
+        let a = test_authority();
         let first = reserve(&a, target(vec![1, 2, 3], Some(vec![7]))?)?;
         let first_digest = first.intent().digest();
         // Release without presentation by explicitly tearing down as cancelled.
