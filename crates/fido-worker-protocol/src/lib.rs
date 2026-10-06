@@ -19,7 +19,7 @@ use fido_auth::{AcquisitionBinding, AuthenticationEvidence, GrantKind};
 use fido_core::{Aaguid, DeviceGeneration, ExecutionQuiescence, MutationOutcome};
 use serde::{Deserialize, Serialize};
 
-pub const WORKER_PROTOCOL_VERSION: u16 = 5;
+pub const WORKER_PROTOCOL_VERSION: u16 = 6;
 /// Largest frame the service accepts from a worker (responses). Transport implementations must
 /// reject larger frames before deserialization, and before allocating their payload.
 pub const MAX_WORKER_FRAME_BYTES: usize = 1_048_576;
@@ -97,6 +97,8 @@ pub enum WorkerRequestValidationError {
     OperationClassMismatch,
     InvalidDeviceGeneration,
     InvalidCancellationTarget,
+    InvalidCredentialId,
+    InvalidIntentBinding,
     ZeroExecutionBudget,
 }
 
@@ -118,7 +120,9 @@ impl WorkerRequestEnvelope {
             | WorkerRequest::ValidateAuthentication { .. }
             | WorkerRequest::InspectCredentials { .. }
             | WorkerRequest::PreparePinMutation { .. }
-            | WorkerRequest::ExecutePinMutation { .. } => self.device_generation.is_some(),
+            | WorkerRequest::ExecutePinMutation { .. }
+            | WorkerRequest::PrepareCredentialDeletion { .. }
+            | WorkerRequest::ExecuteCredentialDeletion { .. } => self.device_generation.is_some(),
             WorkerRequest::HealthCheck
             | WorkerRequest::Cancel { .. }
             | WorkerRequest::ListDevices => self.device_generation.is_none(),
@@ -141,6 +145,22 @@ impl WorkerRequestEnvelope {
             }
         }
 
+        if let WorkerRequest::ExecuteCredentialDeletion { credential_id, .. } = &self.request
+            && (credential_id.is_empty()
+                || credential_id.len() > fido_core::inventory::MAX_CREDENTIAL_ID_BYTES)
+        {
+            return Err(WorkerRequestValidationError::InvalidCredentialId);
+        }
+
+        if matches!(
+            &self.request,
+            WorkerRequest::PrepareCredentialDeletion { binding, .. }
+                | WorkerRequest::ExecuteCredentialDeletion { binding, .. }
+                if binding.intent_digest == [0; 32]
+        ) {
+            return Err(WorkerRequestValidationError::InvalidIntentBinding);
+        }
+
         Ok(())
     }
 }
@@ -148,6 +168,14 @@ impl WorkerRequestEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkerRequest {
+    PrepareCredentialDeletion {
+        device_id: WorkerDeviceId,
+        binding: fido_auth::deletion::DeleteCredentialBinding,
+    },
+    ExecuteCredentialDeletion {
+        binding: fido_auth::deletion::DeleteCredentialBinding,
+        credential_id: Vec<u8>,
+    },
     PreparePinMutation {
         device_id: WorkerDeviceId,
         binding: fido_auth::mutation::PinMutationBinding,
@@ -179,8 +207,12 @@ pub enum WorkerRequest {
 impl WorkerRequest {
     pub const fn operation_class(&self) -> WorkerOperationClass {
         match self {
-            Self::PreparePinMutation { .. } => WorkerOperationClass::SensitiveRead,
-            Self::ExecutePinMutation { .. } => WorkerOperationClass::Mutation,
+            Self::PrepareCredentialDeletion { .. } | Self::PreparePinMutation { .. } => {
+                WorkerOperationClass::SensitiveRead
+            }
+            Self::ExecuteCredentialDeletion { .. } | Self::ExecutePinMutation { .. } => {
+                WorkerOperationClass::Mutation
+            }
             Self::PrepareAuthentication { .. }
             | Self::ValidateAuthentication { .. }
             | Self::InspectCredentials { .. } => WorkerOperationClass::SensitiveRead,
@@ -252,6 +284,15 @@ pub struct WorkerResponseEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkerResponse {
+    CredentialDeletionPrepared {
+        binding: fido_auth::deletion::DeleteCredentialBinding,
+        grant_kind: GrantKind,
+        pin_retries: u8,
+    },
+    CredentialDeletionCompleted {
+        binding: fido_auth::deletion::DeleteCredentialBinding,
+        result: fido_auth::deletion::DeleteCredentialResult,
+    },
     PinMutationPrepared {
         binding: fido_auth::mutation::PinMutationBinding,
         pin_retries: Option<u8>,
