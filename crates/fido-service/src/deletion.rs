@@ -7,11 +7,14 @@
 //! Pending -> DispatchCapable authority are added before any native delete symbol becomes reachable.
 
 use crate::{
-    AdmissionError, CompletionError, MonotonicClock, WorkflowCompletion, WorkflowReleaseEvidence,
+    AdmissionError, CompletionError, DiscoverySupervisor, MonotonicClock, ProcessWorkerLauncher,
+    RegisteredDeviceTarget, WorkerGeneration, WorkflowCompletion, WorkflowReleaseEvidence,
     authentication::{AuthenticationAuthority, AuthenticationReservation},
-    inspection::{ExactCredentialTarget, InventoryDevice},
+    inspection::{ExactCredentialTarget, InspectionStore, InventoryDevice},
 };
-use fido_core::{ExecutionQuiescence, RecoveryAdmission, SensitiveWorkflowKind};
+use fido_core::{
+    DeviceHandle, ExecutionQuiescence, RecoveryAdmission, SensitiveWorkflowKind,
+};
 use fido_native_ui::{PromptBinding, PromptOutcome, PromptRequest};
 use sha2::{Digest, Sha256};
 use std::{
@@ -35,6 +38,9 @@ pub const DELETE_PERMIT_TTL: Duration = Duration::from_secs(10);
 /// The type has no public constructor, no mutable fields, no serde, and no Clone/Copy.
 pub struct DeleteCredentialIntent {
     target: ExactCredentialTarget,
+    native_handle: DeviceHandle,
+    native_target: RegisteredDeviceTarget,
+    worker: WorkerGeneration,
     binding: PromptBinding,
     nonce: [u8; 16],
     created_ms: u64,
@@ -95,6 +101,10 @@ impl DeleteCredentialIntent {
         let device = self.target.device();
         bytes(&mut out, device.handle.as_wire().as_bytes());
         out.extend(device.generation.0.to_be_bytes());
+        out.extend(self.native_handle.as_raw().to_be_bytes());
+        out.extend(self.native_target.worker_device_id.0.to_be_bytes());
+        out.extend(self.native_target.device_generation.0.to_be_bytes());
+        out.extend(self.worker.0.to_be_bytes());
         bytes(&mut out, self.target.epoch().as_wire().as_bytes());
         bytes(&mut out, self.target.handle().as_wire().as_bytes());
 
@@ -167,9 +177,34 @@ impl AuthenticationAuthority {
     ///
     /// `target` can only be produced by `InspectionStore::resolve_for_mutation`; it is an owned
     /// current-epoch identity, not native operation authority. No worker/native mutation occurs.
-    pub fn reserve_delete_credential(
+    pub fn reserve_delete_credential<C: MonotonicClock + Clone>(
+        &self,
+        supervisor: &mut DiscoverySupervisor<ProcessWorkerLauncher, C>,
+        inspection: &InspectionStore,
+        target: ExactCredentialTarget,
+    ) -> Result<DeleteCredentialReservation, DeleteCredentialError> {
+        let (native_handle, native_generation, inspected_worker) = inspection
+            .operation_authority(&target)
+            .ok_or(DeleteCredentialError::InvalidPermit)?;
+        let native_target = supervisor
+            .resolve_handle(native_handle)
+            .ok_or(DeleteCredentialError::InvalidPermit)?;
+        let worker = supervisor
+            .status()
+            .worker_generation
+            .ok_or(DeleteCredentialError::InvalidPermit)?;
+        if worker != inspected_worker || native_target.device_generation != native_generation {
+            return Err(DeleteCredentialError::InvalidPermit);
+        }
+        self.reserve_delete_target(target, native_handle, native_target, worker)
+    }
+
+    fn reserve_delete_target(
         &self,
         target: ExactCredentialTarget,
+        native_handle: DeviceHandle,
+        native_target: RegisteredDeviceTarget,
+        worker: WorkerGeneration,
     ) -> Result<DeleteCredentialReservation, DeleteCredentialError> {
         let mut nonce = [0u8; 16];
         getrandom::fill(&mut nonce).map_err(|_| DeleteCredentialError::InvalidPermit)?;
@@ -185,6 +220,9 @@ impl AuthenticationAuthority {
         let reservation = self.reserve_sensitive(SensitiveWorkflowKind::DeleteCredential)?;
         let intent = DeleteCredentialIntent {
             target,
+            native_handle,
+            native_target,
+            worker,
             binding: reservation.prompt.binding(),
             nonce,
             created_ms,
@@ -416,6 +454,21 @@ mod tests {
             .ok_or("target")
     }
 
+    fn reserve(
+        authority: &AuthenticationAuthority,
+        target: ExactCredentialTarget,
+    ) -> Result<DeleteCredentialReservation, DeleteCredentialError> {
+        authority.reserve_delete_target(
+            target,
+            DeviceHandle::from_raw(1),
+            RegisteredDeviceTarget {
+                worker_device_id: fido_worker_protocol::WorkerDeviceId(1),
+                device_generation: DeviceGeneration(1),
+            },
+            WorkerGeneration(1),
+        )
+    }
+
     fn native_teardown(
         authority: &AuthenticationAuthority,
         binding: PromptBinding,
@@ -442,7 +495,7 @@ mod tests {
     fn intent_owns_exact_target_and_permit_is_single_mint() -> TestResult {
         let authority = authority();
         let mut reservation =
-            authority.reserve_delete_credential(target(vec![1, 2, 3], Some(vec![9, 8]))?)?;
+            reserve(&authority, target(vec![1, 2, 3], Some(vec![9, 8]))?)?;
         assert_eq!(reservation.intent().rp_text(), "example.com");
         assert_eq!(reservation.intent().user_name(), Some("person@example.com"));
         assert_eq!(reservation.intent().display_name(), Some("Person"));
@@ -469,13 +522,13 @@ mod tests {
     #[test]
     fn lifecycle_revocation_or_cancel_never_mints_a_permit() -> TestResult {
         let authority = authority();
-        let mut revoked = authority.reserve_delete_credential(target(vec![4], Some(vec![5]))?)?;
+        let mut revoked = reserve(&authority, target(vec![4], Some(vec![5]))?)?;
         native_teardown(&authority, revoked.intent().binding(), true);
         authority.revoke();
         assert!(authority.approve_delete_credential(&mut revoked).is_err());
 
         let authority = authority();
-        let mut cancelled = authority.reserve_delete_credential(target(vec![6], None)?)?;
+        let mut cancelled = reserve(&authority, target(vec![6], None)?)?;
         native_teardown(&authority, cancelled.intent().binding(), false);
         assert!(authority.approve_delete_credential(&mut cancelled).is_err());
         authority.finish_delete_foundation(
@@ -489,7 +542,7 @@ mod tests {
     #[test]
     fn intent_digest_binds_exact_credential_and_presentation() -> TestResult {
         let a = authority();
-        let first = a.reserve_delete_credential(target(vec![1, 2, 3], Some(vec![7]))?)?;
+        let first = reserve(&a, target(vec![1, 2, 3], Some(vec![7]))?)?;
         let first_digest = first.intent().digest();
         // Release without presentation by explicitly tearing down as cancelled.
         native_teardown(&a, first.intent().binding(), false);
@@ -499,7 +552,7 @@ mod tests {
             ExecutionQuiescence::Quiescent,
         )?;
 
-        let second = a.reserve_delete_credential(target(vec![1, 2, 4], Some(vec![7]))?)?;
+        let second = reserve(&a, target(vec![1, 2, 4], Some(vec![7]))?)?;
         assert_ne!(first_digest, second.intent().digest());
         native_teardown(&a, second.intent().binding(), false);
         a.finish_delete_foundation(
