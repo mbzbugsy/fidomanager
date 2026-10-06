@@ -434,10 +434,7 @@ mod tests {
                 credential_id: vec![1, 2, 3],
             },
         ] {
-            let mutation = matches!(
-                request,
-                WorkerRequest::ExecuteCredentialDeletion { .. }
-            );
+            let mutation = matches!(request, WorkerRequest::ExecuteCredentialDeletion { .. });
             let env = request_envelope(request, Some(DeviceGeneration(1)));
             assert_eq!(
                 env.operation_class,
