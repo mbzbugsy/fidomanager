@@ -165,11 +165,7 @@ pub(super) fn read(
                             None
                         } else {
                             Some(unsafe {
-                                copy_id(
-                                    fido_cred_user_id_ptr(c),
-                                    user_id_len,
-                                    MAX_USER_ID_BYTES,
-                                )
+                                copy_id(fido_cred_user_id_ptr(c), user_id_len, MAX_USER_ID_BYTES)
                             }?)
                         };
                         let user_name =
