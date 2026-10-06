@@ -460,6 +460,29 @@ impl InspectionStore {
             display_name: credential.display_name.clone(),
         })
     }
+
+    /// Revalidate the complete exact target immediately before mutation authority is consumed.
+    /// Presentation continuity alone cannot satisfy this check: the current store, display
+    /// generation, enumeration epoch, opaque handle and trusted identity bytes must all match.
+    pub(crate) fn matches_exact_target(&self, target: &ExactCredentialTarget) -> bool {
+        let Some(current) = self.resolve_for_mutation(
+            target.device.handle,
+            target.device.generation,
+            &target.epoch,
+            &target.handle,
+        ) else {
+            return false;
+        };
+        current.device == target.device
+            && current.epoch == target.epoch
+            && current.handle == target.handle
+            && current.rp_hash == target.rp_hash
+            && current.credential_id == target.credential_id
+            && current.user_id == target.user_id
+            && current.rp_text == target.rp_text
+            && current.user_name == target.user_name
+            && current.display_name == target.display_name
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -670,8 +693,10 @@ mod tests {
             .resolve_for_mutation(ids[0].handle, ids[0].generation, &before.epoch, known)
             .ok_or("target")?;
         assert_eq!(target.device(), ids[0]);
+        assert!(store.matches_exact_target(&target));
 
         store.proven_retirement(WorkerGeneration(1));
+        assert!(!store.matches_exact_target(&target));
         assert!(
             store
                 .resolve_for_mutation(ids[0].handle, ids[0].generation, &before.epoch, known)
@@ -686,6 +711,8 @@ mod tests {
             .ok_or("refreshed target")?;
         assert_eq!(refreshed.device(), next[0]);
         assert_eq!(refreshed.credential_id(), target.credential_id());
+        assert!(store.matches_exact_target(&target));
+        assert!(store.matches_exact_target(&refreshed));
         Ok(())
     }
 
