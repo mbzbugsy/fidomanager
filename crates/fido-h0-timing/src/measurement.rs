@@ -225,6 +225,7 @@ where
     let mismatch = match baseline {
         Some(base) if base.manifest.vendor_id != label.vendor_id => Some("vendor_id"),
         Some(base) if base.manifest.product_id != label.product_id => Some("product_id"),
+        Some(base) if base.manifest.product != label.product => Some("product"),
         Some(base) => snapshot_mismatch(&base.info, &info),
         None => None,
     };
@@ -545,6 +546,44 @@ mod tests {
         );
         assert_eq!(device.closed, 1);
         assert!(journal.writes.is_empty() && executor.0.is_empty());
+    }
+
+    #[test]
+    fn product_string_mismatch_aborts_before_durable_write_and_closes() {
+        let mut device = FakeDevice {
+            manifests: VecDeque::from([1]),
+            info: Some(info()),
+            ..FakeDevice::default()
+        };
+        // Same VID/PID and GetInfo; only the candidate's product string differs from the baseline.
+        let base_label = ManifestLabel {
+            product: "Other Model".into(),
+            ..label()
+        };
+        let mut baseline = Some(Baseline {
+            manifest: base_label.clone(),
+            info: info(),
+        });
+        let (mut journal, mut executor) = Default::default();
+        let sample = run(
+            &mut device,
+            &mut journal,
+            &mut executor,
+            &mut baseline,
+            Some(Instant::now()),
+        );
+        assert_eq!(
+            sample.outcome,
+            SampleOutcome::Aborted {
+                reason: AbortReason::SnapshotMismatch {
+                    field: "product".into()
+                }
+            }
+        );
+        assert_eq!((device.opened, device.closed), (1, 1));
+        assert_eq!(device.log, ["manifest", "open", "get_info", "close"]);
+        assert!(journal.writes.is_empty() && executor.0.is_empty());
+        assert_eq!(baseline.map(|b| b.manifest), Some(base_label));
     }
 
     #[test]
