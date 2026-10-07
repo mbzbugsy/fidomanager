@@ -1,0 +1,14 @@
+{
+  "format": "fidomanager-h0-timing-v1",
+  "created_unix_secs": 1791384689,
+  "environment": {
+    "os": "macos",
+    "os_version": "26.5.2",
+    "os_build": "25F84",
+    "hardware_model": "Mac16,1",
+    "architecture": "aarch64",
+    "scratch_filesystem": "apfs",
+    "libfido2_revision": "b974e7cf2ee7392134cc12c08b76a068cf250dd8",
+    "tool_version": "0.1.0"
+  }
+}

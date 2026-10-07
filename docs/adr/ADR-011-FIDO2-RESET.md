@@ -116,9 +116,11 @@ command may be added to it, because some authenticators would then refuse the Re
 9. **Reset recovery is its own family**, with a positive operation match (below).
 10. **No automatic Reset retry.** Not on timeout, error, `NOT_ALLOWED`, crash or restart. A new
     attempt requires a new ceremony from the beginning, with new approval.
-11. **Option A is the preferred durability architecture:** candidate validated → durable
-    `Pending` (written before the unplug) → durable `DispatchCapable` → `ExecuteReset`, with
-    `DispatchCapable` written as close as possible to `ExecuteReset`.
+11. **Option A is the preferred durability architecture:** `ResetCeremonyGrant` → durable
+    `Pending` → observe disconnect (zero devices) → observe exactly one candidate → validate
+    candidate → durable `DispatchCapable` → (future) `ExecuteReset`, with `DispatchCapable`
+    written as close as possible to `ExecuteReset`. `Pending` is armed **before** the
+    unplug/replug wait; it is never written after candidate validation.
 12. **Option B (writing `DispatchCapable` before reconnect) is not accepted** unless H0 proves
     Option A cannot meet the timing requirement. It would turn every crash or abort during the
     reconnect wait into `OutcomeUnknown` and needs a new provable resolution; it is a separate
@@ -253,8 +255,14 @@ allowance is an engineering assumption, not a measurement; it must be replaced b
 vendor-stated values before release, and a vendor whose evidence shows a shorter window gets
 its own profile.
 
-**Current evidence: none on hardware. Verdict: MORE MEASUREMENT REQUIRED.** No unplug/replug
-session has been run; it requires the owner's authorization (see the validation document).
+**Current evidence (2026-10-07, [validation](../validation/M6.0-h0-reset-timing.md)):** one
+YubiKey 5 series key (firmware 5.7.4) on a Mac16,1 with macOS 26.5.2, 20 valid samples, no
+aborts, default policy. Total T1–T6: min 249.8, median 254.1, p95 258.2, max 261.5 ms; T2
+(`fido_dev_open`, INIT plus libfido2's internal GetInfo) is about 225 ms of that, T5 durable
+replace at most 14.5 ms (200-sample durability-only max 14.9 ms). Tail-adjusted max 261.8 ms
+against the 1325 ms acceptable host path; `required` 2873.7 ms ≤ 5000 ms (margin 2126.3 ms).
+**Verdict for this model and host: OPTION A VIABLE.** Other vendors, models, OS versions and
+storage need their own samples; T0 and T7 remain allowances.
 
 ## Changes to the architecture plan
 
@@ -270,7 +278,9 @@ session has been run; it requires the owner's authorization (see the validation 
 1. Verify CTAP 2.1/2.2 PS §6.6 verbatim (window, status list, reset scope including U2F,
    large-blob, minPINLength, enterprise attestation, alwaysUv, `encIdentifier` rotation) and
    record it here before M6.2.
-2. Option A vs B: decided by H0 hardware samples against the rule above.
+2. Option A vs B: H0 supports Option A for the measured YubiKey 5 model on the measured Mac
+   (see above); Option B is not needed on that evidence. Open: which further models and hosts
+   must be sampled before release.
 3. Vendor window profiles: one conservative global 5000 ms window, or per-vendor profiles backed
    by validation.
 4. T0 allowance: how to measure power-up → HID publish (external power reference or vendor data).

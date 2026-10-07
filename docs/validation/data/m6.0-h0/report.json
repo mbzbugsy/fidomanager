@@ -1,0 +1,137 @@
+{
+  "format": "fidomanager-h0-timing-v1",
+  "session": {
+    "format": "fidomanager-h0-timing-v1",
+    "created_unix_secs": 1791384689,
+    "environment": {
+      "os": "macos",
+      "os_version": "26.5.2",
+      "os_build": "25F84",
+      "hardware_model": "Mac16,1",
+      "architecture": "aarch64",
+      "scratch_filesystem": "apfs",
+      "libfido2_revision": "b974e7cf2ee7392134cc12c08b76a068cf250dd8",
+      "tool_version": "0.1.0"
+    }
+  },
+  "durability_only": {
+    "count": 200,
+    "min_us": 5807,
+    "median_us": 7751,
+    "p95_us": 8746,
+    "max_us": 14872
+  },
+  "models": [
+    {
+      "label": {
+        "vendor_id": 4176,
+        "product_id": 1030,
+        "manufacturer": "Yubico",
+        "product": "YubiKey FIDO+CCID",
+        "aaguid": "d7781e5de35346aaafe23ca49f13332a",
+        "firmware_version": 329476
+      },
+      "measured": 20,
+      "aborted": {},
+      "components": [
+        {
+          "component": "t1_insertion_to_manifest",
+          "summary": {
+            "count": 20,
+            "min_us": 572,
+            "median_us": 1501,
+            "p95_us": 6460,
+            "max_us": 8324
+          }
+        },
+        {
+          "component": "t2_manifest_to_open",
+          "summary": {
+            "count": 20,
+            "min_us": 223564,
+            "median_us": 225080,
+            "p95_us": 226146,
+            "max_us": 227805
+          }
+        },
+        {
+          "component": "t3_open_to_get_info",
+          "summary": {
+            "count": 20,
+            "min_us": 15819,
+            "median_us": 15994,
+            "p95_us": 16046,
+            "max_us": 16052
+          }
+        },
+        {
+          "component": "t4_validation",
+          "summary": {
+            "count": 20,
+            "min_us": 7,
+            "median_us": 15,
+            "p95_us": 20,
+            "max_us": 32
+          }
+        },
+        {
+          "component": "t5_durable_replace",
+          "summary": {
+            "count": 20,
+            "min_us": 8688,
+            "median_us": 11662,
+            "p95_us": 13885,
+            "max_us": 14530
+          }
+        },
+        {
+          "component": "t6_sync_to_would_dispatch",
+          "summary": {
+            "count": 20,
+            "min_us": 32,
+            "median_us": 50,
+            "p95_us": 78,
+            "max_us": 78
+          }
+        }
+      ],
+      "total": {
+        "count": 20,
+        "min_us": 249751,
+        "median_us": 254129,
+        "p95_us": 258234,
+        "max_us": 261507
+      },
+      "manifest_call": {
+        "count": 20,
+        "min_us": 1201,
+        "median_us": 10935,
+        "p95_us": 16814,
+        "max_us": 16844
+      },
+      "evaluation": {
+        "verdict": "OPTION_A_VIABLE",
+        "policy": {
+          "vendor_window_ms": 5000.0,
+          "power_up_allowance_ms": 1000.0,
+          "poll_allowance_ms": 100.0,
+          "dispatch_allowance_ms": 250.0,
+          "fixed_margin_ms": 1000.0,
+          "tail_factor": 2.0,
+          "min_samples": 20
+        },
+        "valid_samples": 20,
+        "procedural_aborts": 0,
+        "reliability_aborts": 0,
+        "p95_total_ms": 258.234,
+        "max_total_ms": 261.507,
+        "tail_adjusted_max_ms": 261.849,
+        "required_ms": 2873.698,
+        "floor_ms": 1608.234,
+        "max_acceptable_host_path_ms": 1325.0,
+        "runtime_budget_ms": 2650.0,
+        "reasons": []
+      }
+    }
+  ]
+}
