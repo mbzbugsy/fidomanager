@@ -512,6 +512,7 @@ assertExactArray(
   ),
   [
     'PrepareCredentialDeletion',
+    'ProveCredentialDeletion',
     'ExecuteCredentialDeletion',
     'PreparePinMutation',
     'ExecutePinMutation',
@@ -700,6 +701,24 @@ if (
   throw new Error(
     'M5 dispatch requires durable Pending and DispatchCapable ordering.',
   );
+// N1: the PIN-bearing read-only proof runs BEFORE any durable record, so every provable
+// pre-delete failure is a clean rejection and only the one real delete can leave an unknown.
+if (
+  !/let proof = self\.prove_delete\([^;]*\)\?;[\s\S]*?DeleteProofOutcome::NotProved => return Ok\(\(\)\),\s*\}\s*self\.write_delete_pending\(&mut reservation, &permit\)\?;/.test(
+    deletionService,
+  )
+)
+  throw new Error(
+    'N1 the current-session proof must complete before durable Pending and DispatchCapable.',
+  );
+// Execute consumes the proven session: no secret frame and no second proof in dispatch.
+const dispatchBody =
+  deletionService.match(/fn dispatch_delete\(([\s\S]*?)\n    \}\n/)?.[1] ?? '';
+if (
+  !dispatchBody ||
+  /submit_secret|ProveCredentialDeletion|pin/.test(dispatchBody)
+)
+  throw new Error('N1 dispatch must not carry or re-prove the PIN.');
 if (
   !/self\.persist\(record\)\?;\s*Ok\(DurableCredentialDeletionDispatch/.test(
     recoveryService,

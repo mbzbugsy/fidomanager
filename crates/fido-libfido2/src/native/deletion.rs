@@ -6,7 +6,7 @@ use super::{
 };
 use fido_auth::{
     GrantKind, PinSecret,
-    deletion::{DeleteCredentialResult, select_delete_kind},
+    deletion::{DeleteCredentialResult, DeleteProofResult, select_delete_kind},
 };
 use std::{
     ffi::{c_char, c_int, c_void},
@@ -28,6 +28,8 @@ struct Session {
     device: Device,
     kind: GrantKind,
     retries: u8,
+    /// Set only by a successful proof on this same open device. Holds the zeroizing PIN.
+    proven: Option<(fido_core::inventory::DeletionIdentity, PinSecret)>,
 }
 
 // SAFETY: the unique native device is owned by this session and moves only to the worker thread.
@@ -90,6 +92,7 @@ pub(super) fn prepare(
         device,
         kind,
         retries,
+        proven: None,
     }))
 }
 
@@ -102,13 +105,42 @@ impl crate::NativeCredentialDeletionSession for Session {
         self.retries
     }
 
+    fn prove(
+        &mut self,
+        target: &fido_core::inventory::DeletionIdentity,
+        pin: PinSecret,
+        deadline: NativeDeadline,
+    ) -> DeleteProofResult {
+        if self.proven.is_some() {
+            drop(pin);
+            return DeleteProofResult::not_proved(false);
+        }
+        let result = crate::deletion::prove(self, target, &pin, &deadline);
+        if result.outcome == fido_auth::deletion::DeleteProofOutcome::Proved {
+            self.proven = Some((target.clone(), pin));
+        }
+        result
+    }
+
     fn execute(
         mut self: Box<Self>,
         target: fido_core::inventory::DeletionIdentity,
-        pin: PinSecret,
         deadline: NativeDeadline,
     ) -> DeleteCredentialResult {
-        let result = crate::deletion::execute(&mut *self, target, pin, deadline);
+        let result = match self.proven.take() {
+            // The proof's libfido2 timeout was set from the proof request's budget; the delete
+            // gets its own request budget before the single call. A failure here is still
+            // before the call, and the durable DispatchCapable record keeps it unknown.
+            Some((proven, pin))
+                if proven == target && self.device.set_timeout(&deadline).is_ok() =>
+            {
+                crate::deletion::execute(&mut *self, &target, pin, deadline)
+            }
+            other => {
+                drop(other);
+                DeleteCredentialResult::from_code(false, -1, self.device.close())
+            }
+        };
         drop(self);
         result
     }
@@ -138,9 +170,8 @@ impl crate::deletion::DeletionNative for Session {
         target: &fido_core::inventory::DeletionIdentity,
         pin: &PinSecret,
         deadline: &NativeDeadline,
-    ) -> bool {
-        super::inspection::prove_deletion_target(&mut self.device, target, pin, deadline).is_ok()
-            && self.device.set_timeout(deadline).is_ok()
+    ) -> crate::deletion::ProofStatus {
+        super::inspection::prove_deletion_target(&mut self.device, target, pin, deadline)
     }
 
     fn enter_once(&mut self, credential_id: &[u8], pin: &PinSecret) -> i32 {

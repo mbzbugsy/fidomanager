@@ -172,6 +172,11 @@ impl RecoveryJournal {
             .then(|| self.record.as_ref().map(|r| r.operation))
             .flatten()
     }
+    /// Operation of the current incident in any phase; callers use it to refuse acknowledging an
+    /// incident that belongs to a different recovery family.
+    pub(crate) fn incident_operation(&self) -> Option<RecoverableOperation> {
+        self.record.as_ref().map(|r| r.operation)
+    }
     pub(crate) fn incident_created_unix_secs(&self) -> Option<u64> {
         self.record.as_ref().map(|r| r.created_unix_secs)
     }

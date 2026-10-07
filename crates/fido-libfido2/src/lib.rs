@@ -212,10 +212,20 @@ pub trait NativePinMutationSession: Send {
 pub trait NativeCredentialDeletionSession: Send {
     fn kind(&self) -> fido_auth::GrantKind;
     fn pin_retries(&self) -> u8;
+    /// Read-only current-session proof, run BEFORE any durable dispatch record. On success the
+    /// session retains the proven identity and the zeroizing PIN for the one `execute`; on any
+    /// other outcome the session is closed and the PIN dropped. Never reaches the delete call.
+    fn prove(
+        &mut self,
+        target: &fido_core::inventory::DeletionIdentity,
+        pin: fido_auth::PinSecret,
+        deadline: NativeDeadline,
+    ) -> fido_auth::deletion::DeleteProofResult;
+    /// Consumes the proven session for exactly one native delete of the same identity. No proof,
+    /// GetInfo or retry-count call is repeated.
     fn execute(
         self: Box<Self>,
         target: fido_core::inventory::DeletionIdentity,
-        pin: fido_auth::PinSecret,
         deadline: NativeDeadline,
     ) -> fido_auth::deletion::DeleteCredentialResult;
 }

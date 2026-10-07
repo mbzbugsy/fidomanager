@@ -338,7 +338,12 @@ impl AuthenticationAuthority {
                     c.binding == binding && c.outcome == PromptOutcome::Approved(binding)
                 });
         if approved {
-            match self.resolve_recovery(&mut r, Resolution::AcknowledgedUnknown, quiescence) {
+            match self.resolve_recovery(
+                &mut r,
+                crate::mutation::RecoveryFamily::Deletion,
+                Resolution::AcknowledgedUnknown,
+                quiescence,
+            ) {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     let _ = self.finish_recovery_foundation(
@@ -474,6 +479,21 @@ impl AuthenticationAuthority {
             let pin = completion.pin.ok_or(DeleteCredentialError::InvalidPermit)?;
 
             let permit = self.approve_delete_credential(&mut reservation)?;
+
+            // Read-only proof of the exact credential on the CURRENT prepared native session,
+            // BEFORE any durable record. Every failure here is a provable "no DeleteCredential
+            // was ever sent": no Pending, no DispatchCapable, no recovery barrier.
+            let proof = self.prove_delete(supervisor, inspection, &reservation, &permit, pin)?;
+            match proof.outcome {
+                fido_auth::deletion::DeleteProofOutcome::Proved => {}
+                fido_auth::deletion::DeleteProofOutcome::Rejected => {
+                    result.outcome = MutationOutcome::Rejected;
+                    result.rejection = proof.rejection;
+                    return Ok(());
+                }
+                fido_auth::deletion::DeleteProofOutcome::NotProved => return Ok(()),
+            }
+
             self.write_delete_pending(&mut reservation, &permit)?;
             let dispatch = self.mark_delete_dispatch_capable(
                 supervisor,
@@ -482,10 +502,10 @@ impl AuthenticationAuthority {
                 permit,
             )?;
 
-            // From this point a lost worker/response is never advertised as NotDispatched.
+            // From this point a lost worker/response is never advertised as NotDispatched: the
+            // only remaining native step is the one real delete.
             result.outcome = MutationOutcome::OutcomeUnknown;
-            let native =
-                self.dispatch_delete(supervisor, inspection, &reservation, dispatch, pin)?;
+            let native = self.dispatch_delete(supervisor, inspection, &reservation, dispatch)?;
             if native.outcome != MutationOutcome::NotDispatched {
                 result.outcome = native.outcome;
                 result.rejection = native.rejection;
@@ -520,7 +540,14 @@ impl AuthenticationAuthority {
         if matches!(
             result.outcome,
             MutationOutcome::ConfirmedSuccessful | MutationOutcome::OutcomeUnknown
+        ) || matches!(
+            result.rejection,
+            Some(
+                fido_auth::deletion::DeleteCredentialRejection::CredentialAbsent
+                    | fido_auth::deletion::DeleteCredentialRejection::CredentialMismatch
+            )
         ) {
+            // The card no longer describes the authenticator.
             inspection.invalidate(reservation.intent.device());
         }
         if result.worker_quiescent {
@@ -530,12 +557,13 @@ impl AuthenticationAuthority {
         }
 
         if result.worker_quiescent && result.prompt_torn_down {
+            // Only a record this workflow wrote can be resolved by it. A proof-stage failure wrote
+            // nothing, so there is nothing to resolve and no barrier to clear.
             let resolution = match result.outcome {
+                _ if !reservation.pending => None,
                 MutationOutcome::ConfirmedSuccessful => Some(Resolution::ConfirmedSuccessful),
                 MutationOutcome::Rejected => Some(Resolution::Rejected),
-                MutationOutcome::NotDispatched if reservation.pending => {
-                    Some(Resolution::NotDispatched)
-                }
+                MutationOutcome::NotDispatched => Some(Resolution::NotDispatched),
                 _ => None,
             };
             if let Some(resolution) = resolution {
@@ -560,13 +588,96 @@ impl AuthenticationAuthority {
         Ok(result)
     }
 
+    /// Read-only proof step. Sends the PIN over the protected secret frame together with the exact
+    /// immutable identity, and requires a typed result bound to this workflow. Runs strictly before
+    /// `write_delete_pending`; the worker keeps the proven session for the one `dispatch_delete`.
+    fn prove_delete(
+        &self,
+        supervisor: &mut DiscoverySupervisor<ProcessWorkerLauncher>,
+        inspection: &InspectionStore,
+        reservation: &DeleteCredentialReservation,
+        permit: &DeleteCredentialPermit,
+        pin: fido_auth::PinSecret,
+    ) -> Result<fido_auth::deletion::DeleteProofResult, DeleteCredentialError> {
+        use fido_worker_protocol::{WorkerRequest, WorkerResponse};
+
+        {
+            let gate = self
+                .gate
+                .lock()
+                .map_err(|_| DeleteCredentialError::InvalidPermit)?;
+            self.validate_delete_permit_with_gate(&gate, reservation, permit, Instant::now())?;
+        }
+        // Do not spend a PIN attempt on an approval that can no longer reach durable dispatch.
+        if !persistence_lifetime_available(permit.expires_at, Instant::now())
+            || supervisor.resolve_handle(reservation.intent.native_handle)
+                != Some(reservation.intent.native_target)
+            || supervisor.status().worker_generation != Some(reservation.intent.worker)
+            || !inspection.matches_exact_target(&reservation.intent.target)
+            || inspection.current_candidate(&reservation.intent.target)
+                != Some((
+                    reservation.intent.native_handle,
+                    reservation.intent.native_target.device_generation,
+                    reservation.intent.worker,
+                ))
+        {
+            return Err(DeleteCredentialError::InvalidPermit);
+        }
+
+        let binding = delete_binding(reservation);
+        let coordinator = supervisor
+            .coordinator
+            .as_mut()
+            .ok_or(DeleteCredentialError::InvalidPermit)?;
+        let request_id = coordinator
+            .take_request_id()
+            .map_err(|_| DeleteCredentialError::InvalidPermit)?;
+
+        #[cfg(unix)]
+        coordinator
+            .endpoint
+            .submit_secret(binding.session, request_id, pin)
+            .map_err(|_| DeleteCredentialError::InvalidPermit)?;
+        #[cfg(not(unix))]
+        {
+            drop(pin);
+            return Err(DeleteCredentialError::InvalidPermit);
+        }
+
+        let response = coordinator
+            .endpoint
+            .exchange(delete_envelope(
+                binding,
+                request_id,
+                WorkerRequest::ProveCredentialDeletion {
+                    binding,
+                    target: deletion_identity(&reservation.intent.target),
+                },
+            ))
+            .map_err(|_| DeleteCredentialError::InvalidPermit)?;
+
+        match response.response {
+            WorkerResponse::CredentialDeletionProved {
+                binding: echoed,
+                result,
+            } if echoed == binding
+                && response.device_generation == Some(binding.session.device_generation)
+                && response.evidence.execution_quiescence == ExecutionQuiescence::Quiescent
+                && response.evidence.mutation_outcome.is_none()
+                && result.valid() =>
+            {
+                Ok(result)
+            }
+            _ => Err(DeleteCredentialError::InvalidPermit),
+        }
+    }
+
     fn dispatch_delete(
         &self,
         supervisor: &mut DiscoverySupervisor<ProcessWorkerLauncher>,
         inspection: &InspectionStore,
         reservation: &DeleteCredentialReservation,
         permit: CredentialDeletionDispatchPermit,
-        pin: fido_auth::PinSecret,
     ) -> Result<fido_auth::deletion::DeleteCredentialResult, DeleteCredentialError> {
         use fido_worker_protocol::{WorkerRequest, WorkerResponse};
 
@@ -579,17 +690,7 @@ impl AuthenticationAuthority {
             .take_request_id()
             .map_err(|_| DeleteCredentialError::InvalidPermit)?;
 
-        #[cfg(unix)]
-        coordinator
-            .endpoint
-            .submit_secret(permit.binding.session, request_id, pin)
-            .map_err(|_| DeleteCredentialError::InvalidPermit)?;
-        #[cfg(not(unix))]
-        {
-            drop(pin);
-            return Err(DeleteCredentialError::InvalidPermit);
-        }
-
+        // No secret frame: the PIN already lives only inside the worker's proven session.
         let response = coordinator
             .endpoint
             .exchange(delete_envelope(
@@ -597,12 +698,7 @@ impl AuthenticationAuthority {
                 request_id,
                 WorkerRequest::ExecuteCredentialDeletion {
                     binding: permit.binding,
-                    target: fido_core::inventory::DeletionIdentity {
-                        rp_hash: *reservation.intent.target.rp_hash(),
-                        rp_text: reservation.intent.target.rp_text().to_owned(),
-                        credential_id: reservation.intent.target.credential_id().to_vec(),
-                        user_id: reservation.intent.target.user_id().map(ToOwned::to_owned),
-                    },
+                    target: deletion_identity(&reservation.intent.target),
                 },
             ))
             .map_err(|_| DeleteCredentialError::InvalidPermit)?;
@@ -1024,6 +1120,15 @@ impl AuthenticationAuthority {
     }
 }
 
+fn deletion_identity(target: &ExactCredentialTarget) -> fido_core::inventory::DeletionIdentity {
+    fido_core::inventory::DeletionIdentity {
+        rp_hash: *target.rp_hash(),
+        rp_text: target.rp_text().to_owned(),
+        credential_id: target.credential_id().to_vec(),
+        user_id: target.user_id().map(ToOwned::to_owned),
+    }
+}
+
 fn persistence_lifetime_available(expires: Instant, now: Instant) -> bool {
     expires
         .checked_duration_since(now)
@@ -1086,6 +1191,26 @@ mod tests {
         DeleteCredentialIntent:
             Clone,
             Copy,
+            serde::Serialize,
+            serde::de::DeserializeOwned
+    );
+
+    // Exact deletion authority and identity can be neither copied, formatted nor serialized.
+    assert_not_impl_any!(
+        CredentialDeletionDispatchPermit:
+            Clone,
+            Copy,
+            std::fmt::Debug,
+            std::fmt::Display,
+            serde::Serialize,
+            serde::de::DeserializeOwned
+    );
+    assert_not_impl_any!(
+        ExactCredentialTarget:
+            Clone,
+            Copy,
+            std::fmt::Debug,
+            std::fmt::Display,
             serde::Serialize,
             serde::de::DeserializeOwned
     );

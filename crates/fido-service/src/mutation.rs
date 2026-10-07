@@ -131,6 +131,22 @@ impl RecoveryReservation {
     }
 }
 
+/// Which acknowledgement route is resolving the journal incident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecoveryFamily {
+    Pin,
+    Deletion,
+}
+impl RecoveryFamily {
+    fn owns(self, operation: crate::recovery::RecoverableOperation) -> bool {
+        use crate::recovery::RecoverableOperation as O;
+        match self {
+            Self::Pin => matches!(operation, O::SetPin | O::ChangePin),
+            Self::Deletion => operation == O::DeleteCredential,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum MutationError {
     #[error(transparent)]
@@ -502,7 +518,12 @@ impl AuthenticationAuthority {
             }
         }
         if approved {
-            match self.resolve_recovery(&mut r, Resolution::AcknowledgedUnknown, quiescence) {
+            match self.resolve_recovery(
+                &mut r,
+                RecoveryFamily::Pin,
+                Resolution::AcknowledgedUnknown,
+                quiescence,
+            ) {
                 Ok(()) => return Ok(()),
                 Err(e) => {
                     let _ = self.finish_recovery_foundation(
@@ -799,6 +820,7 @@ impl AuthenticationAuthority {
     pub(crate) fn resolve_recovery(
         &self,
         r: &mut RecoveryReservation,
+        family: RecoveryFamily,
         resolution: Resolution,
         quiescence: ExecutionQuiescence,
     ) -> Result<(), MutationError> {
@@ -824,6 +846,14 @@ impl AuthenticationAuthority {
             .lock()
             .map_err(|_| JournalError::Unavailable)?;
         let journal = slot.as_mut().ok_or(JournalError::Unavailable)?;
+        // The journal itself, not the caller's earlier routing, decides which family owns the
+        // incident: a PIN acknowledgement can never resolve a deletion record or the reverse.
+        if !journal
+            .incident_operation()
+            .is_some_and(|operation| family.owns(operation))
+        {
+            return Err(MutationError::InvalidPermit);
+        }
         // This recovery path only supports native acknowledgement, not fabricated adapter success.
         if !matches!(
             (journal.phase(), resolution),
@@ -1473,10 +1503,49 @@ mod tests {
         native_teardown(&restarted, recovery.prompt().binding(), true);
         restarted.resolve_recovery(
             &mut recovery,
+            RecoveryFamily::Pin,
             Resolution::AcknowledgedUnknown,
             ExecutionQuiescence::Quiescent,
         )?;
         assert!(restarted.reserve().is_ok());
+        Ok(())
+    }
+    #[test]
+    fn journal_operation_family_gates_acknowledgement_in_both_directions() -> TestResult {
+        for (operation, wrong, right) in [
+            ("set_pin", RecoveryFamily::Deletion, RecoveryFamily::Pin),
+            ("change_pin", RecoveryFamily::Deletion, RecoveryFamily::Pin),
+            (
+                "delete_credential",
+                RecoveryFamily::Pin,
+                RecoveryFamily::Deletion,
+            ),
+        ] {
+            for (family, accepted) in [(wrong, false), (right, true)] {
+                let disk = MemoryStorage::default();
+                disk.0.lock().map_err(|_| "disk")?.bytes = Some(format!(r#"{{"schema":1,"application":"fidomanager-m4-v1","incident":"0123456789abcdef0123456789abcdef","operation":"{operation}","created_unix_secs":42,"phase":"dispatch_capable","resolution":null}}"#).into_bytes());
+                let a = AuthenticationAuthority::awaiting_recovery_startup();
+                a.initialize_recovery(Box::new(disk))?;
+                let mut recovery = a.reserve_recovery()?;
+                native_teardown(&a, recovery.prompt().binding(), true);
+                let resolved = a.resolve_recovery(
+                    &mut recovery,
+                    family,
+                    Resolution::AcknowledgedUnknown,
+                    ExecutionQuiescence::Quiescent,
+                );
+                assert_eq!(resolved.is_ok(), accepted, "{operation} via {family:?}");
+                assert_eq!(
+                    a.gate.lock().map_err(|_| "gate")?.recovery_admission(),
+                    if accepted {
+                        RecoveryAdmission::Open
+                    } else {
+                        RecoveryAdmission::Barrier
+                    },
+                    "{operation} via {family:?}"
+                );
+            }
+        }
         Ok(())
     }
     #[test]
@@ -1496,6 +1565,7 @@ mod tests {
         native_teardown(&restarted, recovery.prompt().binding(), true);
         restarted.resolve_recovery(
             &mut recovery,
+            RecoveryFamily::Pin,
             Resolution::NotDispatched,
             ExecutionQuiescence::Quiescent,
         )?;
@@ -1638,7 +1708,7 @@ mod tests {
                 Resolution::AcknowledgedUnknown
             };
             assert!(
-                a.resolve_recovery(&mut recovery, resolution, quiescence)
+                a.resolve_recovery(&mut recovery, RecoveryFamily::Pin, resolution, quiescence)
                     .is_err()
             );
             assert_eq!(

@@ -263,7 +263,7 @@ fn production_retirement_current_worker_proof_and_definitive_results() -> TestRe
         let result = h.run(false)?;
         assert_eq!(result.outcome, outcome);
         assert!(result.worker_quiescent && result.prompt_torn_down && !result.recovery_required);
-        assert_eq!(h.events(), ["prepared", "proof", "entered"]);
+        assert_eq!(h.events(), ["prepared", "proof", "proof-ok", "entered"]);
         assert_eq!(h.journal()["resolution"], resolution);
         assert_eq!(
             h.storage.0.lock().map_err(|_| "disk")?.phases,
@@ -305,23 +305,111 @@ fn cancellation_and_prepare_failure_have_no_journal_or_delete_and_release_gate()
     }
     Ok(())
 }
+/// N1: every provable pre-delete failure happens in the proof step, BEFORE the durable
+/// DispatchCapable record. None of them may write a journal record, create a recovery barrier,
+/// reach the native delete, or cost the user a second PIN prompt to recover.
 #[test]
-fn proof_rejects_absence_ambiguity_changed_user_and_malformed_rows_without_delete() -> TestResult {
-    for mode in [
-        "absent",
-        "ambiguous",
-        "wrong-user",
-        "wrong-id",
-        "malformed",
-        "wrong-device",
+fn proof_stage_failures_are_typed_clean_and_never_reach_delete_or_a_barrier() -> TestResult {
+    use fido_auth::deletion::DeleteCredentialRejection as R;
+    for (mode, outcome, rejection) in [
+        ("wrong-pin", MutationOutcome::Rejected, Some(R::WrongPin)),
+        (
+            "pin-blocked",
+            MutationOutcome::Rejected,
+            Some(R::PinBlocked),
+        ),
+        (
+            "auth-blocked",
+            MutationOutcome::Rejected,
+            Some(R::PinAuthBlocked),
+        ),
+        (
+            "absent",
+            MutationOutcome::Rejected,
+            Some(R::CredentialAbsent),
+        ),
+        (
+            "wrong-id",
+            MutationOutcome::Rejected,
+            Some(R::CredentialAbsent),
+        ),
+        (
+            "ambiguous",
+            MutationOutcome::Rejected,
+            Some(R::CredentialMismatch),
+        ),
+        (
+            "wrong-user",
+            MutationOutcome::Rejected,
+            Some(R::CredentialMismatch),
+        ),
+        (
+            "malformed",
+            MutationOutcome::Rejected,
+            Some(R::CredentialMismatch),
+        ),
+        ("wrong-device", MutationOutcome::NotDispatched, None),
+        ("proof-unavailable", MutationOutcome::NotDispatched, None),
     ] {
         let mut h = Harness::inspected(mode)?;
         let r = h.run(false)?;
-        // Durable dispatch dominates even a worker-reported pre-delete failure.
-        assert_eq!(r.outcome, MutationOutcome::OutcomeUnknown);
-        assert!(r.worker_quiescent && r.prompt_torn_down && r.recovery_required);
-        assert_eq!(h.events(), ["prepared", "proof", "proof-rejected"]);
-        assert_eq!(h.journal()["phase"], "dispatch_capable");
+        assert_eq!(r.outcome, outcome, "{mode}");
+        assert_eq!(r.rejection, rejection, "{mode}");
+        assert!(r.worker_quiescent && r.prompt_torn_down, "{mode}");
+        assert!(
+            !r.recovery_required,
+            "{mode}: a proof failure is never a barrier"
+        );
+        assert!(!r.cancelled, "{mode}");
+        assert_eq!(
+            h.events(),
+            ["prepared", "proof", "proof-rejected"],
+            "{mode}"
+        );
+        // Nothing durable was ever written, so there is nothing to acknowledge.
+        assert_eq!(h.storage.0.lock().map_err(|_| "disk")?.writes, 0, "{mode}");
+        assert!(h.storage.0.lock().map_err(|_| "disk")?.bytes.is_none());
+        assert_eq!(h.a.recoverable_operation(), None, "{mode}");
+        assert_eq!(h.a.recovery_admission(), RecoveryAdmission::Open, "{mode}");
+        // The gate is free again: the next attempt needs no recovery acknowledgement.
+        let reservation = h.a.reserve()?;
+        assert_eq!(
+            h.a.cancel_unpresented(&mut h.s, reservation),
+            ExecutionQuiescence::Quiescent
+        );
+        // The card is invalidated only when it provably no longer describes the key; otherwise it
+        // is republished after the (always retired) worker is replaced.
+        std::thread::sleep(Duration::from_millis(1_020));
+        let next = h.s.refresh()?;
+        h.store
+            .reconcile_connected(
+                &next.devices,
+                h.s.status().worker_generation.ok_or("worker")?,
+            )
+            .map_err(|_| "reconcile")?;
+        assert_eq!(
+            h.store.snapshot_for(h.device).is_none(),
+            matches!(rejection, Some(R::CredentialAbsent | R::CredentialMismatch)),
+            "{mode}"
+        );
+    }
+    Ok(())
+}
+/// A hang, crash or lost response during the proof is a worker failure before any delete could
+/// have been sent. It is NotDispatched without a barrier, and the worker is reaped.
+#[test]
+fn worker_failure_or_timeout_during_proof_is_not_dispatched_without_barrier() -> TestResult {
+    for mode in ["proof-hang", "proof-crash", "proof-lost-response"] {
+        let mut h = Harness::inspected(mode)?;
+        let r = h.run(false)?;
+        assert_eq!(r.outcome, MutationOutcome::NotDispatched, "{mode}");
+        assert_eq!(r.rejection, None, "{mode}");
+        assert!(r.worker_quiescent && r.prompt_torn_down, "{mode}");
+        assert!(!r.recovery_required, "{mode}");
+        assert_eq!(h.events(), ["prepared", "proof"], "{mode}");
+        assert_eq!(h.storage.0.lock().map_err(|_| "disk")?.writes, 0, "{mode}");
+        assert_eq!(h.a.recovery_admission(), RecoveryAdmission::Open, "{mode}");
+        assert!(h.a.reserve().is_ok(), "{mode}");
     }
     Ok(())
 }
@@ -349,6 +437,8 @@ fn every_storage_failure_poisoned_no_native_capability_before_durable_dispatch()
                 h.events().iter().filter(|e| *e == "entered").count(),
                 usize::from(fail_at == 3)
             );
+            // The proof always ran first and succeeded, even when the first journal write fails.
+            assert_eq!(&h.events()[..3], ["prepared", "proof", "proof-ok"]);
             assert_eq!(
                 h.a.recoverable_operation(),
                 None,
@@ -360,8 +450,10 @@ fn every_storage_failure_poisoned_no_native_capability_before_durable_dispatch()
     Ok(())
 }
 #[test]
-fn revocation_and_expiry_during_persistence_mint_no_native_dispatch() -> TestResult {
-    for (revoke_at, delay_at) in [(1, 0), (2, 0), (0, 2)] {
+fn revocation_and_expiry_after_proof_mint_no_native_dispatch() -> TestResult {
+    // (revoke_at, delay_at): revoke after the Pending write, after the DispatchCapable write, and
+    // an approval that expires after Pending / after DispatchCapable.
+    for (revoke_at, delay_at) in [(1, 0), (2, 0), (0, 1), (0, 2)] {
         let mut h = Harness::inspected("success")?;
         {
             let mut d = h.storage.0.lock().map_err(|_| "disk")?;
@@ -370,17 +462,37 @@ fn revocation_and_expiry_during_persistence_mint_no_native_dispatch() -> TestRes
             d.delay_at = delay_at;
         }
         let r = h.run(false)?;
+        let before_marker = revoke_at == 1 || delay_at == 1;
         assert_eq!(
             r.outcome,
-            if revoke_at == 1 {
+            if before_marker {
                 MutationOutcome::NotDispatched
             } else {
                 MutationOutcome::OutcomeUnknown
-            }
+            },
+            "{revoke_at}/{delay_at}"
         );
         assert!(r.worker_quiescent && r.prompt_torn_down);
-        assert_eq!(h.events(), ["prepared"]);
-        assert_eq!(r.recovery_required, revoke_at != 1);
+        // The proof ran, but the native delete was never sent.
+        assert_eq!(
+            h.events(),
+            ["prepared", "proof", "proof-ok"],
+            "{revoke_at}/{delay_at}"
+        );
+        assert_eq!(
+            r.recovery_required, !before_marker,
+            "{revoke_at}/{delay_at}"
+        );
+        if before_marker {
+            // Pending was written and honestly resolved: DispatchCapable never was.
+            assert_eq!(
+                h.storage.0.lock().map_err(|_| "disk")?.phases,
+                ["pending", "resolved"]
+            );
+            assert_eq!(h.journal()["resolution"], "not_dispatched");
+        } else {
+            assert_eq!(h.journal()["phase"], "dispatch_capable");
+        }
     }
     Ok(())
 }
@@ -423,7 +535,7 @@ fn lost_response_crash_unknown_and_hang_reap_without_retry_then_typed_recovery()
         let r = h.run(false)?;
         assert_eq!(r.outcome, MutationOutcome::OutcomeUnknown);
         assert!(r.worker_quiescent && r.prompt_torn_down && r.recovery_required);
-        assert_eq!(h.events(), ["prepared", "proof", "entered"]);
+        assert_eq!(h.events(), ["prepared", "proof", "proof-ok", "entered"]);
         assert_eq!(
             h.a.recoverable_operation(),
             Some(RecoverableOperation::DeleteCredential)
@@ -463,7 +575,7 @@ fn lost_response_crash_unknown_and_hang_reap_without_retry_then_typed_recovery()
         assert!(h.store.snapshot_for(h.device).is_none());
         assert_eq!(
             h.events(),
-            ["prepared", "proof", "entered"],
+            ["prepared", "proof", "proof-ok", "entered"],
             "acknowledgement never retries"
         );
     }
@@ -537,6 +649,38 @@ fn serialized_m4_compatibility_pending_restart_and_corrupt_storage() -> TestResu
                 }
             );
         }
+    }
+    // A resolved deletion record (and a resolved M4 record) is no barrier after restart.
+    for operation in ["set_pin", "change_pin", "delete_credential"] {
+        for resolution in [
+            "not_dispatched",
+            "rejected",
+            "confirmed_successful",
+            "acknowledged_unknown",
+        ] {
+            let storage = Storage::default();
+            storage.0.lock().map_err(|_| "disk")?.bytes = Some(format!(r#"{{"schema":1,"application":"fidomanager-m4-v1","incident":"0123456789abcdef0123456789abcdef","operation":"{operation}","created_unix_secs":42,"phase":"resolved","resolution":"{resolution}"}}"#).into_bytes());
+            let a = AuthenticationAuthority::default();
+            a.initialize_recovery(Box::new(storage))?;
+            assert_eq!(a.recovery_admission(), RecoveryAdmission::Open);
+            assert_eq!(a.recoverable_operation(), None);
+        }
+    }
+    // Reverse direction: a PIN incident is never acknowledgeable through deletion recovery.
+    for operation in ["set_pin", "change_pin"] {
+        let mut h = Harness::inspected("success")?;
+        let storage = Storage::default();
+        storage.0.lock().map_err(|_| "disk")?.bytes = Some(format!(r#"{{"schema":1,"application":"fidomanager-m4-v1","incident":"0123456789abcdef0123456789abcdef","operation":"{operation}","created_unix_secs":42,"phase":"dispatch_capable","resolution":null}}"#).into_bytes());
+        let a = AuthenticationAuthority::default();
+        a.initialize_recovery(Box::new(storage.clone()))?;
+        assert!(
+            a.acknowledge_deletion_recovery(&mut h.s, &mut h.store, |_, _, _, _, _, _| panic!(
+                "PIN incident must not reach the deletion sheet"
+            ))
+            .is_err()
+        );
+        assert_eq!(a.recovery_admission(), RecoveryAdmission::Barrier);
+        assert!(a.recoverable_pin_operation().is_some());
     }
     let mut h = Harness::inspected("success")?;
     let storage = Storage::default();

@@ -19,7 +19,7 @@ use fido_auth::{AcquisitionBinding, AuthenticationEvidence, GrantKind};
 use fido_core::{Aaguid, DeviceGeneration, ExecutionQuiescence, MutationOutcome};
 use serde::{Deserialize, Serialize};
 
-pub const WORKER_PROTOCOL_VERSION: u16 = 7;
+pub const WORKER_PROTOCOL_VERSION: u16 = 8;
 /// Largest frame the service accepts from a worker (responses). Transport implementations must
 /// reject larger frames before deserialization, and before allocating their payload.
 pub const MAX_WORKER_FRAME_BYTES: usize = 1_048_576;
@@ -122,6 +122,7 @@ impl WorkerRequestEnvelope {
             | WorkerRequest::PreparePinMutation { .. }
             | WorkerRequest::ExecutePinMutation { .. }
             | WorkerRequest::PrepareCredentialDeletion { .. }
+            | WorkerRequest::ProveCredentialDeletion { .. }
             | WorkerRequest::ExecuteCredentialDeletion { .. } => self.device_generation.is_some(),
             WorkerRequest::HealthCheck
             | WorkerRequest::Cancel { .. }
@@ -145,7 +146,8 @@ impl WorkerRequestEnvelope {
             }
         }
 
-        if let WorkerRequest::ExecuteCredentialDeletion { target, .. } = &self.request
+        if let WorkerRequest::ProveCredentialDeletion { target, .. }
+        | WorkerRequest::ExecuteCredentialDeletion { target, .. } = &self.request
             && !target.within_bounds()
         {
             return Err(WorkerRequestValidationError::InvalidCredentialId);
@@ -154,6 +156,7 @@ impl WorkerRequestEnvelope {
         if matches!(
             &self.request,
             WorkerRequest::PrepareCredentialDeletion { binding, .. }
+                | WorkerRequest::ProveCredentialDeletion { binding, .. }
                 | WorkerRequest::ExecuteCredentialDeletion { binding, .. }
                 if binding.intent_digest == [0; 32]
         ) {
@@ -171,6 +174,13 @@ pub enum WorkerRequest {
         device_id: WorkerDeviceId,
         binding: fido_auth::deletion::DeleteCredentialBinding,
     },
+    /// Read-only current-session credential proof. Carries the PIN over the protected secret
+    /// frame (never in this message) and runs BEFORE any durable dispatch record.
+    ProveCredentialDeletion {
+        binding: fido_auth::deletion::DeleteCredentialBinding,
+        target: fido_core::inventory::DeletionIdentity,
+    },
+    /// Consumes the proven session for the one native delete. Carries no secret frame.
     ExecuteCredentialDeletion {
         binding: fido_auth::deletion::DeleteCredentialBinding,
         target: fido_core::inventory::DeletionIdentity,
@@ -213,9 +223,9 @@ impl std::fmt::Debug for WorkerRequest {
 impl WorkerRequest {
     pub const fn operation_class(&self) -> WorkerOperationClass {
         match self {
-            Self::PrepareCredentialDeletion { .. } | Self::PreparePinMutation { .. } => {
-                WorkerOperationClass::SensitiveRead
-            }
+            Self::PrepareCredentialDeletion { .. }
+            | Self::ProveCredentialDeletion { .. }
+            | Self::PreparePinMutation { .. } => WorkerOperationClass::SensitiveRead,
             Self::ExecuteCredentialDeletion { .. } | Self::ExecutePinMutation { .. } => {
                 WorkerOperationClass::Mutation
             }
@@ -295,6 +305,10 @@ pub enum WorkerResponse {
         grant_kind: GrantKind,
         pin_retries: u8,
     },
+    CredentialDeletionProved {
+        binding: fido_auth::deletion::DeleteCredentialBinding,
+        result: fido_auth::deletion::DeleteProofResult,
+    },
     CredentialDeletionCompleted {
         binding: fido_auth::deletion::DeleteCredentialBinding,
         result: fido_auth::deletion::DeleteCredentialResult,
@@ -370,11 +384,18 @@ mod tests {
             },
             intent_digest: [9; 32],
         };
-        let request = WorkerRequest::ExecuteCredentialDeletion {
-            binding,
-            target: deletion_target(vec![17, 19, 23]),
-        };
-        assert_eq!(format!("{request:?}"), "WorkerRequest(<redacted>)");
+        for request in [
+            WorkerRequest::ProveCredentialDeletion {
+                binding,
+                target: deletion_target(vec![17, 19, 23]),
+            },
+            WorkerRequest::ExecuteCredentialDeletion {
+                binding,
+                target: deletion_target(vec![17, 19, 23]),
+            },
+        ] {
+            assert_eq!(format!("{request:?}"), "WorkerRequest(<redacted>)");
+        }
     }
 
     use super::*;
@@ -462,6 +483,10 @@ mod tests {
                 device_id: WorkerDeviceId(1),
                 binding,
             },
+            WorkerRequest::ProveCredentialDeletion {
+                binding,
+                target: deletion_target(vec![1, 2, 3]),
+            },
             WorkerRequest::ExecuteCredentialDeletion {
                 binding,
                 target: deletion_target(vec![1, 2, 3]),
@@ -524,18 +549,34 @@ mod tests {
             Vec::new(),
             vec![1; fido_core::inventory::MAX_CREDENTIAL_ID_BYTES + 1],
         ] {
-            let invalid = request_envelope(
-                WorkerRequest::ExecuteCredentialDeletion {
-                    binding,
-                    target: deletion_target(credential_id),
-                },
-                Some(DeviceGeneration(1)),
-            );
-            assert_eq!(
-                invalid.validate(),
-                Err(WorkerRequestValidationError::InvalidCredentialId)
-            );
+            for prove in [false, true] {
+                let target = deletion_target(credential_id.clone());
+                let request = if prove {
+                    WorkerRequest::ProveCredentialDeletion { binding, target }
+                } else {
+                    WorkerRequest::ExecuteCredentialDeletion { binding, target }
+                };
+                let invalid = request_envelope(request, Some(DeviceGeneration(1)));
+                assert_eq!(
+                    invalid.validate(),
+                    Err(WorkerRequestValidationError::InvalidCredentialId)
+                );
+            }
         }
+        let mut zero_prove = request_envelope(
+            WorkerRequest::ProveCredentialDeletion {
+                binding,
+                target: deletion_target(vec![1]),
+            },
+            Some(DeviceGeneration(1)),
+        );
+        if let WorkerRequest::ProveCredentialDeletion { binding, .. } = &mut zero_prove.request {
+            binding.intent_digest = [0; 32];
+        }
+        assert_eq!(
+            zero_prove.validate(),
+            Err(WorkerRequestValidationError::InvalidIntentBinding)
+        );
         Ok(())
     }
 

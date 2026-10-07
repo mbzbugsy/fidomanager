@@ -181,6 +181,8 @@ struct DeletionFixture {
     mode: String,
     log: Option<std::path::PathBuf>,
     selected_key: NativeDeviceKey,
+    /// The zeroizing PIN a successful proof leaves in the session for the single execute.
+    pin: Option<fido_auth::PinSecret>,
 }
 impl DeletionFixture {
     fn record(&self, event: &str) {
@@ -203,14 +205,21 @@ impl fido_libfido2::NativeCredentialDeletionSession for DeletionFixture {
     fn pin_retries(&self) -> u8 {
         8
     }
-    fn execute(
-        self: Box<Self>,
-        target: fido_core::inventory::DeletionIdentity,
+    fn prove(
+        &mut self,
+        target: &fido_core::inventory::DeletionIdentity,
         pin: fido_auth::PinSecret,
         _: NativeDeadline,
-    ) -> fido_auth::deletion::DeleteCredentialResult {
-        drop(pin);
+    ) -> fido_auth::deletion::DeleteProofResult {
+        use fido_auth::deletion::{DeleteCredentialRejection as R, DeleteProofResult as P};
         self.record("proof");
+        // Proof-stage failure modes. None of them can reach `execute`, so none may ever delete.
+        match self.mode.as_str() {
+            "proof-hang" => apply(Step::Hang),
+            "proof-crash" => exit_immediately(134),
+            "proof-lost-response" => exit_immediately(0),
+            _ => {}
+        }
         let mut credentials = fido_worker_fixture::inventory().rps.remove(0).credentials;
         match self.mode.as_str() {
             "absent" => credentials.clear(),
@@ -220,14 +229,41 @@ impl fido_libfido2::NativeCredentialDeletionSession for DeletionFixture {
             "wrong-id" => credentials[0].id = vec![255],
             _ => {}
         }
-        if self.selected_key
+        let result = if self.selected_key
             != NativeDeviceKey::from_bytes(b"ioreg://100".to_vec())
                 .unwrap_or_else(|_| panic!("fixture key"))
-            || !fido_libfido2::deletion::matches_current_credentials(&target, &credentials)
+            || self.mode == "proof-unavailable"
         {
-            self.record("proof-rejected");
-            return fido_auth::deletion::DeleteCredentialResult::from_code(false, -1, true);
+            P::not_proved(true)
+        } else {
+            match self.mode.as_str() {
+                "wrong-pin" => P::rejected(R::WrongPin, true),
+                "pin-blocked" => P::rejected(R::PinBlocked, true),
+                "auth-blocked" => P::rejected(R::PinAuthBlocked, true),
+                _ => fido_libfido2::deletion::classify_current_credentials(target, &credentials)
+                    .into_result(true),
+            }
+        };
+        if result.outcome == fido_auth::deletion::DeleteProofOutcome::Proved {
+            self.record("proof-ok");
+            self.pin = Some(pin);
+            return fido_auth::deletion::DeleteProofResult::proved();
         }
+        drop(pin);
+        self.record("proof-rejected");
+        result
+    }
+    fn execute(
+        self: Box<Self>,
+        _: fido_core::inventory::DeletionIdentity,
+        _: NativeDeadline,
+    ) -> fido_auth::deletion::DeleteCredentialResult {
+        // A session without a successful proof must never be able to delete.
+        let Some(pin) = self.pin.as_ref() else {
+            self.record("execute-without-proof");
+            return fido_auth::deletion::DeleteCredentialResult::from_code(false, -1, true);
+        };
+        let _ = pin;
         self.record("entered");
         match self.mode.as_str() {
             "crash" => exit_immediately(134),
@@ -270,6 +306,7 @@ impl NativeDiscoveryBackend for ScriptedBackend {
             } else {
                 key.clone()
             },
+            pin: None,
         };
         session.record("prepared");
         Ok(Box::new(session))

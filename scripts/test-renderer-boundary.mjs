@@ -444,6 +444,16 @@ try {
       /requires durable Pending and DispatchCapable ordering/,
     ],
     [
+      'let proof = self.prove_delete(',
+      'let proof = self.skip_proof(',
+      /proof must complete before durable Pending and DispatchCapable/,
+    ],
+    [
+      'fn dispatch_delete(',
+      'fn dispatch_delete_with_pin(pin: u8, ',
+      /dispatch must not carry or re-prove the PIN/,
+    ],
+    [
       'let dispatch = self.mark_delete_dispatch_capable(',
       'let dispatch = self.skip_durable_transition(',
       /requires durable Pending and DispatchCapable ordering/,

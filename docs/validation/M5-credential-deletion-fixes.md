@@ -12,6 +12,12 @@ The existing checkout and branch were used; the remote was fetched and pulled
 before editing. No new branch or PR, merge, or physical hardware mutation was
 performed.
 
+> Superseded in part by [M5-n1-proof-before-dispatch.md](M5-n1-proof-before-dispatch.md):
+> the current-session proof now runs in its own `ProveCredentialDeletion` step
+> (protocol version 8) before the durable Pending and DispatchCapable records, and
+> `ExecuteCredentialDeletion` no longer proves or carries the PIN. Statements below
+> that place the proof inside Execute describe the earlier ordering.
+
 ## Inspection selection and current native proof (H1)
 
 Inspection evidence now identifies what was selected. It does not retain the

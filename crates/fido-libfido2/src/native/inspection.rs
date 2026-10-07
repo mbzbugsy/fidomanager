@@ -205,21 +205,31 @@ fn copy_credentials(
 
 /// Re-enumerate only the intended verified RP on the deletion session's SAME open device.
 /// Every parser bound and copy rule is shared with inspection. No attached PUAT is retained.
+/// The raw libfido2/CTAP status is preserved so wrong-PIN and similar explicit rejections stay
+/// typed instead of being collapsed into a generic failure.
 pub(super) fn prove_deletion_target(
     device: &mut Device,
     target: &DeletionIdentity,
     pin: &fido_auth::PinSecret,
     deadline: &NativeDeadline,
-) -> Result<(), InspectionError> {
-    let text = CString::new(target.rp_text.as_bytes()).map_err(|_| InspectionError::Malformed)?;
-    let rk = Object::new(fido_credman_rk_new, fido_credman_rk_free)?;
-    call(device, deadline, |d| unsafe {
-        fido_credman_get_dev_rk(d, text.as_ptr(), rk.ptr, pin.as_ptr())
-    })?;
-    let credentials = copy_credentials(&rk, 0)?;
-    if crate::deletion::matches_current_credentials(target, &credentials) {
-        Ok(())
-    } else {
-        Err(InspectionError::Malformed)
+) -> crate::deletion::ProofStatus {
+    use crate::deletion::ProofStatus;
+    let Ok(text) = CString::new(target.rp_text.as_bytes()) else {
+        return ProofStatus::Mismatch;
+    };
+    let Ok(rk) = Object::new(fido_credman_rk_new, fido_credman_rk_free) else {
+        return ProofStatus::Ctap(-1);
+    };
+    if device.set_timeout(deadline).is_err() {
+        return ProofStatus::Ctap(-1);
+    }
+    // SAFETY: same live owned device and container; the CString and PIN buffer outlive the call.
+    let code = unsafe { fido_credman_get_dev_rk(device.ptr, text.as_ptr(), rk.ptr, pin.as_ptr()) };
+    if code != FIDO_OK {
+        return ProofStatus::Ctap(code);
+    }
+    match copy_credentials(&rk, 0) {
+        Ok(credentials) => crate::deletion::classify_current_credentials(target, &credentials),
+        Err(_) => ProofStatus::Mismatch,
     }
 }
