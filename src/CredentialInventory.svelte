@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
   import type {
     DeviceActivity,
     InspectionDisplay,
@@ -16,15 +15,6 @@
       }) => void)
     | undefined = undefined;
 
-  const dispatch = createEventDispatcher<{
-    delete: {
-      displayDeviceHandle: string;
-      deviceGeneration: string;
-      enumerationEpoch: string;
-      credentialHandle: string;
-    };
-  }>();
-
   function handleDelete(
     deviceHandle: string,
     deviceGeneration: string,
@@ -40,7 +30,6 @@
     if (ondelete) {
       ondelete(detail);
     }
-    dispatch('delete', detail);
   }
 
   type Assessment = InspectionSnapshot['assessment'];

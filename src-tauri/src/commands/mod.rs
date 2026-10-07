@@ -520,7 +520,7 @@ pub(crate) fn map_workflow_result(
                     DeleteCredentialResponse {
                         outcome: DeleteOutcome::Cancelled,
                         message: "Credential deletion was cancelled.".to_owned(),
-                        recovery_required: false,
+                        recovery_required: res.recovery_required,
                     },
                     fido_service::activity::ActivityOutcome::Cancelled,
                 )
@@ -530,7 +530,7 @@ pub(crate) fn map_workflow_result(
                         DeleteCredentialResponse {
                             outcome: DeleteOutcome::ConfirmedSuccessful,
                             message: "The passkey was deleted from this security key. Your website account was not deleted or modified.".to_owned(),
-                            recovery_required: false,
+                            recovery_required: res.recovery_required,
                         },
                         fido_service::activity::ActivityOutcome::Success(
                             "Passkey deleted from security key.",
@@ -598,7 +598,7 @@ pub(crate) fn map_workflow_result(
                             DeleteCredentialResponse {
                                 outcome,
                                 message: msg.to_owned(),
-                                recovery_required: false,
+                                recovery_required: res.recovery_required,
                             },
                             fido_service::activity::ActivityOutcome::Issue(issue_msg),
                         )
@@ -617,7 +617,7 @@ pub(crate) fn map_workflow_result(
                         DeleteCredentialResponse {
                             outcome: DeleteOutcome::NotDispatched,
                             message: "Credential deletion was not dispatched. No changes were made.".to_owned(),
-                            recovery_required: false,
+                            recovery_required: res.recovery_required,
                         },
                         fido_service::activity::ActivityOutcome::Issue(
                             "Credential deletion was not dispatched.",
@@ -627,22 +627,27 @@ pub(crate) fn map_workflow_result(
             }
         }
         Err(err) => {
-            let recovery_required = matches!(
-                err,
-                fido_service::deletion::DeleteCredentialError::Journal(_)
-            );
-            let (outcome, msg, issue_msg) = if recovery_required {
-                (
+            let (outcome, msg, issue_msg, recovery_required) = match err {
+                fido_service::deletion::DeleteCredentialError::Journal(_) => (
                     DeleteOutcome::OutcomeUnknown,
                     "Storage error during credential deletion. Do not retry deletion. Review uncertainty in the Security key menu.",
                     "Storage error during deletion. Review the Security key menu.",
-                )
-            } else {
-                (
+                    true,
+                ),
+                fido_service::deletion::DeleteCredentialError::Admission(
+                    fido_service::AdmissionError::RecoveryBarrier,
+                ) => (
+                    DeleteOutcome::NotDispatched,
+                    "Credential deletion was not dispatched. Review uncertainty in the Security key menu before attempting deletion.",
+                    "Review uncertainty in the Security key menu.",
+                    true,
+                ),
+                _ => (
                     DeleteOutcome::NotDispatched,
                     "Credential deletion was not dispatched.",
                     "Credential deletion could not start.",
-                )
+                    false,
+                ),
             };
             (
                 DeleteCredentialResponse {
@@ -906,6 +911,86 @@ mod tests {
         );
         assert!(mapped.message.contains("Do not retry deletion"));
         assert!(mapped.message.contains("Security key menu"));
+    }
+
+    #[test]
+    fn known_results_preserve_recovery_flag_and_classification() {
+        for (outcome, rejection, cancelled, expected) in [
+            (
+                MutationOutcome::ConfirmedSuccessful,
+                None,
+                false,
+                DeleteOutcome::ConfirmedSuccessful,
+            ),
+            (
+                MutationOutcome::Rejected,
+                Some(DeleteCredentialRejection::WrongPin),
+                false,
+                DeleteOutcome::WrongPin,
+            ),
+            (
+                MutationOutcome::Rejected,
+                None,
+                false,
+                DeleteOutcome::NotDispatched,
+            ),
+            (
+                MutationOutcome::NotDispatched,
+                None,
+                false,
+                DeleteOutcome::NotDispatched,
+            ),
+            (
+                MutationOutcome::NotDispatched,
+                None,
+                true,
+                DeleteOutcome::Cancelled,
+            ),
+        ] {
+            let mut previous_activity = None;
+            for recovery_required in [false, true] {
+                let (mapped, activity) = map_workflow_result(Ok(DeleteCredentialWorkflowResult {
+                    outcome,
+                    rejection,
+                    worker_quiescent: true,
+                    prompt_torn_down: true,
+                    recovery_required,
+                    cancelled,
+                }));
+                assert_eq!(mapped.outcome, expected);
+                assert_eq!(mapped.recovery_required, recovery_required);
+                if let Some(previous) = previous_activity {
+                    assert_eq!(activity, previous);
+                }
+                previous_activity = Some(activity);
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_barrier_admission_mapping_is_safe_and_requires_review() {
+        let (mapped, activity) = map_workflow_result(Err(DeleteCredentialError::Admission(
+            fido_service::AdmissionError::RecoveryBarrier,
+        )));
+        assert_eq!(mapped.outcome, DeleteOutcome::NotDispatched);
+        assert!(mapped.recovery_required);
+        assert_eq!(
+            mapped.message,
+            "Credential deletion was not dispatched. Review uncertainty in the Security key menu before attempting deletion."
+        );
+        assert_eq!(
+            activity,
+            fido_service::activity::ActivityOutcome::Issue(
+                "Review uncertainty in the Security key menu."
+            )
+        );
+
+        let (other, _) = map_workflow_result(Err(DeleteCredentialError::Admission(
+            fido_service::AdmissionError::OperationInProgress,
+        )));
+        assert_eq!(other.outcome, DeleteOutcome::NotDispatched);
+        assert!(!other.recovery_required);
+        assert_eq!(other.message, "Credential deletion was not dispatched.");
     }
 
     #[test]

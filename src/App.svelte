@@ -455,7 +455,6 @@
                   foundation?.inspectionActivity,
                 )}
                 ondelete={handleDelete}
-                on:delete={(e) => handleDelete(e.detail)}
               />
             </article>
           {/each}

@@ -213,7 +213,7 @@ impl DeleteCredentialPresentation {
         self.display_name.as_deref()
     }
     pub fn consequence(&self) -> &'static str {
-        "Deleting this credential permanently removes this passkey from the authenticator. You may lose access to the account unless another sign-in method is available."
+        fido_native_ui::DELETION_CONSEQUENCE
     }
     pub fn credential_fingerprint(&self) -> &str {
         &self.credential_fingerprint

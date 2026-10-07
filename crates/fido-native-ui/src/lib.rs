@@ -316,6 +316,9 @@ pub fn last_retry_ack_required(
     operation == fido_auth::mutation::PinOperation::ChangePin && retries == Some(1)
 }
 
+/// Shared consequence text for trusted credential-deletion presentations.
+pub const DELETION_CONSEQUENCE: &str = "Deleting this credential permanently removes this passkey from the authenticator. You may lose access to the account unless another sign-in method is available. Your website/account is not deleted, and the website is not notified. This deletion cannot be undone.";
+
 /// Detailed, trusted informative text for the native credential-deletion confirmation sheet.
 pub fn deletion_description(
     authenticator: &str,
@@ -359,7 +362,7 @@ pub fn deletion_description(
          Website / RP: {rp_id}{confusable_warning}\n\
          {account_lines}\n\
          Fingerprint: {credential_fingerprint}\n\n\
-         This deletes this passkey from THIS security key. It does NOT delete your website/account, and the website is NOT notified. The action cannot be undone from Fido Manager. Fido Manager will not automatically retry an uncertain deletion.{incomplete_warning}\n\n\
+         {DELETION_CONSEQUENCE} Fido Manager will not automatically retry an uncertain deletion.{incomplete_warning}\n\n\
          Enter this security key's PIN to confirm deletion. {retry_text} One submission makes one attempt; there is no automatic retry."
     )
 }
@@ -426,13 +429,16 @@ mod tests {
         assert!(full.contains("Display Name: Alice Smith"));
         assert!(full.contains("User Name: alice@example.com"));
         assert!(full.contains("Fingerprint: 0123456789abcdef"));
-        assert!(full.contains("This deletes this passkey from THIS security key."));
+        assert!(full.contains(DELETION_CONSEQUENCE));
+        assert!(full.contains("permanently removes this passkey from the authenticator."));
+        assert!(full.contains(
+            "You may lose access to the account unless another sign-in method is available."
+        ));
         assert!(
-            full.contains(
-                "It does NOT delete your website/account, and the website is NOT notified."
-            )
+            full.contains("Your website/account is not deleted, and the website is not notified.")
         );
-        assert!(full.contains("The action cannot be undone from Fido Manager."));
+        assert!(full.contains("This deletion cannot be undone."));
+        assert!(!full.contains("undone from Fido Manager"));
         assert!(full.contains("Fido Manager will not automatically retry an uncertain deletion."));
         assert!(!full.contains("other credentials may exist"));
         assert!(full.contains("PIN retries remaining: 8."));

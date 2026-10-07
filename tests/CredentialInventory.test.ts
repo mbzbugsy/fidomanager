@@ -779,6 +779,46 @@ describe('operation-local issues during settling', () => {
 });
 
 describe('credential deletion UI eligibility and presentation', () => {
+  it('one delete click invokes only the typed callback with the opaque tuple', () => {
+    // Execute the actual button expression and component handler without a DOM or native IPC.
+    const handler = source.match(
+      /  function handleDelete\([\s\S]*?(?=  type Assessment)/,
+    )?.[0];
+    const onclick = source.match(/onclick=\{([\s\S]*?)\}/)?.[1];
+    if (!handler || !onclick)
+      throw new Error('Missing actual delete click handler');
+    const ondelete = vi.fn();
+    const dispatch = vi.fn();
+    const inventory = {
+      deviceHandle: 'opaque-device',
+      deviceGeneration: '2',
+      epoch: 'opaque-epoch',
+    };
+    const credential = { handle: 'opaque-credential' };
+    const click = new Function(
+      'ondelete',
+      'dispatch',
+      'inventory',
+      'credential',
+      ts.transpileModule(`${handler}\nreturn (${onclick});`, {
+        compilerOptions: { target: ts.ScriptTarget.ES2022 },
+      }).outputText,
+    )(ondelete, dispatch, inventory, credential) as () => void;
+
+    click();
+
+    expect(ondelete).toHaveBeenCalledExactlyOnceWith({
+      displayDeviceHandle: 'opaque-device',
+      deviceGeneration: '2',
+      enumerationEpoch: 'opaque-epoch',
+      credentialHandle: 'opaque-credential',
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(appSource.match(/ondelete=\{handleDelete\}/g)).toHaveLength(1);
+    expect(appSource).not.toContain('on:delete=');
+    expect(source).not.toContain('createEventDispatcher');
+  });
+
   it('shows Delete action only for credentials that can be resolved for mutation', () => {
     // Eligible complete inventory with no RP issue
     const eligible = html(
