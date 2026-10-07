@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "createUpdaterArtifacts": false,
+    "externalBin": ["../target/macos-package/sidecar/fido-worker"],
+    "macOS": {
+      "signingIdentity": null,
+      "entitlements": null
+    }
+  }
+}

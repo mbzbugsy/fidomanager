@@ -75,6 +75,78 @@ assertExactArray(
   'tauri.conf.json must explicitly select only the main capability.',
 );
 
+// M7.0 packaging: only a bundle-scoped overlay is allowed. It can never widen renderer authority,
+// add plugins (an updater included), sign, grant entitlements, or ship anything but the worker.
+assertExactArray(
+  readdirSync('src-tauri')
+    .filter((name) =>
+      /^tauri(?:\..+)?\.conf\.(?:json5?|toml)$|^Tauri\.toml$/i.test(name),
+    )
+    .sort(),
+  ['tauri.conf.json', 'tauri.macos-bundle.conf.json'],
+  'Only tauri.conf.json and the reviewed macOS bundle overlay are permitted Tauri configs.',
+);
+if ('plugins' in tauriConfig) {
+  throw new Error(
+    'Tauri plugin configuration (including an updater) is not approved.',
+  );
+}
+for (const key of ['externalBin', 'resources', 'createUpdaterArtifacts']) {
+  if (key in (tauriConfig.bundle ?? {})) {
+    throw new Error(`Base tauri.conf.json must not set bundle.${key}.`);
+  }
+}
+const bundleOverlay = JSON.parse(
+  readFileSync('src-tauri/tauri.macos-bundle.conf.json', 'utf8'),
+);
+assertExactArray(
+  Object.keys(bundleOverlay).sort(),
+  ['$schema', 'bundle'],
+  'The macOS bundle overlay may configure only bundling.',
+);
+assertExactArray(
+  Object.keys(bundleOverlay.bundle ?? {}).sort(),
+  ['active', 'createUpdaterArtifacts', 'externalBin', 'macOS', 'targets'],
+  'The macOS bundle overlay has an unreviewed bundle key.',
+);
+assertExactArray(
+  bundleOverlay.bundle.externalBin,
+  ['../target/macos-package/sidecar/fido-worker'],
+  'The macOS bundle overlay must ship exactly the staged fido-worker sidecar.',
+);
+assertExactArray(
+  bundleOverlay.bundle.targets,
+  ['app'],
+  'The macOS bundle overlay must build only the app bundle.',
+);
+if (bundleOverlay.bundle.createUpdaterArtifacts !== false) {
+  throw new Error(
+    'The macOS bundle overlay must not create updater artifacts.',
+  );
+}
+if (
+  JSON.stringify(bundleOverlay.bundle.macOS) !==
+  JSON.stringify({ signingIdentity: null, entitlements: null })
+) {
+  throw new Error(
+    'The macOS bundle overlay must not sign or grant entitlements.',
+  );
+}
+const appRustSource = listFiles('src-tauri/src', (path) => path.endsWith('.rs'))
+  .map((file) => readFileSync(file, 'utf8'))
+  .join('\n');
+if (
+  /\bCommand::new\b|std::process::Command|from_absolute_path|with_fixed_args/.test(
+    appRustSource,
+  ) ||
+  (appRustSource.match(/ProcessWorkerLauncher::beside_current_exe\(\)/g) ?? [])
+    .length !== 1
+) {
+  throw new Error(
+    'The application must resolve the worker only via ProcessWorkerLauncher::beside_current_exe().',
+  );
+}
+
 const buildSource = readFileSync('src-tauri/build.rs', 'utf8');
 const manifestMatch = buildSource.match(
   /AppManifest::new\(\)[\s\S]*?\.commands\(&\[([^\]]*)\]\)/,

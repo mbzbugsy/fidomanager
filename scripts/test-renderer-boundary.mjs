@@ -267,6 +267,118 @@ try {
     /CSP must not allow network/,
     'a CSP allowing network access',
   );
+  const overlay = 'src-tauri/tauri.macos-bundle.conf.json';
+  for (const [edit, pattern, label] of [
+    [
+      (text) =>
+        text.replace(
+          '"bundle": {',
+          '"app": { "security": { "capabilities": [] } },\n  "bundle": {',
+        ),
+      /may configure only bundling/,
+      'an overlay overriding app security',
+    ],
+    [
+      (text) =>
+        text.replace(
+          '"bundle": {',
+          '"plugins": { "updater": {} },\n  "bundle": {',
+        ),
+      /may configure only bundling/,
+      'an overlay adding an updater plugin',
+    ],
+    [
+      (text) =>
+        text.replace(
+          '"active": true,',
+          '"active": true,\n    "resources": ["../secrets"],',
+        ),
+      /unreviewed bundle key/,
+      'an overlay adding resources',
+    ],
+    [
+      (text) =>
+        text.replace(
+          'sidecar/fido-worker"]',
+          'sidecar/fido-worker", "/usr/local/bin/fido-worker"]',
+        ),
+      /exactly the staged fido-worker sidecar/,
+      'an overlay adding a second worker',
+    ],
+    [
+      (text) =>
+        text.replace(
+          '"createUpdaterArtifacts": false',
+          '"createUpdaterArtifacts": true',
+        ),
+      /must not create updater artifacts/,
+      'an overlay creating updater artifacts',
+    ],
+    [
+      (text) =>
+        text.replace(
+          '"entitlements": null',
+          '"entitlements": "debug.entitlements"',
+        ),
+      /must not sign or grant entitlements/,
+      'an overlay granting entitlements',
+    ],
+    [
+      (text) =>
+        text.replace('"signingIdentity": null', '"signingIdentity": "-"'),
+      /must not sign or grant entitlements/,
+      'an overlay signing during the Tauri build',
+    ],
+  ]) {
+    mutate(overlay, edit, pattern, label);
+  }
+  const platformConfig = join(fixture, 'src-tauri/tauri.macos.conf.json');
+  writeFileSync(platformConfig, '{}');
+  const platformResult = check();
+  rmSync(platformConfig);
+  assert.notEqual(
+    platformResult.status,
+    0,
+    'An auto-merged platform config must fail.',
+  );
+  assert.match(platformResult.stderr, /permitted Tauri configs/);
+  mutate(
+    'src-tauri/tauri.conf.json',
+    (text) =>
+      text.replace(
+        '"active": false,',
+        '"active": false,\n    "externalBin": ["fido-worker"],',
+      ),
+    /must not set bundle.externalBin/,
+    'a base config sidecar',
+  );
+  for (const [edit, label] of [
+    [
+      (text) =>
+        text.replace(
+          'ProcessWorkerLauncher::beside_current_exe()',
+          'ProcessWorkerLauncher::from_path()',
+        ),
+      'an application without the fixed worker resolution',
+    ],
+    [
+      (text) =>
+        `${text}\nfn spawn() { let _ = std::process::Command::new("fido-worker"); }\n`,
+      'an application spawning a PATH-resolved worker',
+    ],
+    [
+      (text) =>
+        `${text}\nfn path() { let _ = fido_service::ResolvedWorkerExecutable::from_absolute_path(p); }\n`,
+      'an application choosing an absolute worker path',
+    ],
+  ]) {
+    mutate(
+      'src-tauri/src/lib.rs',
+      edit,
+      /only via ProcessWorkerLauncher::beside_current_exe/,
+      label,
+    );
+  }
   for (const field of [
     'old_pin',
     'new_pin',

@@ -84,3 +84,9 @@ Cargo fails if the pinned source is missing or invalid; it never falls back to
 Homebrew/system libfido2 on macOS. See the [build design and validation](docs/validation/M3-bounded-libfido2.md)
 for native tests, offline builds, limits and packaging implications. Linux retains
 the existing discovery-only system-library build.
+
+### Unsigned macOS app bundle (development only)
+
+`python3 scripts/package-macos.py --dmg` builds an ad-hoc sealed `Fido Manager.app` and an
+unsigned DMG under `target/macos-package/`. It is not signed, notarized or distributable; see
+[docs/validation/M7.0-macos-packaging-foundation.md](docs/validation/M7.0-macos-packaging-foundation.md).
