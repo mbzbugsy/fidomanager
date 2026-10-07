@@ -160,4 +160,5 @@ jobs:
       - name: Packaging leaves the reviewed tree unchanged
         run: |
           git diff --exit-code
-          test -z "$(git status --porcelain)"
+          status="$(git status --porcelain --untracked-files=all)"
+          if [ -n "$status" ]; then echo "$status"; exit 1; fi

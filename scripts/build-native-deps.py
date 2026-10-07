@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -245,24 +246,45 @@ def run(command, **options):
     subprocess.run([str(part) for part in command], check=True, **options)
 
 
-def disabled_openssl_features(source, environment):
-    script = 'use configdata; print join("\\n", sort keys %disabled), "\\n";'
+def openssl_configuration(source, environment):
+    """Return (Configure target actually used, disabled features) from the generated configdata."""
+    script = 'use configdata; print $config{target}, "\\n", join("\\n", sort keys %disabled), "\\n";'
     output = subprocess.check_output(["/usr/bin/perl", "-I.", "-e", script], cwd=source, env=environment, text=True)
-    return set(output.split())
+    target, *disabled = output.split()
+    return target, set(disabled)
 
 
 HOSTILE_OPENSSL_CONF = """openssl_conf = openssl_init
 [openssl_init]
 alg_section = evp_properties
+providers = provider_section
 [evp_properties]
 default_properties = fips=yes
+[provider_section]
+hostile = hostile_section
+[hostile_section]
+module = {module}
+activate = 1
+"""
+
+# Would-be provider: if anything ever loaded it, its constructor would create the marker file.
+HOSTILE_MODULE = r"""#include <fcntl.h>
+#include <unistd.h>
+__attribute__((constructor)) static void loaded(void) {
+    int fd = open(MARKER, O_CREAT | O_WRONLY, 0600);
+    if (fd >= 0) close(fd);
+}
+int OSSL_provider_init(void) { return 0; }
 """
 
 OPENSSL_PROBE = r"""#include <stdio.h>
+#include <string.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <openssl/provider.h>
 int main(int argc, char **argv) {
-    (void)argv;
+    if (argc > 1 && strcmp(argv[1], "provider") == 0)
+        return OSSL_PROVIDER_load(NULL, "hostile") == NULL ? 4 : 5;
     if (argc > 1 && !OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CONFIG, NULL))
         return 3;
     EVP_MD *md = EVP_MD_fetch(NULL, "SHA256", NULL);
@@ -276,27 +298,48 @@ int main(int argc, char **argv) {
 
 
 def probe_openssl_configuration(work, include, archive, architecture, tools, environment, version):
-    """Prove from the built archive itself that no configuration file is loaded implicitly."""
+    """Prove from the built archive itself that no external configuration or module is consulted."""
     if architecture != {"arm64": "arm64", "x86_64": "x86_64"}.get(platform.machine()):
         return "not executed (cross-architecture build)"
     probe_dir = work / "openssl-probe"
-    probe_dir.mkdir()
+    hostile = probe_dir / "hostile"
+    hostile.mkdir(parents=True)
+    marker = probe_dir / "module-was-loaded"
+    module = hostile / "hostile.dylib"
+    (probe_dir / "module.c").write_text(HOSTILE_MODULE)
+    run([tools["cc"], "-arch", architecture, "-dynamiclib", f'-DMARKER="{marker}"', probe_dir / "module.c",
+         "-o", module], env=environment)
+    configuration = HOSTILE_OPENSSL_CONF.format(module=module)
+    (hostile / "hostile.cnf").write_text(configuration)
+    # A hostile working directory also carries the conventional file names.
+    (hostile / "openssl.cnf").write_text(configuration)
+    for name in ("legacy.dylib", "fips.dylib", "default.dylib"):
+        shutil.copyfile(module, hostile / name)
     (probe_dir / "probe.c").write_text(OPENSSL_PROBE)
-    hostile = probe_dir / "hostile.cnf"
-    hostile.write_text(HOSTILE_OPENSSL_CONF)
     binary = probe_dir / "probe"
     run([tools["cc"], "-arch", architecture, f"-mmacosx-version-min={DEPLOYMENT_TARGET}", "-I", include,
          probe_dir / "probe.c", archive, "-o", binary], env=environment)
-    probe_env = {"PATH": "/usr/bin:/bin", "OPENSSL_CONF": str(hostile)}
-    implicit = subprocess.run([str(binary)], env=probe_env, capture_output=True, text=True, timeout=30)
-    explicit = subprocess.run([str(binary), "load"], env=probe_env, capture_output=True, text=True, timeout=30)
+    probe_env = {"PATH": "/usr/bin:/bin", "OPENSSL_CONF": str(hostile / "hostile.cnf"),
+                 "OPENSSL_MODULES": str(hostile), "OPENSSL_ENGINES": str(hostile),
+                 "OPENSSL_CONF_INCLUDE": str(hostile)}
+
+    def probe(*arguments):
+        return subprocess.run([str(binary), *arguments], env=probe_env, cwd=hostile,
+                              capture_output=True, text=True, timeout=30)
+    implicit, explicit, provider = probe(), probe("load"), probe("provider")
     lines = implicit.stdout.splitlines()
     if (implicit.returncode != 0 or len(lines) != 2 or not lines[0].startswith(f"OpenSSL {version} ")
             or lines[1] != f'OPENSSLDIR: "{OPENSSL_PREFIX}"'):
         raise RuntimeError(f"Private OpenSSL consulted an external configuration implicitly: {implicit.returncode} {implicit.stdout!r}")
-    if explicit.returncode != 2:
+    # Positive control: explicitly loading the same file is rejected, so it would have mattered.
+    if explicit.returncode not in (2, 3):
         raise RuntimeError("OpenSSL configuration probe control failed; the hostile configuration was not effective")
-    return "implicit use ignored hostile OPENSSL_CONF; explicit load control rejected it"
+    if provider.returncode != 4:
+        raise RuntimeError("Private OpenSSL loaded a provider module from OPENSSL_MODULES")
+    if marker.exists():
+        raise RuntimeError("Private OpenSSL loaded external module code")
+    return ("implicit init ignored hostile OPENSSL_CONF/OPENSSL_MODULES/OPENSSL_ENGINES and working directory; "
+            "explicit config load control rejected; no external module code ever loaded")
 
 
 def build_openssl(spec, work, output, architecture, tools, environment):
@@ -305,7 +348,10 @@ def build_openssl(spec, work, output, architecture, tools, environment):
                  f"--prefix={OPENSSL_PREFIX}", f"--openssldir={OPENSSL_PREFIX}", "--libdir=lib",
                  *OPENSSL_OPTIONS, f"-mmacosx-version-min={DEPLOYMENT_TARGET}"]
     run(configure, cwd=source, env=environment)
-    disabled = disabled_openssl_features(source, environment)
+    # The Rust target alone selects the Configure target; never ./config or host inference.
+    target, disabled = openssl_configuration(source, environment)
+    if target != OPENSSL_CONFIGURE_TARGETS[architecture]:
+        raise RuntimeError(f"OpenSSL configured for {target}, not {OPENSSL_CONFIGURE_TARGETS[architecture]}")
     required = {option[3:] for option in OPENSSL_POLICY}
     if not required <= disabled:
         raise RuntimeError(f"OpenSSL policy features not disabled: {sorted(required - disabled)}")
@@ -324,12 +370,22 @@ def build_openssl(spec, work, output, architecture, tools, environment):
     data = archive.read_bytes()
     if f'OPENSSLDIR: "{OPENSSL_PREFIX}"'.encode() not in data or b"/usr/local/ssl" in data:
         raise RuntimeError("Private OpenSSL OPENSSLDIR is not the reviewed non-writable prefix")
+    # OpenSSL embeds "built on:" (from SOURCE_DATE_EPOCH) and its full compiler flags. The in-tree
+    # build compiles relative paths, so no -ffile-prefix-map is needed; an absolute one would itself
+    # be embedded in the flags. verify_archive() above proves the build path never appears.
+    built_on = "built on: " + time.asctime(time.gmtime(int(SOURCE_DATE_EPOCH))) + " UTC"
+    if built_on.encode() not in data:
+        raise RuntimeError("Private OpenSSL build date is not derived from SOURCE_DATE_EPOCH")
     probe = probe_openssl_configuration(work, include, archive, architecture, tools, environment, spec["version"])
     return {
-        "configure_target": OPENSSL_CONFIGURE_TARGETS[architecture],
+        "configure_target": target,
         "build_options": [*OPENSSL_OPTIONS, f"-mmacosx-version-min={DEPLOYMENT_TARGET}"],
         "openssldir": OPENSSL_PREFIX, "policy_features_disabled": sorted(required),
-        "autoload_config_probe": probe, "object_count": objects,
+        "deterministic_controls": {
+            "ZERO_AR_DATE": "1", "SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH, "embedded_build_date": built_on,
+            "path_mapping": "in-tree build with relative source paths; build directory verified absent from archive",
+        },
+        "runtime_independence_probe": probe, "object_count": objects,
     }
 
 
@@ -354,6 +410,8 @@ def build_libcbor(spec, work, output, architecture, tools, environment):
     shutil.copyfile(staging / "lib/libcbor.a", archive)
     objects = verify_archive(archive, architecture, forbidden=(str(work),))
     return {"build_options": [*LIBCBOR_OPTIONS, f"-DCMAKE_OSX_DEPLOYMENT_TARGET={DEPLOYMENT_TARGET}"],
+            "deterministic_controls": {"ZERO_AR_DATE": "1", "SOURCE_DATE_EPOCH": SOURCE_DATE_EPOCH,
+                                       "path_mapping": "-ffile-prefix-map (source and build directories)"},
             "object_count": objects}
 
 

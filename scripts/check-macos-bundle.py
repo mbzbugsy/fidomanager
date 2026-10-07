@@ -12,6 +12,7 @@ import plistlib
 import re
 import stat
 import subprocess
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE_ID = "eu.fidomanager.desktop"
@@ -266,6 +267,48 @@ def check_worker_runtime(worker):
         result = run([str(worker), *arguments], env=environment, stdin=subprocess.DEVNULL, timeout=20)
         require(result.returncode == expected,
                 f"bundled worker exit {result.returncode} != {expected}: {result.stderr.strip()[:400]}")
+    check_worker_openssl_independence(worker)
+
+
+HOSTILE_MODULE = r"""#include <fcntl.h>
+#include <unistd.h>
+__attribute__((constructor)) static void loaded(void) {
+    int fd = open(MARKER, O_CREAT | O_WRONLY, 0600);
+    if (fd >= 0) close(fd);
+}
+int OSSL_provider_init(void) { return 0; }
+"""
+
+
+def check_worker_openssl_independence(worker):
+    """Start the worker under hostile OpenSSL configuration/module variables and working directory.
+
+    The worker does not initialise OpenSSL before a protocol request, so this proves startup
+    independence; the private archive's own build-time probe proves libcrypto ignores the same
+    hostile inputs (see scripts/build-native-deps.py). DYLD_* injection is out of scope here: it is
+    blocked by Hardened Runtime in the Developer ID release gate, and the app clears the worker's
+    environment.
+    """
+    with tempfile.TemporaryDirectory(prefix="fidomanager-hostile-openssl-") as temporary:
+        hostile = Path(temporary)
+        marker = hostile / "module-was-loaded"
+        (hostile / "module.c").write_text(HOSTILE_MODULE)
+        compiled = run(["xcrun", "clang", "-dynamiclib", f'-DMARKER="{marker}"', str(hostile / "module.c"),
+                        "-o", str(hostile / "hostile.dylib")])
+        require(compiled.returncode == 0, f"cannot build hostile OpenSSL module fixture: {compiled.stderr.strip()}")
+        configuration = ("openssl_conf = openssl_init\n[openssl_init]\nproviders = providers\n"
+                         f"[providers]\nhostile = hostile\n[hostile]\nmodule = {hostile / 'hostile.dylib'}\n"
+                         "activate = 1\n")
+        for name in ("openssl.cnf", "hostile.cnf"):
+            (hostile / name).write_text(configuration)
+        for name in ("legacy.dylib", "fips.dylib", "default.dylib"):
+            (hostile / name).write_bytes((hostile / "hostile.dylib").read_bytes())
+        environment = {"OPENSSL_CONF": str(hostile / "hostile.cnf"), "OPENSSL_MODULES": str(hostile),
+                       "OPENSSL_ENGINES": str(hostile), "OPENSSL_CONF_INCLUDE": str(hostile)}
+        result = run([str(worker)], env=environment, cwd=str(hostile), stdin=subprocess.DEVNULL, timeout=20)
+        require(result.returncode == WORKER_EXIT_ORDERLY,
+                f"worker under hostile OpenSSL environment exit {result.returncode}: {result.stderr.strip()[:400]}")
+        require(not marker.exists(), "worker loaded an external OpenSSL module")
 
 
 def check(app, *, signature_mode, expected_version, frontend_dist=None, execute_worker=True):

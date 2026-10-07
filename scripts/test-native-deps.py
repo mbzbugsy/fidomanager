@@ -176,9 +176,22 @@ def pinned_source_tests(work):
         spec = deps.lock(name)
         if not deps.source_archive(spec).is_file():
             raise SystemExit(f"FAIL: pinned {name} source missing; run python3 scripts/build-libfido2.py fetch")
-        deps.extract(spec, work / f"pinned-{name}")
-        shutil.rmtree(work / f"pinned-{name}")
+        extracted = deps.extract(spec, work / f"pinned-{name}")
+        if name == "openssl":
+            # Each Rust target maps to one explicit Configure target (never ./config inference).
+            # Upstream's darwin64-*-cc names are historic aliases that only inherit these targets.
+            assert {deps.TARGETS[triple] for triple in ("aarch64-apple-darwin", "x86_64-apple-darwin")} \
+                == set(deps.OPENSSL_CONFIGURE_TARGETS)
+            configurations = (extracted / "Configurations/10-main.conf").read_text()
+            for target in deps.OPENSSL_CONFIGURE_TARGETS.values():
+                assert f'"{target}" => {{' in configurations, f"{target} missing from pinned OpenSSL"
+                assert f'"{target}-cc" => {{ inherit_from => [ "{target}" ] }},' in configurations, \
+                    f"{target}-cc is not a pure alias of {target}"
+            for policy in deps.OPENSSL_POLICY:
+                assert f'"{policy[3:]}"' in (extracted / "Configure").read_text(), f"{policy} unsupported upstream"
+        shutil.rmtree(extracted)
     print("PASS: pinned OpenSSL 3.5.9 and libcbor 0.14.0 archives verify and extract with the expected shape")
+    print("PASS: explicit OpenSSL targets darwin64-arm64/darwin64-x86_64 (=-cc aliases); policy switches exist upstream")
 
 
 def environment_tests():

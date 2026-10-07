@@ -121,6 +121,14 @@ def verify_private_dependencies(worker, content, archive, metadata):
     if recorded["openssl"].get("openssldir") != dependencies.OPENSSL_PREFIX or not set(
             dependencies.OPENSSL_POLICY) <= set(recorded["openssl"].get("build_options", [])):
         raise RuntimeError("Linked private OpenSSL was not built with the reviewed policy")
+    architecture = metadata.get("architecture")
+    if recorded["openssl"].get("configure_target") != dependencies.OPENSSL_CONFIGURE_TARGETS.get(architecture):
+        raise RuntimeError("Linked private OpenSSL was not configured for the explicit Rust target")
+    if metadata.get("openssl_api_compat") != "0x10100000L":
+        raise RuntimeError("Linked libfido2 was not compiled with OPENSSL_API_COMPAT=0x10100000L")
+    probe = recorded["openssl"].get("runtime_independence_probe", "")
+    if not (probe.startswith("implicit init ignored") or probe.startswith("not executed (cross-architecture")):
+        raise RuntimeError("Linked private OpenSSL lacks its runtime-independence probe result")
     objects, live = parse_link_map(content)
     sysroot = subprocess.check_output(["rustc", "--print", "sysroot"], cwd=ROOT, text=True).strip()
     sdk = subprocess.check_output(["xcrun", "--sdk", "macosx", "--show-sdk-path"], text=True).strip()

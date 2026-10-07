@@ -9,6 +9,7 @@ from pathlib import Path
 import platform
 import re
 import shlex
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -45,12 +46,37 @@ def host_target():
 def harness_flags(work):
     if platform.system() != "Darwin":
         # Linux keeps its discovery-only system-library policy for this source-level harness.
-        return shlex.split(subprocess.check_output(["pkg-config", "--cflags", "--libs", "libcbor", "libcrypto"], text=True))
+        return shlex.split(subprocess.check_output(["pkg-config", "--cflags", "--libs", "libcbor", "libcrypto"], text=True)), None
     # macOS: the harness uses the same private pinned headers/archives as the production worker.
     private = builder.dependencies.build(work / "private-deps", work / "private-deps", host_target())
     return ["-I" + str(private["include"]),
             *(str(work / "private-deps" / builder.dependencies.lock(name)["archive_name"])
-              for name in ("libcbor", "openssl"))]
+              for name in ("libcbor", "openssl"))], private
+
+
+def api_compat_control(work, private):
+    """Prove libfido2 needs the OpenSSL 3 version knowledge the private .pc files provide.
+
+    Upstream CMake adds OPENSSL_API_COMPAT=0x10100000L only when CRYPTO_VERSION >= 3.0. Presenting
+    the same private OpenSSL as 1.1.1 must drop the define and fail libfido2's own -Werror build.
+    """
+    source = work / "compat-source"
+    builder.prepare(source)
+    pkgconfig = work / "compat-pkgconfig"
+    shutil.copytree(private["pkgconfig"], pkgconfig)
+    crypto = pkgconfig / "libcrypto.pc"
+    crypto.write_text(re.sub(r"^Version: .*$", "Version: 1.1.1", crypto.read_text(), flags=re.M))
+    environment = dict(private["environment"], PKG_CONFIG_LIBDIR=str(pkgconfig))
+    output = work / "compat-build"
+    architecture = "arm64" if platform.machine() == "arm64" else "x86_64"
+    subprocess.run(builder.configure_command(source, output, private["toolchain"]["cc"], architecture, work),
+                   env=environment, check=True, capture_output=True)
+    commands = json.loads((output / "compile_commands.json").read_text())
+    assert commands and not any("OPENSSL_API_COMPAT" in entry["command"] for entry in commands)
+    result = subprocess.run(["cmake", "--build", str(output), "--target", "fido2", "--", "-k", "-j4"],
+                            env=environment, capture_output=True, text=True)
+    assert result.returncode != 0 and "[-Werror,-Wdeprecated-declarations]" in result.stdout + result.stderr, \
+        "libfido2 built without OPENSSL_API_COMPAT; the private OpenSSL 3 version knowledge is not load-bearing"
 
 
 def source_tests():
@@ -63,7 +89,9 @@ def source_tests():
         cbor = (source / "src/cbor.c").read_text()
         with tarfile.open(builder.source_archive()) as archive:
             original = archive.extractfile("libfido2-" + spec["revision"] + "/src/credman.c").read().decode()
-        flags = harness_flags(work)
+        flags, private = harness_flags(work)
+        if private is not None:
+            api_compat_control(work, private)
         for is_patched in (True, False):
             (work / "reviewed-parser.inc").write_text(parser_source(patched if is_patched else original, cbor, is_patched))
             binary = work / ("patched" if is_patched else "unpatched")
@@ -147,6 +175,8 @@ def source_tests():
     print("PASS: production Cargo build script rejects a system-library override")
     print("PASS: explicit native build environment allowlist (no compiler/pkg-config/OpenSSL overrides)")
     print("PASS: patched and unpatched harness builds reject NDEBUG")
+    if platform.system() == "Darwin":
+        print("PASS: libfido2 presented OpenSSL 1.1.1 drops OPENSSL_API_COMPAT and fails -Werror; private 3.5.9 .pc is load-bearing")
 
 
 # openbsd-compat implementations whose upstream notices are reproduced in THIRD_PARTY_NOTICES.md.
