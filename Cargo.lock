@@ -986,6 +986,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fido-h0-timing"
+version = "0.1.0"
+dependencies = [
+ "fido-platform",
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fido-libfido2"
 version = "0.1.0"
 dependencies = [

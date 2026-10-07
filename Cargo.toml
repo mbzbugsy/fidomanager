@@ -3,6 +3,7 @@ members = [
     "crates/boogoocypher-status",
     "crates/fido-auth",
     "crates/fido-core",
+    "crates/fido-h0-timing",
     "crates/fido-libfido2",
     "crates/fido-native-ui",
     "crates/fido-platform",
