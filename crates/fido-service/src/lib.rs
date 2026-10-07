@@ -5,6 +5,7 @@ pub mod native_ui_spike;
 
 pub mod activity;
 pub mod authentication;
+pub mod deletion;
 pub mod discovery_presentation;
 pub mod inspection;
 pub mod mutation;
@@ -30,6 +31,7 @@ pub use supervisor::{
     SupervisorState, SupervisorStatus, WorkerLauncher,
 };
 
+pub use fido_core::{DeviceGeneration, MutationOutcome};
 pub use fido_worker_protocol::WorkerGeneration;
 
 use std::collections::VecDeque;

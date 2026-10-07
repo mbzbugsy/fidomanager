@@ -10,15 +10,26 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EnumerationEpoch(String);
+impl EnumerationEpoch {
+    pub fn as_wire(&self) -> &str {
+        &self.0
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CredentialHandle(String);
+impl CredentialHandle {
+    pub fn as_wire(&self) -> &str {
+        &self.0
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CredentialDisplay {
     pub handle: CredentialHandle,
     pub user_name: Option<String>,
     pub display_name: Option<String>,
+    pub credential_fingerprint: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -73,12 +84,65 @@ struct Identity {
     handle: CredentialHandle,
     rp_hash: [u8; 32],
     credential_id: Vec<u8>,
+    user_id: Option<Vec<u8>>,
 }
 struct StoredInspection {
     generation: DeviceGeneration,
     snapshot: InspectionSnapshot,
     identities: Vec<Identity>,
 }
+/// Owned, immutable exact credential identity resolved from one current inspection epoch.
+/// This is data only, never dispatch authority. Native worker/device authority must be resolved
+/// freshly under the sensitive-workflow gate immediately before permit consumption/dispatch.
+pub struct ExactCredentialTarget {
+    device: InventoryDevice,
+    epoch: EnumerationEpoch,
+    handle: CredentialHandle,
+    authenticator: String,
+    completeness: Completeness,
+    rp_hash: [u8; 32],
+    credential_id: Vec<u8>,
+    user_id: Option<Vec<u8>>,
+    rp_text: String,
+    user_name: Option<String>,
+    display_name: Option<String>,
+}
+impl ExactCredentialTarget {
+    pub fn device(&self) -> InventoryDevice {
+        self.device
+    }
+    pub(crate) fn epoch(&self) -> &EnumerationEpoch {
+        &self.epoch
+    }
+    pub(crate) fn handle(&self) -> &CredentialHandle {
+        &self.handle
+    }
+    pub(crate) fn authenticator(&self) -> &str {
+        &self.authenticator
+    }
+    pub(crate) fn completeness(&self) -> Completeness {
+        self.completeness
+    }
+    pub(crate) fn rp_hash(&self) -> &[u8; 32] {
+        &self.rp_hash
+    }
+    pub(crate) fn credential_id(&self) -> &[u8] {
+        &self.credential_id
+    }
+    pub(crate) fn user_id(&self) -> Option<&[u8]> {
+        self.user_id.as_deref()
+    }
+    pub(crate) fn rp_text(&self) -> &str {
+        &self.rp_text
+    }
+    pub(crate) fn user_name(&self) -> Option<&str> {
+        self.user_name.as_deref()
+    }
+    pub(crate) fn display_name(&self) -> Option<&str> {
+        self.display_name.as_deref()
+    }
+}
+
 struct ConnectedDevice {
     // Existing app/connection-scoped IORegistry display correlation; never operation authority.
     connection: Option<[u8; 32]>,
@@ -97,6 +161,12 @@ pub struct InspectionStore {
     next_display_handle: u128,
     retired_worker: Option<WorkerGeneration>,
     current: bool,
+}
+pub(crate) fn credential_fingerprint(id: &[u8]) -> String {
+    Sha256::digest(id)[..6]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 fn nonce() -> Result<String, InspectionError> {
     let mut bytes = [0u8; 16];
@@ -187,6 +257,14 @@ impl InspectionStore {
                 device,
             });
         }
+        let mut seen_display_handles = std::collections::BTreeSet::new();
+        if next
+            .iter()
+            .any(|connected| !seen_display_handles.insert(connected.device.handle))
+        {
+            self.clear();
+            return Err(InspectionError::Malformed);
+        }
         self.connected = next;
         self.entries.retain(|handle, e| {
             self.connected.iter().any(|c| {
@@ -251,6 +329,7 @@ impl InspectionStore {
     pub fn replace(
         &mut self,
         device: InventoryDevice,
+        inspected_worker: WorkerGeneration,
         label: String,
         inventory: OwnedInventory,
     ) -> Result<(), InspectionError> {
@@ -261,8 +340,14 @@ impl InspectionStore {
             .map(|e| e.snapshot.epoch.clone());
         self.invalidate(device);
         // A completed inspection may publish only into its exact known connected generation.
-        if !self.connected.iter().any(|c| c.device == device) {
-            return Err(InspectionError::DeviceAbsent);
+        let connected = self
+            .connected
+            .iter()
+            .find(|connected| connected.device == device)
+            .ok_or(InspectionError::DeviceAbsent)?;
+        // Provenance comes from the completed inspection, never from the current manifest.
+        if connected.worker != inspected_worker {
+            return Err(InspectionError::Malformed);
         }
         if !inventory.within_bounds()
             || !safe_text(&label, 1024)
@@ -288,13 +373,16 @@ impl InspectionStore {
                 if identities.iter().any(|i: &Identity| i.handle == handle) {
                     return Err(InspectionError::NativeFailure);
                 }
+                let credential_fingerprint = credential_fingerprint(&c.id);
                 identities.push(Identity {
                     handle: handle.clone(),
                     rp_hash: rp.hash,
                     credential_id: c.id,
+                    user_id: c.user_id,
                 });
                 credentials.push(CredentialDisplay {
                     handle,
+                    credential_fingerprint,
                     user_name: c.user_name,
                     display_name: c.display_name,
                 });
@@ -325,7 +413,8 @@ impl InspectionStore {
     /// Backend-only lookup; all four identity dimensions must match a verified current device.
     /// Display continuity authorizes nothing. Any future operation must independently resolve a
     /// fresh worker operation handle and exact AcquisitionBinding; no projection enters that path.
-    pub fn resolve(
+    #[cfg(test)]
+    fn resolve(
         &self,
         device: DisplayDeviceHandle,
         generation: DeviceGeneration,
@@ -346,6 +435,105 @@ impl InspectionStore {
         }
         let id = e.identities.iter().find(|i| &i.handle == handle)?;
         Some((&id.rp_hash, &id.credential_id))
+    }
+
+    /// Backend-only resolution for an exact current credential. Incomplete inventories may still
+    /// contain exact listed credentials; inconsistent inventories cannot safely support deletion.
+    /// The returned value is owned so no InspectionStore lock/borrow survives a native prompt.
+    pub fn resolve_for_mutation(
+        &self,
+        device: DisplayDeviceHandle,
+        generation: DeviceGeneration,
+        epoch: &EnumerationEpoch,
+        handle: &CredentialHandle,
+    ) -> Option<ExactCredentialTarget> {
+        if !self.current {
+            return None;
+        }
+        self.connected.iter().find(|connected| {
+            connected.readable
+                && connected.device.handle == device
+                && connected.device.generation == generation
+        })?;
+        let e = self.entries.get(&device)?;
+        if e.generation != generation
+            || &e.snapshot.epoch != epoch
+            || e.snapshot.assessment.completeness == Completeness::Inconsistent
+        {
+            return None;
+        }
+        let id = e.identities.iter().find(|i| &i.handle == handle)?;
+        let (rp, credential) = e.snapshot.rps.iter().find_map(|rp| {
+            rp.credentials
+                .iter()
+                .find(|credential| &credential.handle == handle)
+                .map(|credential| (rp, credential))
+        })?;
+        if rp.issue.is_some() {
+            return None;
+        }
+        let rp_text = rp.verified_text.as_ref()?.clone();
+        Some(ExactCredentialTarget {
+            device: InventoryDevice {
+                handle: device,
+                generation,
+            },
+            epoch: epoch.clone(),
+            handle: handle.clone(),
+            authenticator: e.snapshot.authenticator.clone(),
+            completeness: e.snapshot.assessment.completeness,
+            rp_hash: id.rp_hash,
+            credential_id: id.credential_id.clone(),
+            user_id: id.user_id.clone(),
+            rp_text,
+            user_name: credential.user_name.clone(),
+            display_name: credential.display_name.clone(),
+        })
+    }
+
+    /// Revalidate the complete exact target immediately before mutation authority is consumed.
+    /// Presentation continuity alone cannot satisfy this check: the current store, display
+    /// generation, enumeration epoch, opaque handle and trusted identity bytes must all match.
+    pub(crate) fn matches_exact_target(&self, target: &ExactCredentialTarget) -> bool {
+        let Some(current) = self.resolve_for_mutation(
+            target.device.handle,
+            target.device.generation,
+            &target.epoch,
+            &target.handle,
+        ) else {
+            return false;
+        };
+        current.device == target.device
+            && current.epoch == target.epoch
+            && current.handle == target.handle
+            && current.authenticator == target.authenticator
+            && current.completeness == target.completeness
+            && current.rp_hash == target.rp_hash
+            && current.credential_id == target.credential_id
+            && current.user_id == target.user_id
+            && current.rp_text == target.rp_text
+            && current.user_name == target.user_name
+            && current.display_name == target.display_name
+    }
+
+    /// Current candidate addressing only. Display correlation never proves credential ownership:
+    /// the new worker MUST re-enumerate the exact RP/credential on its prepared native session.
+    pub(crate) fn current_candidate(
+        &self,
+        target: &ExactCredentialTarget,
+    ) -> Option<(DeviceHandle, DeviceGeneration, WorkerGeneration)> {
+        if !self.matches_exact_target(target) {
+            return None;
+        }
+        let current = self
+            .connected
+            .iter()
+            .find(|c| c.readable && c.device == target.device)?;
+        Some((
+            current.native_handle,
+            current.native_generation,
+            current.worker,
+        ))
     }
 }
 
@@ -377,6 +565,7 @@ mod tests {
                 issue: None,
                 credentials: vec![OwnedCredential {
                     id: vec![17, 19, 23],
+                    user_id: Some(vec![29, 31, 37]),
                     user_name: Some("Account".into()),
                     display_name: None,
                 }],
@@ -406,7 +595,12 @@ mod tests {
     fn replace(store: &mut InspectionStore, device: InventoryDevice) {
         assert!(
             store
-                .replace(device, "Same label".into(), inventory())
+                .replace(
+                    device,
+                    store.connected[0].worker,
+                    "Same label".into(),
+                    inventory()
+                )
                 .is_ok()
         );
     }
@@ -414,6 +608,30 @@ mod tests {
         store
             .snapshot_for(device)
             .unwrap_or_else(|| panic!("snapshot"))
+    }
+    #[test]
+    fn completed_inspection_cannot_be_rebound_at_publication()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = InspectionStore::default();
+        let ids = store
+            .reconcile_connected(&[device(1, 1, 1)], WorkerGeneration(1))
+            .map_err(|_| "reconcile")?;
+        store.proven_retirement(WorkerGeneration(1));
+        store
+            .reconcile_connected(&[device(9, 1, 1)], WorkerGeneration(2))
+            .map_err(|_| "refresh")?;
+        assert!(
+            store
+                .replace(
+                    ids[0],
+                    WorkerGeneration(1),
+                    "Late result".into(),
+                    inventory()
+                )
+                .is_err()
+        );
+        assert!(store.snapshot_for(ids[0]).is_none());
+        Ok(())
     }
     #[test]
     fn two_identical_labels_inspect_b_then_reinspect_a_preserves_b()
@@ -431,6 +649,19 @@ mod tests {
         assert_eq!(a.epoch, snapshot(&store, ids[0]).epoch);
         let ah = &a.rps[0].credentials[0].handle;
         let bh = &b.rps[0].credentials[0].handle;
+        let exact = store
+            .resolve_for_mutation(ids[0].handle, ids[0].generation, &a.epoch, ah)
+            .ok_or("exact identity")?;
+        assert_eq!(exact.device(), ids[0]);
+        assert_eq!(exact.epoch(), &a.epoch);
+        assert_eq!(exact.handle(), ah);
+        let expected_rp_hash: [u8; 32] = Sha256::digest(b"example.com").into();
+        assert_eq!(exact.rp_hash(), &expected_rp_hash);
+        assert_eq!(exact.credential_id(), &[17, 19, 23]);
+        assert_eq!(exact.user_id(), Some([29, 31, 37].as_slice()));
+        assert_eq!(exact.rp_text(), "example.com");
+        assert_eq!(exact.user_name(), Some("Account"));
+        assert_eq!(exact.display_name(), None);
         assert!(
             store
                 .resolve(ids[1].handle, ids[1].generation, &a.epoch, ah)
@@ -463,6 +694,173 @@ mod tests {
         );
         Ok(())
     }
+    #[test]
+    fn mutation_resolution_allows_exact_incomplete_but_refuses_inconsistent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = InspectionStore::default();
+        let ids = store
+            .reconcile_connected(&[device(1, 1, 1)], WorkerGeneration(1))
+            .map_err(|_| "reconcile")?;
+
+        let mut incomplete = inventory();
+        incomplete.metadata_existing = 2;
+        incomplete.rps.push(OwnedRp {
+            hash: [7; 32],
+            verified_text: None,
+            issue: Some(RpIssue::TextUnavailable),
+            credentials: Vec::new(),
+        });
+        assert_eq!(incomplete.assess().completeness, Completeness::Incomplete);
+        store
+            .replace(ids[0], WorkerGeneration(1), "Same label".into(), incomplete)
+            .map_err(|_| "replace incomplete")?;
+        let incomplete_snapshot = snapshot(&store, ids[0]);
+        let handle = &incomplete_snapshot.rps[0].credentials[0].handle;
+        assert!(
+            store
+                .resolve_for_mutation(
+                    ids[0].handle,
+                    ids[0].generation,
+                    &incomplete_snapshot.epoch,
+                    handle
+                )
+                .is_some()
+        );
+
+        let mut inconsistent = inventory();
+        inconsistent.metadata_existing = 2;
+        inconsistent.rps[0].credentials.push(OwnedCredential {
+            id: vec![17, 19, 23],
+            user_id: Some(vec![41]),
+            user_name: Some("Duplicate".into()),
+            display_name: None,
+        });
+        assert_eq!(
+            inconsistent.assess().completeness,
+            Completeness::Inconsistent
+        );
+        assert!(inconsistent.assess().duplicate_credentials);
+        store
+            .replace(
+                ids[0],
+                WorkerGeneration(1),
+                "Same label".into(),
+                inconsistent,
+            )
+            .map_err(|_| "replace inconsistent")?;
+        let inconsistent_snapshot = snapshot(&store, ids[0]);
+        for credential in &inconsistent_snapshot.rps[0].credentials {
+            assert!(
+                store
+                    .resolve_for_mutation(
+                        ids[0].handle,
+                        ids[0].generation,
+                        &inconsistent_snapshot.epoch,
+                        &credential.handle
+                    )
+                    .is_none()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mutation_resolution_rejects_unknown_handle_and_survives_only_as_owned_display_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut store = InspectionStore::default();
+        let ids = store
+            .reconcile_connected(&[device(1, 1, 1)], WorkerGeneration(1))
+            .map_err(|_| "reconcile")?;
+        replace(&mut store, ids[0]);
+        let before = snapshot(&store, ids[0]);
+        let known = &before.rps[0].credentials[0].handle;
+        assert!(
+            store
+                .resolve_for_mutation(
+                    ids[0].handle,
+                    ids[0].generation,
+                    &before.epoch,
+                    &CredentialHandle("00000000000000000000000000000000".into())
+                )
+                .is_none()
+        );
+        let target = store
+            .resolve_for_mutation(ids[0].handle, ids[0].generation, &before.epoch, known)
+            .ok_or("target")?;
+        assert_eq!(target.device(), ids[0]);
+        assert!(store.matches_exact_target(&target));
+
+        store.proven_retirement(WorkerGeneration(1));
+        assert!(!store.matches_exact_target(&target));
+        assert!(
+            store
+                .resolve_for_mutation(ids[0].handle, ids[0].generation, &before.epoch, known)
+                .is_none()
+        );
+        let next = store
+            .reconcile_connected(&[device(9, 1, 1)], WorkerGeneration(2))
+            .map_err(|_| "refresh")?;
+        assert_eq!(next, ids);
+        assert!(
+            store
+                .resolve_for_mutation(next[0].handle, next[0].generation, &before.epoch, known)
+                .is_some(),
+            "selection survives retirement but is not native deletion authority"
+        );
+        assert!(store.matches_exact_target(&target));
+        assert_eq!(
+            store.current_candidate(&target).map(|c| c.2),
+            Some(WorkerGeneration(2))
+        );
+
+        // A fresh inspection under worker 2 establishes a new epoch and new exact target.
+        replace(&mut store, next[0]);
+        let after = snapshot(&store, next[0]);
+        let refreshed = store
+            .resolve_for_mutation(
+                next[0].handle,
+                next[0].generation,
+                &after.epoch,
+                &after.rps[0].credentials[0].handle,
+            )
+            .ok_or("fresh target")?;
+        assert!(store.matches_exact_target(&refreshed));
+        assert_eq!(
+            store.current_candidate(&refreshed),
+            Some((
+                DeviceHandle::from_raw(9),
+                DeviceGeneration(1),
+                WorkerGeneration(2)
+            ))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_rejects_duplicate_live_display_handles() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut store = InspectionStore::default();
+        let first = device(1, 1, 1);
+        store
+            .reconcile_connected(std::slice::from_ref(&first), WorkerGeneration(1))
+            .map_err(|_| "initial")?;
+
+        let claimed = device(2, 1, 1);
+        let mut old_native_without_connection = device(1, 1, 2);
+        old_native_without_connection.verification_history_id = None;
+        assert!(
+            store
+                .reconcile_connected(
+                    &[claimed, old_native_without_connection],
+                    WorkerGeneration(1)
+                )
+                .is_err()
+        );
+        assert!(store.connected.is_empty());
+        assert!(store.entries.is_empty());
+        Ok(())
+    }
+
     #[test]
     fn generation_change_clears_the_correlated_cards_old_issue()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -611,7 +1009,9 @@ mod tests {
         let displays: Vec<_> = ids.iter().map(|d| store.display_for(*d)).collect();
         let value = serde_json::to_value(&displays)?;
         assert_eq!(value.as_array().ok_or("array")?.len(), 2);
-        assert!(!serde_json::to_string(&displays)?.contains("17,19,23"));
+        let serialized = serde_json::to_string(&displays)?;
+        assert!(!serialized.contains("17,19,23"));
+        assert!(!serialized.contains("29,31,37"));
         for field in [
             "id",
             "hash",
@@ -676,6 +1076,7 @@ mod tests {
                         credentials: (0..2)
                             .map(|_| OwnedCredential {
                                 id: vec![255; 512],
+                                user_id: Some(vec![255; MAX_USER_ID_BYTES]),
                                 user_name: Some("\\".repeat(256)),
                                 display_name: Some("\\".repeat(256)),
                             })
@@ -684,7 +1085,7 @@ mod tests {
                     .collect(),
             };
             store
-                .replace(*d, "\\".repeat(1024), large)
+                .replace(*d, WorkerGeneration(1), "\\".repeat(1024), large)
                 .map_err(|_| "replace")?;
         }
         let displays: Vec<_> = ids.iter().map(|d| store.display_for(*d)).collect();

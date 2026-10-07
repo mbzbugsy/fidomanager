@@ -28,6 +28,14 @@ struct WorkerSlot {
     present: bool,
 }
 
+/// One-use deletion session. `proven` is `None` after Prepare and holds the exact identity once
+/// the current-session proof succeeded; only then may Execute run, once.
+struct DeletionState {
+    binding: fido_auth::deletion::DeleteCredentialBinding,
+    proven: Option<fido_core::inventory::DeletionIdentity>,
+    native: Box<dyn fido_libfido2::NativeCredentialDeletionSession>,
+}
+
 pub struct WorkerEngine<B> {
     backend: B,
     generation: WorkerGeneration,
@@ -43,6 +51,7 @@ pub struct WorkerEngine<B> {
         fido_auth::mutation::PinMutationBinding,
         Box<dyn fido_libfido2::NativePinMutationSession>,
     )>,
+    deletion: Option<DeletionState>,
     prepared_request_id: u64,
     verification_display_scope: Option<[u8; 32]>,
 }
@@ -58,6 +67,7 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
             authentication: None,
             auth_used: false,
             mutation: None,
+            deletion: None,
             prepared_request_id: 0,
             verification_display_scope: None,
         }
@@ -207,6 +217,149 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
         }
     }
 
+    fn prepare_credential_deletion(
+        &mut self,
+        request: &WorkerRequestEnvelope,
+        device_id: WorkerDeviceId,
+        binding: fido_auth::deletion::DeleteCredentialBinding,
+        deadline: NativeDeadline,
+    ) -> WorkerResponse {
+        let session = binding.session;
+        if self.auth_used
+            || self.secret.is_none()
+            || session.worker_generation != self.generation.0
+            || Some(session.device_generation) != request.device_generation
+            || session.acquisition_id.0 == 0
+            || session.workflow_id.as_raw() == 0
+            || session.prompt_instance_id.as_raw() == 0
+            || binding.intent_digest == [0; 32]
+        {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        }
+        self.auth_used = true;
+        self.prepared_request_id = request.request_id.0;
+        let Some(slot) = self.slots.iter().find(|slot| {
+            slot.device_id == device_id
+                && slot.present
+                && slot.generation == session.device_generation
+        }) else {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::DeviceAbsent,
+            };
+        };
+        match self
+            .backend
+            .prepare_credential_deletion(&slot.key, deadline)
+        {
+            Ok(native)
+                if matches!(
+                    native.kind(),
+                    fido_auth::GrantKind::CredMan | fido_auth::GrantKind::LegacyUnscoped
+                ) && (1..=8).contains(&native.pin_retries()) =>
+            {
+                let grant_kind = native.kind();
+                let pin_retries = native.pin_retries();
+                self.deletion = Some(DeletionState {
+                    binding,
+                    proven: None,
+                    native,
+                });
+                WorkerResponse::CredentialDeletionPrepared {
+                    binding,
+                    grant_kind,
+                    pin_retries,
+                }
+            }
+            _ => {
+                self.secret = None;
+                WorkerResponse::Error {
+                    code: WorkerErrorCode::UnsupportedDevice,
+                }
+            }
+        }
+    }
+
+    fn prove_credential_deletion(
+        &mut self,
+        request: &WorkerRequestEnvelope,
+        binding: fido_auth::deletion::DeleteCredentialBinding,
+        target: fido_core::inventory::DeletionIdentity,
+        deadline: NativeDeadline,
+    ) -> WorkerResponse {
+        let state = self.deletion.take();
+        let secret = self.secret.take();
+        let (Some(mut state), Some(secret)) = (state, secret) else {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        };
+        if state.proven.is_some()
+            || binding != state.binding
+            || Some(binding.session.device_generation) != request.device_generation
+            || request.request_id.0 <= self.prepared_request_id
+        {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        }
+        let Ok(pin) = fido_auth::receive_secret(secret, binding.session, request.request_id.0)
+        else {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        };
+        // The same prepared native session proves and later deletes; it is never reopened. On
+        // anything but a proof the session (and its PIN) is dropped here.
+        let result = state.native.prove(&target, pin, deadline);
+        if !result.valid() {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        }
+        if result.outcome == fido_auth::deletion::DeleteProofOutcome::Proved {
+            self.prepared_request_id = request.request_id.0;
+            state.proven = Some(target);
+            self.deletion = Some(state);
+        }
+        WorkerResponse::CredentialDeletionProved { binding, result }
+    }
+
+    fn execute_credential_deletion(
+        &mut self,
+        request: &WorkerRequestEnvelope,
+        binding: fido_auth::deletion::DeleteCredentialBinding,
+        target: fido_core::inventory::DeletionIdentity,
+        deadline: NativeDeadline,
+    ) -> WorkerResponse {
+        let state = self.deletion.take();
+        self.secret = None;
+        let Some(DeletionState {
+            binding: expected,
+            proven: Some(proven),
+            native,
+        }) = state
+        else {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        };
+        if binding != expected
+            || proven != target
+            || Some(binding.session.device_generation) != request.device_generation
+            || request.request_id.0 <= self.prepared_request_id
+        {
+            return WorkerResponse::Error {
+                code: WorkerErrorCode::ProtocolMismatch,
+            };
+        }
+        WorkerResponse::CredentialDeletionCompleted {
+            binding,
+            result: native.execute(target, deadline),
+        }
+    }
+
     fn prepare_pin_mutation(
         &mut self,
         request: &WorkerRequestEnvelope,
@@ -296,6 +449,7 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
     pub fn handle(&mut self, request: WorkerRequestEnvelope) -> WorkerResponseEnvelope {
         if request.validate().is_err() || request.worker_generation != self.generation {
             self.mutation = None;
+            self.deletion = None;
             self.authentication = None;
             self.secret = None;
             return self.response(
@@ -314,6 +468,7 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
             )
         {
             self.mutation = None;
+            self.deletion = None;
             self.authentication = None;
             self.secret = None;
             return self.response(
@@ -327,6 +482,26 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
             && !matches!(request.request, WorkerRequest::ExecutePinMutation { .. })
         {
             self.mutation = None;
+            self.deletion = None;
+            self.secret = None;
+            return self.response(
+                &request,
+                WorkerResponse::Error {
+                    code: WorkerErrorCode::ProtocolMismatch,
+                },
+            );
+        }
+        // Between Prepare and Execute only the next stage of the strict
+        // Prepare -> Prove -> Execute order may arrive; anything else tears the session down.
+        if self.deletion.as_ref().is_some_and(|state| {
+            !matches!(
+                (&request.request, state.proven.is_some()),
+                (WorkerRequest::ProveCredentialDeletion { .. }, false)
+                    | (WorkerRequest::ExecuteCredentialDeletion { .. }, true)
+            )
+        }) {
+            self.deletion = None;
+            self.mutation = None;
             self.secret = None;
             return self.response(
                 &request,
@@ -337,6 +512,15 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
         }
         let deadline = NativeDeadline::after(Duration::from_millis(request.budget_ms.0));
         let response = match &request.request {
+            WorkerRequest::PrepareCredentialDeletion { device_id, binding } => {
+                self.prepare_credential_deletion(&request, *device_id, *binding, deadline)
+            }
+            WorkerRequest::ProveCredentialDeletion { binding, target } => {
+                self.prove_credential_deletion(&request, *binding, target.clone(), deadline)
+            }
+            WorkerRequest::ExecuteCredentialDeletion { binding, target } => {
+                self.execute_credential_deletion(&request, *binding, target.clone(), deadline)
+            }
             WorkerRequest::PreparePinMutation { device_id, binding } => {
                 self.prepare_pin_mutation(&request, *device_id, *binding, deadline)
             }
@@ -391,12 +575,12 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
             device_generation: request.device_generation,
             evidence: WorkerResponseEvidence {
                 execution_quiescence: ExecutionQuiescence::Quiescent,
-                mutation_outcome: if let WorkerResponse::PinMutationCompleted { result, .. } =
-                    &response
-                {
-                    Some(result.outcome)
-                } else {
-                    None
+                mutation_outcome: match &response {
+                    WorkerResponse::PinMutationCompleted { result, .. } => Some(result.outcome),
+                    WorkerResponse::CredentialDeletionCompleted { result, .. } => {
+                        Some(result.outcome)
+                    }
+                    _ => None,
                 },
             },
             response,
@@ -1086,6 +1270,368 @@ mod tests {
         }
         Ok(())
     }
+    fn deletion_target(credential_id: Vec<u8>) -> fido_core::inventory::DeletionIdentity {
+        fido_core::inventory::DeletionIdentity {
+            rp_hash: [1; 32],
+            rp_text: "example.com".into(),
+            credential_id,
+            user_id: None,
+        }
+    }
+    struct DeletionBackend {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        proofs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        compatible: bool,
+        proof: fido_auth::deletion::DeleteProofResult,
+    }
+    struct DeletionSession {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        proofs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        compatible: bool,
+        proof: fido_auth::deletion::DeleteProofResult,
+        pin: Option<fido_auth::PinSecret>,
+    }
+    impl fido_libfido2::NativeCredentialDeletionSession for DeletionSession {
+        fn kind(&self) -> fido_auth::GrantKind {
+            if self.compatible {
+                fido_auth::GrantKind::CredMan
+            } else {
+                fido_auth::GrantKind::CredManReadOnly
+            }
+        }
+        fn pin_retries(&self) -> u8 {
+            8
+        }
+        fn prove(
+            &mut self,
+            target: &fido_core::inventory::DeletionIdentity,
+            pin: fido_auth::PinSecret,
+            _: NativeDeadline,
+        ) -> fido_auth::deletion::DeleteProofResult {
+            assert_eq!(target.credential_id, vec![1, 2, 3]);
+            self.proofs
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.proof.outcome == fido_auth::deletion::DeleteProofOutcome::Proved {
+                self.pin = Some(pin);
+            }
+            self.proof
+        }
+        fn execute(
+            mut self: Box<Self>,
+            target: fido_core::inventory::DeletionIdentity,
+            _: NativeDeadline,
+        ) -> fido_auth::deletion::DeleteCredentialResult {
+            assert_eq!(target.credential_id, vec![1, 2, 3]);
+            // The proven session still holds the PIN; Execute needs no new secret frame.
+            assert!(self.pin.take().is_some());
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            fido_auth::deletion::DeleteCredentialResult::from_code(true, 0, true)
+        }
+    }
+    impl NativeDiscoveryBackend for DeletionBackend {
+        fn manifest(
+            &mut self,
+            _: NativeDeadline,
+        ) -> Result<Vec<NativeDiscoveredDevice>, NativeError> {
+            Ok(vec![native_device(1)?])
+        }
+        fn get_info(
+            &mut self,
+            _: &NativeDeviceKey,
+            _: NativeDeadline,
+        ) -> Result<NativeDeviceInfo, NativeError> {
+            Ok(native_info())
+        }
+        fn prepare_credential_deletion(
+            &mut self,
+            _: &NativeDeviceKey,
+            _: NativeDeadline,
+        ) -> Result<Box<dyn fido_libfido2::NativeCredentialDeletionSession>, NativeError> {
+            Ok(Box::new(DeletionSession {
+                calls: self.calls.clone(),
+                proofs: self.proofs.clone(),
+                compatible: self.compatible,
+                proof: self.proof,
+                pin: None,
+            }))
+        }
+    }
+
+    /// Strict Prepare -> Prove -> Execute state machine. Native delete is reachable only after a
+    /// successful proof on the same prepared session, exactly once.
+    #[test]
+    fn deletion_requires_prepare_then_proof_then_one_execute_with_exact_bindings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use fido_auth::{
+            AcquisitionBinding, AcquisitionId, PinSecret,
+            deletion::{DeleteCredentialRejection as R, DeleteProofResult},
+        };
+        use fido_core::{PromptInstanceId, WorkflowId};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let binding = fido_auth::deletion::DeleteCredentialBinding {
+            session: AcquisitionBinding {
+                worker_generation: 1,
+                device_generation: DeviceGeneration(1),
+                workflow_id: WorkflowId::from_raw(1),
+                prompt_instance_id: PromptInstanceId::from_raw(1),
+                acquisition_id: AcquisitionId(1),
+            },
+            intent_digest: [9; 32],
+        };
+        let err = |r: &WorkerResponseEnvelope| matches!(r.response, WorkerResponse::Error { .. });
+
+        for scenario in 0..34 {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let proofs = Arc::new(AtomicUsize::new(0));
+            let proof = match scenario {
+                22 => DeleteProofResult::rejected(R::WrongPin, true),
+                23 => DeleteProofResult::not_proved(true),
+                24 => DeleteProofResult {
+                    outcome: fido_auth::deletion::DeleteProofOutcome::Rejected,
+                    rejection: None,
+                    native_closed: true,
+                },
+                _ => DeleteProofResult::proved(),
+            };
+            let mut secret = Vec::new();
+            let pin = PinSecret::collect(|bytes| {
+                bytes[..4].copy_from_slice(b"fake");
+                Some(4)
+            })
+            .map_err(|_| "pin")?;
+            fido_auth::send_secret(&mut secret, binding.session, 3, pin).map_err(|_| "secret")?;
+            match scenario {
+                15 => {
+                    secret.pop();
+                }
+                16 => secret.push(1),
+                17 => secret[0] ^= 0xff,
+                _ => {}
+            }
+
+            let mut engine = WorkerEngine::new(
+                DeletionBackend {
+                    calls: calls.clone(),
+                    proofs: proofs.clone(),
+                    compatible: scenario != 25,
+                    proof,
+                },
+                WorkerGeneration(1),
+            )
+            .with_secret(Some(Box::new(std::io::Cursor::new(secret))));
+            engine.handle(request(
+                WorkerGeneration(1),
+                1,
+                WorkerRequest::ListDevices,
+                None,
+            ));
+
+            let mut prepared_binding = binding;
+            match scenario {
+                27 => prepared_binding.session.device_generation = DeviceGeneration(2),
+                28 => prepared_binding.session.worker_generation = 2,
+                29 => prepared_binding.session.acquisition_id = AcquisitionId(0),
+                _ => {}
+            }
+            if scenario != 1 {
+                let prepared = engine.handle(request(
+                    WorkerGeneration(1),
+                    2,
+                    WorkerRequest::PrepareCredentialDeletion {
+                        device_id: WorkerDeviceId(if scenario == 26 { 99 } else { 1 }),
+                        binding: prepared_binding,
+                    },
+                    Some(DeviceGeneration(1)),
+                ));
+                if matches!(scenario, 25..=29) {
+                    assert!(err(&prepared));
+                } else {
+                    assert!(matches!(
+                        prepared.response,
+                        WorkerResponse::CredentialDeletionPrepared {
+                            grant_kind: fido_auth::GrantKind::CredMan,
+                            pin_retries: 8,
+                            ..
+                        }
+                    ));
+                }
+            }
+            if scenario == 19 {
+                // An unrelated request between Prepare and Prove tears the session down.
+                let interrupt = engine.handle(request(
+                    WorkerGeneration(1),
+                    3,
+                    WorkerRequest::GetDeviceInfo {
+                        device_id: WorkerDeviceId(1),
+                    },
+                    Some(DeviceGeneration(1)),
+                ));
+                assert!(err(&interrupt));
+                assert!(engine.deletion.is_none() && engine.secret.is_none());
+            }
+            if scenario == 2 {
+                // Execute before any successful proof.
+                let early = engine.handle(request(
+                    WorkerGeneration(1),
+                    3,
+                    WorkerRequest::ExecuteCredentialDeletion {
+                        binding,
+                        target: deletion_target(vec![1, 2, 3]),
+                    },
+                    Some(DeviceGeneration(1)),
+                ));
+                assert!(err(&early));
+            }
+
+            // Prove.
+            let mut prove_binding = binding;
+            let mut prove_worker = WorkerGeneration(1);
+            let mut prove_generation = DeviceGeneration(1);
+            match scenario {
+                7 => prove_binding.session.workflow_id = WorkflowId::from_raw(2),
+                8 => prove_binding.session.prompt_instance_id = PromptInstanceId::from_raw(2),
+                9 => prove_binding.session.acquisition_id = AcquisitionId(2),
+                10 => prove_worker = WorkerGeneration(2),
+                11 => prove_binding.session.device_generation = DeviceGeneration(2),
+                12 => prove_binding.intent_digest = [8; 32],
+                13 => prove_generation = DeviceGeneration(2),
+                _ => {}
+            }
+            let proved = engine.handle(request(
+                prove_worker,
+                3,
+                WorkerRequest::ProveCredentialDeletion {
+                    binding: prove_binding,
+                    target: deletion_target(vec![1, 2, 3]),
+                },
+                Some(if scenario == 11 {
+                    DeviceGeneration(2)
+                } else {
+                    prove_generation
+                }),
+            ));
+            if matches!(scenario, 0 | 3..=6 | 14 | 18 | 20 | 21 | 30..=33) {
+                assert!(matches!(
+                    proved.response,
+                    WorkerResponse::CredentialDeletionProved {
+                        result: DeleteProofResult {
+                            outcome: fido_auth::deletion::DeleteProofOutcome::Proved,
+                            ..
+                        },
+                        ..
+                    }
+                ));
+                assert_eq!(proved.evidence.mutation_outcome, None);
+                assert_eq!(proofs.load(Ordering::SeqCst), 1);
+                assert!(engine.deletion.is_some());
+            } else if matches!(scenario, 22 | 23) {
+                // Typed pre-delete failure: nothing proven, session and PIN dropped.
+                assert!(matches!(
+                    proved.response,
+                    WorkerResponse::CredentialDeletionProved { result, .. } if result == proof
+                ));
+                assert_eq!(proved.evidence.mutation_outcome, None);
+                assert!(engine.deletion.is_none());
+            } else {
+                assert!(err(&proved), "scenario {scenario}");
+                assert!(engine.deletion.is_none());
+            }
+
+            // Interleavings and replays between proof and execute.
+            match scenario {
+                3 | 5 => {
+                    // Prove twice (5: exact replay of the same request id).
+                    let again = engine.handle(request(
+                        WorkerGeneration(1),
+                        if scenario == 5 { 3 } else { 4 },
+                        WorkerRequest::ProveCredentialDeletion {
+                            binding,
+                            target: deletion_target(vec![1, 2, 3]),
+                        },
+                        Some(DeviceGeneration(1)),
+                    ));
+                    assert!(err(&again));
+                    assert!(engine.deletion.is_none() && engine.secret.is_none());
+                }
+                18 => {
+                    let interrupt = engine.handle(request(
+                        WorkerGeneration(1),
+                        4,
+                        WorkerRequest::GetDeviceInfo {
+                            device_id: WorkerDeviceId(1),
+                        },
+                        Some(DeviceGeneration(1)),
+                    ));
+                    assert!(err(&interrupt));
+                    assert!(engine.deletion.is_none() && engine.secret.is_none());
+                }
+                _ => {}
+            }
+
+            // Execute.
+            let mut submitted = binding;
+            let mut credential = vec![1, 2, 3];
+            let mut request_id = 4;
+            match scenario {
+                30 => submitted.intent_digest = [8; 32],
+                31 => submitted.session.workflow_id = WorkflowId::from_raw(2),
+                32 => submitted.session.acquisition_id = AcquisitionId(2),
+                33 => submitted.session.prompt_instance_id = PromptInstanceId::from_raw(2),
+                14 => credential = vec![1, 2, 4],
+                20 => request_id = 3,
+                21 => credential.clear(),
+                _ => {}
+            }
+            let executed = engine.handle(request(
+                WorkerGeneration(1),
+                request_id,
+                WorkerRequest::ExecuteCredentialDeletion {
+                    binding: submitted,
+                    target: deletion_target(credential),
+                },
+                Some(submitted.session.device_generation),
+            ));
+            if matches!(scenario, 0 | 4 | 6) {
+                assert!(matches!(
+                    executed.response,
+                    WorkerResponse::CredentialDeletionCompleted { .. }
+                ));
+                assert_eq!(
+                    executed.evidence.mutation_outcome,
+                    Some(fido_core::MutationOutcome::ConfirmedSuccessful)
+                );
+            } else {
+                assert!(err(&executed), "scenario {scenario}");
+            }
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                usize::from(matches!(scenario, 0 | 4 | 6)),
+                "scenario {scenario}"
+            );
+
+            // Execute twice and exact replay of Execute: never a second native delete.
+            if matches!(scenario, 4 | 6) {
+                let replay = engine.handle(request(
+                    WorkerGeneration(1),
+                    if scenario == 6 { 4 } else { 5 },
+                    WorkerRequest::ExecuteCredentialDeletion {
+                        binding,
+                        target: deletion_target(vec![1, 2, 3]),
+                    },
+                    Some(DeviceGeneration(1)),
+                ));
+                assert!(err(&replay));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+            assert!(engine.deletion.is_none() && engine.secret.is_none());
+        }
+        Ok(())
+    }
+
     struct MutationBackend {
         calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         compatible: bool,

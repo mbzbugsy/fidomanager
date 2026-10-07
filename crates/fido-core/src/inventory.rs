@@ -6,9 +6,13 @@ pub const MAX_CREDENTIALS: usize = 128;
 pub const MAX_RP_TEXT_BYTES: usize = 254;
 pub const MAX_RP_SCAN_BYTES: usize = MAX_RP_TEXT_BYTES + 1;
 pub const MAX_CREDENTIAL_ID_BYTES: usize = 512;
+pub const MAX_USER_ID_BYTES: usize = 64;
 pub const MAX_USER_TEXT_BYTES: usize = 256;
+// Derived architectural maxima. They are implied by the independently enforced item-count
+// and per-item bounds below; they are not separate runtime counters.
 pub const MAX_TOTAL_RP_TEXT_BYTES: usize = MAX_RPS * MAX_RP_TEXT_BYTES;
 pub const MAX_TOTAL_ID_BYTES: usize = MAX_CREDENTIALS * MAX_CREDENTIAL_ID_BYTES;
+pub const MAX_TOTAL_USER_ID_BYTES: usize = MAX_CREDENTIALS * MAX_USER_ID_BYTES;
 pub const MAX_TOTAL_USER_TEXT_BYTES: usize = MAX_CREDENTIALS * MAX_USER_TEXT_BYTES * 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +46,7 @@ pub enum RpIssue {
 #[serde(deny_unknown_fields)]
 pub struct OwnedCredential {
     pub id: Vec<u8>,
+    pub user_id: Option<Vec<u8>>,
     pub user_name: Option<String>,
     pub display_name: Option<String>,
 }
@@ -59,6 +64,26 @@ pub struct OwnedInventory {
     pub metadata_existing: u64,
     pub rps: Vec<OwnedRp>,
 }
+/// Backend/worker transport identity. Never a renderer DTO or deletion capability.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeletionIdentity {
+    pub rp_hash: [u8; 32],
+    pub rp_text: String,
+    pub credential_id: Vec<u8>,
+    pub user_id: Option<Vec<u8>>,
+}
+impl DeletionIdentity {
+    pub fn within_bounds(&self) -> bool {
+        safe_text(&self.rp_text, MAX_RP_TEXT_BYTES)
+            && !self.credential_id.is_empty()
+            && self.credential_id.len() <= MAX_CREDENTIAL_ID_BYTES
+            && self
+                .user_id
+                .as_ref()
+                .is_none_or(|id| !id.is_empty() && id.len() <= MAX_USER_ID_BYTES)
+    }
+}
 macro_rules! redacted_debug {
     ($($ty:ty),+) => {$(impl std::fmt::Debug for $ty {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -66,7 +91,7 @@ macro_rules! redacted_debug {
         }
     })+};
 }
-redacted_debug!(OwnedCredential, OwnedRp, OwnedInventory);
+redacted_debug!(OwnedCredential, OwnedRp, OwnedInventory, DeletionIdentity);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -97,6 +122,9 @@ impl OwnedInventory {
                     && r.credentials.iter().all(|c| {
                         !c.id.is_empty()
                             && c.id.len() <= MAX_CREDENTIAL_ID_BYTES
+                            && c.user_id
+                                .as_ref()
+                                .is_none_or(|id| !id.is_empty() && id.len() <= MAX_USER_ID_BYTES)
                             && [&c.user_name, &c.display_name].iter().all(|t| {
                                 t.as_ref().is_none_or(|t| safe_text(t, MAX_USER_TEXT_BYTES))
                             })
@@ -171,6 +199,7 @@ mod tests {
             issue,
             credentials: vec![OwnedCredential {
                 id: vec![1],
+                user_id: Some(vec![2]),
                 user_name: None,
                 display_name: None,
             }],
@@ -203,6 +232,9 @@ mod tests {
         };
         assert!(i.within_bounds());
         i.rps[0].credentials[0].id = vec![0; MAX_CREDENTIAL_ID_BYTES + 1];
+        assert!(!i.within_bounds());
+        i.rps[0].credentials[0].id = vec![1];
+        i.rps[0].credentials[0].user_id = Some(vec![0; MAX_USER_ID_BYTES + 1]);
         assert!(!i.within_bounds());
         assert!(!safe_text("abc\n", MAX_USER_TEXT_BYTES));
         assert!(!safe_text("abc\u{202e}", MAX_USER_TEXT_BYTES));

@@ -19,7 +19,7 @@ use fido_auth::{AcquisitionBinding, AuthenticationEvidence, GrantKind};
 use fido_core::{Aaguid, DeviceGeneration, ExecutionQuiescence, MutationOutcome};
 use serde::{Deserialize, Serialize};
 
-pub const WORKER_PROTOCOL_VERSION: u16 = 4;
+pub const WORKER_PROTOCOL_VERSION: u16 = 8;
 /// Largest frame the service accepts from a worker (responses). Transport implementations must
 /// reject larger frames before deserialization, and before allocating their payload.
 pub const MAX_WORKER_FRAME_BYTES: usize = 1_048_576;
@@ -97,6 +97,8 @@ pub enum WorkerRequestValidationError {
     OperationClassMismatch,
     InvalidDeviceGeneration,
     InvalidCancellationTarget,
+    InvalidCredentialId,
+    InvalidIntentBinding,
     ZeroExecutionBudget,
 }
 
@@ -118,7 +120,10 @@ impl WorkerRequestEnvelope {
             | WorkerRequest::ValidateAuthentication { .. }
             | WorkerRequest::InspectCredentials { .. }
             | WorkerRequest::PreparePinMutation { .. }
-            | WorkerRequest::ExecutePinMutation { .. } => self.device_generation.is_some(),
+            | WorkerRequest::ExecutePinMutation { .. }
+            | WorkerRequest::PrepareCredentialDeletion { .. }
+            | WorkerRequest::ProveCredentialDeletion { .. }
+            | WorkerRequest::ExecuteCredentialDeletion { .. } => self.device_generation.is_some(),
             WorkerRequest::HealthCheck
             | WorkerRequest::Cancel { .. }
             | WorkerRequest::ListDevices => self.device_generation.is_none(),
@@ -141,13 +146,45 @@ impl WorkerRequestEnvelope {
             }
         }
 
+        if let WorkerRequest::ProveCredentialDeletion { target, .. }
+        | WorkerRequest::ExecuteCredentialDeletion { target, .. } = &self.request
+            && !target.within_bounds()
+        {
+            return Err(WorkerRequestValidationError::InvalidCredentialId);
+        }
+
+        if matches!(
+            &self.request,
+            WorkerRequest::PrepareCredentialDeletion { binding, .. }
+                | WorkerRequest::ProveCredentialDeletion { binding, .. }
+                | WorkerRequest::ExecuteCredentialDeletion { binding, .. }
+                if binding.intent_digest == [0; 32]
+        ) {
+            return Err(WorkerRequestValidationError::InvalidIntentBinding);
+        }
+
         Ok(())
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkerRequest {
+    PrepareCredentialDeletion {
+        device_id: WorkerDeviceId,
+        binding: fido_auth::deletion::DeleteCredentialBinding,
+    },
+    /// Read-only current-session credential proof. Carries the PIN over the protected secret
+    /// frame (never in this message) and runs BEFORE any durable dispatch record.
+    ProveCredentialDeletion {
+        binding: fido_auth::deletion::DeleteCredentialBinding,
+        target: fido_core::inventory::DeletionIdentity,
+    },
+    /// Consumes the proven session for the one native delete. Carries no secret frame.
+    ExecuteCredentialDeletion {
+        binding: fido_auth::deletion::DeleteCredentialBinding,
+        target: fido_core::inventory::DeletionIdentity,
+    },
     PreparePinMutation {
         device_id: WorkerDeviceId,
         binding: fido_auth::mutation::PinMutationBinding,
@@ -176,11 +213,22 @@ pub enum WorkerRequest {
     },
 }
 
+// Future additions remain redacted by default, including all raw credential identity.
+impl std::fmt::Debug for WorkerRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkerRequest(<redacted>)")
+    }
+}
+
 impl WorkerRequest {
     pub const fn operation_class(&self) -> WorkerOperationClass {
         match self {
-            Self::PreparePinMutation { .. } => WorkerOperationClass::SensitiveRead,
-            Self::ExecutePinMutation { .. } => WorkerOperationClass::Mutation,
+            Self::PrepareCredentialDeletion { .. }
+            | Self::ProveCredentialDeletion { .. }
+            | Self::PreparePinMutation { .. } => WorkerOperationClass::SensitiveRead,
+            Self::ExecuteCredentialDeletion { .. } | Self::ExecutePinMutation { .. } => {
+                WorkerOperationClass::Mutation
+            }
             Self::PrepareAuthentication { .. }
             | Self::ValidateAuthentication { .. }
             | Self::InspectCredentials { .. } => WorkerOperationClass::SensitiveRead,
@@ -252,6 +300,19 @@ pub struct WorkerResponseEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkerResponse {
+    CredentialDeletionPrepared {
+        binding: fido_auth::deletion::DeleteCredentialBinding,
+        grant_kind: GrantKind,
+        pin_retries: u8,
+    },
+    CredentialDeletionProved {
+        binding: fido_auth::deletion::DeleteCredentialBinding,
+        result: fido_auth::deletion::DeleteProofResult,
+    },
+    CredentialDeletionCompleted {
+        binding: fido_auth::deletion::DeleteCredentialBinding,
+        result: fido_auth::deletion::DeleteCredentialResult,
+    },
     PinMutationPrepared {
         binding: fido_auth::mutation::PinMutationBinding,
         pin_retries: Option<u8>,
@@ -303,6 +364,40 @@ pub enum WorkerErrorCode {
 
 #[cfg(test)]
 mod tests {
+    fn deletion_target(credential_id: Vec<u8>) -> fido_core::inventory::DeletionIdentity {
+        fido_core::inventory::DeletionIdentity {
+            rp_hash: [1; 32],
+            rp_text: "example.com".into(),
+            credential_id,
+            user_id: None,
+        }
+    }
+    #[test]
+    fn request_debug_never_discloses_identity() {
+        let binding = fido_auth::deletion::DeleteCredentialBinding {
+            session: fido_auth::AcquisitionBinding {
+                worker_generation: 1,
+                device_generation: fido_core::DeviceGeneration(1),
+                workflow_id: fido_core::WorkflowId::from_raw(1),
+                prompt_instance_id: fido_core::PromptInstanceId::from_raw(1),
+                acquisition_id: fido_auth::AcquisitionId(1),
+            },
+            intent_digest: [9; 32],
+        };
+        for request in [
+            WorkerRequest::ProveCredentialDeletion {
+                binding,
+                target: deletion_target(vec![17, 19, 23]),
+            },
+            WorkerRequest::ExecuteCredentialDeletion {
+                binding,
+                target: deletion_target(vec![17, 19, 23]),
+            },
+        ] {
+            assert_eq!(format!("{request:?}"), "WorkerRequest(<redacted>)");
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -370,6 +465,121 @@ mod tests {
         }
         Ok(())
     }
+    #[test]
+    fn credential_deletion_protocol_is_typed_bounded_and_strict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let binding = fido_auth::deletion::DeleteCredentialBinding {
+            session: AcquisitionBinding {
+                worker_generation: 3,
+                device_generation: DeviceGeneration(1),
+                workflow_id: fido_core::WorkflowId::from_raw(1),
+                prompt_instance_id: fido_core::PromptInstanceId::from_raw(2),
+                acquisition_id: fido_auth::AcquisitionId(3),
+            },
+            intent_digest: [9; 32],
+        };
+        for request in [
+            WorkerRequest::PrepareCredentialDeletion {
+                device_id: WorkerDeviceId(1),
+                binding,
+            },
+            WorkerRequest::ProveCredentialDeletion {
+                binding,
+                target: deletion_target(vec![1, 2, 3]),
+            },
+            WorkerRequest::ExecuteCredentialDeletion {
+                binding,
+                target: deletion_target(vec![1, 2, 3]),
+            },
+        ] {
+            let mutation = matches!(request, WorkerRequest::ExecuteCredentialDeletion { .. });
+            let env = request_envelope(request, Some(DeviceGeneration(1)));
+            assert_eq!(
+                env.operation_class,
+                if mutation {
+                    WorkerOperationClass::Mutation
+                } else {
+                    WorkerOperationClass::SensitiveRead
+                }
+            );
+            assert!(env.validate().is_ok());
+            let value = serde_json::to_value(&env)?;
+            assert_eq!(
+                serde_json::from_value::<WorkerRequestEnvelope>(value.clone())?,
+                env
+            );
+            for field in ["pin", "approval", "permit", "path", "raw_ctap"] {
+                let mut hostile = value.clone();
+                hostile["request"][field] = serde_json::json!("hostile");
+                assert!(serde_json::from_value::<WorkerRequestEnvelope>(hostile).is_err());
+                let mut hostile = value.clone();
+                hostile["request"]["binding"][field] = serde_json::json!("hostile");
+                assert!(serde_json::from_value::<WorkerRequestEnvelope>(hostile).is_err());
+            }
+            let mut no_generation = env.clone();
+            no_generation.device_generation = None;
+            assert_eq!(
+                no_generation.validate(),
+                Err(WorkerRequestValidationError::InvalidDeviceGeneration)
+            );
+            let mut wrong_class = env.clone();
+            wrong_class.operation_class = WorkerOperationClass::Reset;
+            assert_eq!(
+                wrong_class.validate(),
+                Err(WorkerRequestValidationError::OperationClassMismatch)
+            );
+        }
+
+        let mut zero_digest = request_envelope(
+            WorkerRequest::PrepareCredentialDeletion {
+                device_id: WorkerDeviceId(1),
+                binding,
+            },
+            Some(DeviceGeneration(1)),
+        );
+        if let WorkerRequest::PrepareCredentialDeletion { binding, .. } = &mut zero_digest.request {
+            binding.intent_digest = [0; 32];
+        }
+        assert_eq!(
+            zero_digest.validate(),
+            Err(WorkerRequestValidationError::InvalidIntentBinding)
+        );
+
+        for credential_id in [
+            Vec::new(),
+            vec![1; fido_core::inventory::MAX_CREDENTIAL_ID_BYTES + 1],
+        ] {
+            for prove in [false, true] {
+                let target = deletion_target(credential_id.clone());
+                let request = if prove {
+                    WorkerRequest::ProveCredentialDeletion { binding, target }
+                } else {
+                    WorkerRequest::ExecuteCredentialDeletion { binding, target }
+                };
+                let invalid = request_envelope(request, Some(DeviceGeneration(1)));
+                assert_eq!(
+                    invalid.validate(),
+                    Err(WorkerRequestValidationError::InvalidCredentialId)
+                );
+            }
+        }
+        let mut zero_prove = request_envelope(
+            WorkerRequest::ProveCredentialDeletion {
+                binding,
+                target: deletion_target(vec![1]),
+            },
+            Some(DeviceGeneration(1)),
+        );
+        if let WorkerRequest::ProveCredentialDeletion { binding, .. } = &mut zero_prove.request {
+            binding.intent_digest = [0; 32];
+        }
+        assert_eq!(
+            zero_prove.validate(),
+            Err(WorkerRequestValidationError::InvalidIntentBinding)
+        );
+        Ok(())
+    }
+
     #[test]
     fn generic_mutation_messages_are_not_protocol_requests()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -604,6 +814,7 @@ mod tests {
         // IDs serialize as three-digit JSON numbers plus separators. Controls are rejected.
         let credential = OwnedCredential {
             id: vec![255; MAX_CREDENTIAL_ID_BYTES],
+            user_id: Some(vec![255; MAX_USER_ID_BYTES]),
             user_name: Some("\\".repeat(MAX_USER_TEXT_BYTES)),
             display_name: Some("\\".repeat(MAX_USER_TEXT_BYTES)),
         };

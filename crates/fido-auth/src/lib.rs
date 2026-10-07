@@ -1,6 +1,7 @@
 //! Backend/worker authentication contracts. This crate has no renderer API.
 //! Host cleanup is not authenticator-side revocation or CTAPHID_CANCEL evidence.
 
+pub mod deletion;
 pub mod mutation;
 
 use fido_core::{DeviceGeneration, PromptInstanceId, WorkflowId};

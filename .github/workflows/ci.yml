@@ -77,6 +77,8 @@ jobs:
       - name: Rust tests
         # Linux covers discovery and deterministic auth contracts, never native PUAT.
         run: cargo test --workspace --all-targets --locked
+      - name: Service security contract doctests
+        run: cargo test -p fido-service --doc --locked
 
   macos-native-auth:
     runs-on: macos-latest
@@ -98,6 +100,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Deterministic macOS auth and process tests (no hardware claim)
         run: cargo test --workspace --all-targets --locked
+      - name: Service security contract doctests
+        run: cargo test -p fido-service --doc --locked
       - name: Verify credential and PIN mutation symbols against exact private archive link map
         run: |
           # Bin test harnesses share the link-map output; force a fresh production link.

@@ -3,6 +3,7 @@
 //! The public API deliberately exposes owned values only. Native paths remain opaque inside the
 //! worker and libfido2 pointers never cross this crate boundary.
 
+pub mod deletion;
 pub mod inspection;
 #[cfg(any(test, all(feature = "native-libfido2", target_os = "macos")))]
 mod mutation;
@@ -208,6 +209,27 @@ pub trait NativePinMutationSession: Send {
     ) -> fido_auth::mutation::PinMutationResult;
 }
 
+pub trait NativeCredentialDeletionSession: Send {
+    fn kind(&self) -> fido_auth::GrantKind;
+    fn pin_retries(&self) -> u8;
+    /// Read-only current-session proof, run BEFORE any durable dispatch record. On success the
+    /// session retains the proven identity and the zeroizing PIN for the one `execute`; on any
+    /// other outcome the session is closed and the PIN dropped. Never reaches the delete call.
+    fn prove(
+        &mut self,
+        target: &fido_core::inventory::DeletionIdentity,
+        pin: fido_auth::PinSecret,
+        deadline: NativeDeadline,
+    ) -> fido_auth::deletion::DeleteProofResult;
+    /// Consumes the proven session for exactly one native delete of the same identity. No proof,
+    /// GetInfo or retry-count call is repeated.
+    fn execute(
+        self: Box<Self>,
+        target: fido_core::inventory::DeletionIdentity,
+        deadline: NativeDeadline,
+    ) -> fido_auth::deletion::DeleteCredentialResult;
+}
+
 pub trait NativeDiscoveryBackend: Send {
     fn prepare_pin_mutation(
         &mut self,
@@ -215,6 +237,13 @@ pub trait NativeDiscoveryBackend: Send {
         _operation: fido_auth::mutation::PinOperation,
         _deadline: NativeDeadline,
     ) -> Result<Box<dyn NativePinMutationSession>, NativeError> {
+        Err(NativeError::new(NativeErrorKind::Unsupported, None))
+    }
+    fn prepare_credential_deletion(
+        &mut self,
+        _key: &NativeDeviceKey,
+        _deadline: NativeDeadline,
+    ) -> Result<Box<dyn NativeCredentialDeletionSession>, NativeError> {
         Err(NativeError::new(NativeErrorKind::Unsupported, None))
     }
     fn prepare_authentication(
@@ -250,6 +279,8 @@ mod native {
 
     #[cfg(target_os = "macos")]
     mod authentication;
+    #[cfg(target_os = "macos")]
+    mod deletion;
     #[cfg(target_os = "macos")]
     mod inspection;
     #[cfg(target_os = "macos")]
@@ -327,6 +358,14 @@ mod native {
             deadline: NativeDeadline,
         ) -> Result<Box<dyn super::NativePinMutationSession>, NativeError> {
             mutation::prepare(key, operation, deadline)
+        }
+        #[cfg(target_os = "macos")]
+        fn prepare_credential_deletion(
+            &mut self,
+            key: &NativeDeviceKey,
+            deadline: NativeDeadline,
+        ) -> Result<Box<dyn super::NativeCredentialDeletionSession>, NativeError> {
+            deletion::prepare(key, deadline)
         }
         #[cfg(target_os = "macos")]
         fn prepare_authentication(

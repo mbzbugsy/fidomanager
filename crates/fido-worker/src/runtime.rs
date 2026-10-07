@@ -52,7 +52,7 @@ impl Default for RuntimeConfig {
 
 enum Inbound {
     Hello(ParentHello),
-    Request(WorkerRequestEnvelope),
+    Request(Box<WorkerRequestEnvelope>),
 }
 
 /// Runs the worker until the process ends. Never returns: every exit path is an explicit
@@ -131,7 +131,7 @@ where
 
     loop {
         let request = match inbound_rx.recv() {
-            Ok(Inbound::Request(request)) => request,
+            Ok(Inbound::Request(request)) => *request,
             Ok(Inbound::Hello(_)) => exit_immediately(exit::PROTOCOL),
             Err(_) => exit_immediately(exit::INTERNAL),
         };
@@ -157,6 +157,7 @@ where
         let retire_after_response = matches!(
             request.request,
             fido_worker_protocol::WorkerRequest::ExecutePinMutation { .. }
+                | fido_worker_protocol::WorkerRequest::ExecuteCredentialDeletion { .. }
         );
         let response = engine.handle(request);
 
@@ -203,7 +204,10 @@ where
                         if busy.swap(true, Ordering::AcqRel) {
                             exit_immediately(exit::PROTOCOL);
                         }
-                        if inbound_tx.send(Inbound::Request(request)).is_err() {
+                        if inbound_tx
+                            .send(Inbound::Request(Box::new(request)))
+                            .is_err()
+                        {
                             exit_immediately(exit::INTERNAL);
                         }
                     }

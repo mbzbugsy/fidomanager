@@ -6,6 +6,31 @@
   } from './inspection';
   export let inspection: InspectionDisplay;
   export let activity: DeviceActivity = { state: 'idle' };
+  export let ondelete:
+    | ((detail: {
+        displayDeviceHandle: string;
+        deviceGeneration: string;
+        enumerationEpoch: string;
+        credentialHandle: string;
+      }) => void)
+    | undefined = undefined;
+
+  function handleDelete(
+    deviceHandle: string,
+    deviceGeneration: string,
+    epoch: string,
+    credentialHandle: string,
+  ) {
+    const detail = {
+      displayDeviceHandle: deviceHandle,
+      deviceGeneration,
+      enumerationEpoch: epoch,
+      credentialHandle,
+    };
+    if (ondelete) {
+      ondelete(detail);
+    }
+  }
 
   type Assessment = InspectionSnapshot['assessment'];
 
@@ -123,6 +148,26 @@
                     {#if labels.secondary}<span class="credential-sub"
                         >{labels.secondary}</span
                       >{/if}
+                    <span class="credential-fingerprint"
+                      >Fingerprint: {credential.credentialFingerprint}</span
+                    >
+                    {#if inventory.assessment.completeness !== 'inconsistent' && rp.issue === null && rp.verifiedText !== null}
+                      <button
+                        type="button"
+                        class="credential-delete-button"
+                        aria-label="Delete passkey"
+                        disabled={activity.state !== 'idle'}
+                        onclick={() =>
+                          handleDelete(
+                            inventory.deviceHandle,
+                            inventory.deviceGeneration,
+                            inventory.epoch,
+                            credential.handle,
+                          )}
+                      >
+                        Delete
+                      </button>
+                    {/if}
                   </li>
                 {/each}
               </ul>

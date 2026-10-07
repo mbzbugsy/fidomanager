@@ -322,6 +322,7 @@ mod tests {
 
     fn result(status: Status) -> AuthenticationResult {
         AuthenticationResult {
+            inspection_worker: None,
             inventory: None,
             inspection_error: None,
             status,

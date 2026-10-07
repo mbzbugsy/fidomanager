@@ -42,3 +42,22 @@ for bad_symbols, bad_map in (
     else:
         raise AssertionError("invalid PIN attribution passed")
 print("PASS: PIN symbol unresolved, wrong object/archive and dead-stripped controls rejected")
+
+delete_archive = "/cargo/private-libfido2/libfidomanager_fido2_bounded.a"
+delete_symbols = "000 T _fido_credman_del_dev_rk"
+delete_map = "[ 12] " + delete_archive + "(credman.c.o)\n000 0 [ 12] _fido_credman_del_dev_rk"
+verifier.verify_deletion_symbol(delete_symbols, delete_map, delete_archive)
+for bad_symbols, bad_map in (
+    (delete_symbols.replace("T _", "U _"), delete_map),
+    (delete_symbols, delete_map.replace("[ 12] _", "[ 13] _")),
+    (delete_symbols, delete_map.replace(delete_archive, "/opt/homebrew/lib/libfido2.a")),
+    (delete_symbols, "[ 12] " + delete_archive + "(credman.c.o)\n# Dead Stripped Symbols:\n000 0 [ 12] _fido_credman_del_dev_rk"),
+    (delete_symbols, delete_map.replace("credman.c.o", "unrelated.c.o")),
+):
+    try:
+        verifier.verify_deletion_symbol(bad_symbols, bad_map, delete_archive)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("invalid deletion attribution passed")
+print("PASS: deletion symbol unresolved, wrong object/archive and dead-stripped controls rejected")

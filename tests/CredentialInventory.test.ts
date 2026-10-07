@@ -178,6 +178,7 @@ const build = (
       ...group,
       credentials: group.credentials.map((credential) => ({
         ...credential,
+        credentialFingerprint: '001122aabbcc',
         handle: `opaque-credential-${handleCounter++}`,
       })),
     })),
@@ -331,6 +332,7 @@ describe('connected-key credential display', () => {
     expect(result).toContain('Only Display');
     expect(result).toContain('>Passkey<');
     expect(result).not.toContain('credential-sub');
+    expect(result.match(/Fingerprint: 001122aabbcc/g)?.length).toBe(3);
   });
   it('groups several RPs with their own counts', () => {
     const result = html(
@@ -772,6 +774,144 @@ describe('operation-local issues during settling', () => {
         'Security key scanning is temporarily unavailable.',
       );
       expect(settling).not.toContain('inspection-toast');
+    }
+  });
+});
+
+describe('credential deletion UI eligibility and presentation', () => {
+  it('one delete click invokes only the typed callback with the opaque tuple', () => {
+    // Execute the actual button expression and component handler without a DOM or native IPC.
+    const handler = source.match(
+      /  function handleDelete\([\s\S]*?(?=  type Assessment)/,
+    )?.[0];
+    const onclick = source.match(/onclick=\{([\s\S]*?)\}/)?.[1];
+    if (!handler || !onclick)
+      throw new Error('Missing actual delete click handler');
+    const ondelete = vi.fn();
+    const dispatch = vi.fn();
+    const inventory = {
+      deviceHandle: 'opaque-device',
+      deviceGeneration: '2',
+      epoch: 'opaque-epoch',
+    };
+    const credential = { handle: 'opaque-credential' };
+    const click = new Function(
+      'ondelete',
+      'dispatch',
+      'inventory',
+      'credential',
+      ts.transpileModule(`${handler}\nreturn (${onclick});`, {
+        compilerOptions: { target: ts.ScriptTarget.ES2022 },
+      }).outputText,
+    )(ondelete, dispatch, inventory, credential) as () => void;
+
+    click();
+
+    expect(ondelete).toHaveBeenCalledExactlyOnceWith({
+      displayDeviceHandle: 'opaque-device',
+      deviceGeneration: '2',
+      enumerationEpoch: 'opaque-epoch',
+      credentialHandle: 'opaque-credential',
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(appSource.match(/ondelete=\{handleDelete\}/g)).toHaveLength(1);
+    expect(appSource).not.toContain('on:delete=');
+    expect(source).not.toContain('createEventDispatcher');
+  });
+
+  it('shows Delete action only for credentials that can be resolved for mutation', () => {
+    // Eligible complete inventory with no RP issue
+    const eligible = html(
+      build('complete', { kind: 'exact', value: 1 }, [
+        rp('example.com', [{ userName: 'Alice', displayName: 'Alice A' }]),
+      ]),
+    );
+    expect(eligible).toContain('credential-delete-button');
+    expect(eligible).toContain('>Delete</button>');
+    expect(eligible).toContain('aria-label="Delete passkey"');
+
+    // RP with issue (e.g. timeout) cannot resolve for mutation -> no Delete button
+    const rpIssue = html(
+      build('complete', { kind: 'exact', value: 1 }, [
+        rp(
+          'example.com',
+          [{ userName: 'Alice', displayName: 'Alice A' }],
+          'timeout' as any,
+        ),
+      ]),
+    );
+    expect(rpIssue).not.toContain('credential-delete-button');
+  });
+
+  it('inconsistent inventory does not expose an actionable mutation path', () => {
+    const inconsistent = html(
+      build('inconsistent', { kind: 'unknown' }, [
+        rp('example.com', [{ userName: 'Alice', displayName: 'Alice A' }]),
+      ]),
+    );
+    expect(inconsistent).not.toContain('credential-delete-button');
+    expect(inconsistent).not.toContain('>Delete</button>');
+  });
+
+  it('incomplete inventory can target an exact listed credential but shows the incomplete warning', () => {
+    const incomplete = html(
+      build('incomplete', { kind: 'at_least', value: 1 }, [
+        rp('example.com', [{ userName: 'Alice', displayName: 'Alice A' }]),
+      ]),
+    );
+    expect(incomplete).toContain('credential-delete-button');
+    expect(incomplete).toContain('>Delete</button>');
+    expect(incomplete).toContain('Some credentials could not be read');
+  });
+
+  it('delete button is disabled when device activity is not idle', () => {
+    const idleHtml = render(Inventory, {
+      props: {
+        inspection: build('complete', { kind: 'exact', value: 1 }, [
+          rp('example.com', [{ userName: 'Alice', displayName: 'Alice A' }]),
+        ]),
+        activity: { state: 'idle' },
+      },
+    }).body;
+    expect(idleHtml).toContain('class="credential-delete-button"');
+    expect(idleHtml).not.toContain('disabled=""');
+
+    const busyHtml = render(Inventory, {
+      props: {
+        inspection: build('complete', { kind: 'exact', value: 1 }, [
+          rp('example.com', [{ userName: 'Alice', displayName: 'Alice A' }]),
+        ]),
+        activity: { state: 'attention', message: 'Incorrect PIN.' },
+      },
+    }).body;
+    expect(busyHtml).toContain('disabled=""');
+  });
+
+  it('renderer request carries only opaque presentation tuple and no raw secrets', () => {
+    const tuple = {
+      displayDeviceHandle: 'opaque-dev-123',
+      deviceGeneration: '1',
+      enumerationEpoch: 'epoch-456',
+      credentialHandle: 'cred-789',
+    };
+    const keys = Object.keys(tuple).sort();
+    expect(keys).toEqual([
+      'credentialHandle',
+      'deviceGeneration',
+      'displayDeviceHandle',
+      'enumerationEpoch',
+    ]);
+    const forbidden = [
+      'credentialId',
+      'userId',
+      'rpHash',
+      'nativeHandle',
+      'worker',
+      'pin',
+      'permit',
+    ];
+    for (const f of forbidden) {
+      expect(tuple).not.toHaveProperty(f);
     }
   });
 });

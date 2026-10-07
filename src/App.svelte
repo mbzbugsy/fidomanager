@@ -58,6 +58,56 @@
 
   type AuthenticatorDiscovery = DiscoveryResult<AuthenticatorList>;
 
+  type DeleteCredentialResponse = {
+    outcome:
+      | 'confirmed_successful'
+      | 'wrong_pin'
+      | 'pin_blocked'
+      | 'pin_auth_blocked'
+      | 'pin_auth_invalid'
+      | 'pin_not_set'
+      | 'pin_required'
+      | 'unauthorized_permission'
+      | 'parameters'
+      | 'credential_absent'
+      | 'credential_mismatch'
+      | 'not_dispatched'
+      | 'outcome_unknown'
+      | 'cancelled';
+    message: string;
+    recoveryRequired: boolean;
+  };
+
+  let deletingCredential = false;
+
+  async function handleDelete(event: {
+    displayDeviceHandle: string;
+    deviceGeneration: string;
+    enumerationEpoch: string;
+    credentialHandle: string;
+  }) {
+    if (deletingCredential) return;
+    deletingCredential = true;
+    try {
+      const response = await invoke<DeleteCredentialResponse>(
+        'delete_credential',
+        { request: event },
+      );
+      if (
+        response.outcome === 'confirmed_successful' ||
+        response.recoveryRequired ||
+        response.outcome === 'credential_absent' ||
+        response.outcome === 'credential_mismatch'
+      ) {
+        void refreshDevices(false);
+      }
+    } catch {
+      // IPC level failure handled cleanly
+    } finally {
+      deletingCredential = false;
+    }
+  }
+
   let foundation: FoundationStatus | null = null;
   let boogoocypher: BooGooCypherStatus = 'checking';
   let boogoocypherTimer: ReturnType<typeof setTimeout> | null = null;
@@ -404,6 +454,7 @@
                   device.generation,
                   foundation?.inspectionActivity,
                 )}
+                ondelete={handleDelete}
               />
             </article>
           {/each}

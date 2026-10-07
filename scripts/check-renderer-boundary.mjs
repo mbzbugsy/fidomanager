@@ -7,11 +7,13 @@ const EXPECTED_COMMANDS = [
   'foundation_status',
   'list_authenticators',
   'boogoocypher_status',
+  'delete_credential',
 ];
 const EXPECTED_PERMISSIONS = [
   'allow-foundation-status',
   'allow-list-authenticators',
   'allow-boogoocypher-status',
+  'allow-delete-credential',
 ];
 
 function listFiles(root, predicate) {
@@ -148,6 +150,19 @@ if (
   );
 }
 
+const deleteCredentialCmd = discoveredCommands.find(
+  ({ name }) => name === 'delete_credential',
+);
+if (
+  !deleteCredentialCmd ||
+  deleteCredentialCmd.parameters.replace(/\s+/g, '').replace(/,$/, '') !==
+    "app:tauri::AppHandle,state:tauri::State<'_,AppState>,request:DeleteCredentialRequest"
+) {
+  throw new Error(
+    'delete_credential must accept only AppHandle, AppState and DeleteCredentialRequest.',
+  );
+}
+
 // foundation_status retrieves a backend-created snapshot; it must never return authority.
 const commandSource = readFileSync('src-tauri/src/commands/mod.rs', 'utf8');
 // Discovery classification is backend-owned and carries no error text or authority.
@@ -226,6 +241,37 @@ assertExactArray(
     'pin_check_passed',
   ],
   'AuthenticatorSummary contains an unreviewed renderer field.',
+);
+
+const deleteRequestFields = [
+  ...(
+    commandSource.match(
+      /pub struct DeleteCredentialRequest \{([^}]+)\}/s,
+    )?.[1] ?? ''
+  ).matchAll(/^\s*(?:#\[[^\]]*\]\s*)*pub\s+([a-z0-9_]+):/gm),
+].map((m) => m[1]);
+assertExactArray(
+  deleteRequestFields,
+  [
+    'display_device_handle',
+    'device_generation',
+    'enumeration_epoch',
+    'credential_handle',
+  ],
+  'DeleteCredentialRequest contains an unreviewed renderer field.',
+);
+
+const deleteResponseFields = [
+  ...(
+    commandSource.match(
+      /pub struct DeleteCredentialResponse \{([^}]+)\}/s,
+    )?.[1] ?? ''
+  ).matchAll(/^\s*(?:#\[[^\]]*\]\s*)*pub\s+([a-z0-9_]+):/gm),
+].map((m) => m[1]);
+assertExactArray(
+  deleteResponseFields,
+  ['outcome', 'message', 'recovery_required'],
+  'DeleteCredentialResponse contains an unreviewed renderer field.',
 );
 
 const appSource = readFileSync('src-tauri/src/lib.rs', 'utf8');
@@ -511,6 +557,9 @@ assertExactArray(
     (m) => m[1],
   ),
   [
+    'PrepareCredentialDeletion',
+    'ProveCredentialDeletion',
+    'ExecuteCredentialDeletion',
     'PreparePinMutation',
     'ExecutePinMutation',
     'HealthCheck',
@@ -544,7 +593,9 @@ for (const file of [
     /\bfido_dev_reset\s*\(/.test(source) ||
     (file !== 'crates/fido-libfido2/src/native/mutation.rs' &&
       /\bfido_dev_set_pin\s*\(/.test(source)) ||
-    (!manualSpike && /\bfido_credman_del_dev_rk\s*\(/.test(source))
+    (!manualSpike &&
+      file !== 'crates/fido-libfido2/src/native/deletion.rs' &&
+      /\bfido_credman_del_dev_rk\s*\(/.test(source))
   ) {
     throw new Error(
       `M4 foundation must not declare or call authenticator mutation: ${file}`,
@@ -553,7 +604,7 @@ for (const file of [
 }
 for (const file of rendererFiles) {
   if (
-    /\b(?:OperationPermit|OperationIntent|PinMutationSecrets|PinMutationDispatchPermit|MutationCompletion|WorkflowId|PromptInstanceId|recovery_journal|journal_path|dispatch_capable|current_pin|new_pin|confirm_pin)\b/.test(
+    /\b(?:OperationPermit|OperationIntent|DeleteCredentialIntent|DeleteCredentialPermit|ExactCredentialTarget|DeletionIdentity|DeletionRecoveryCompletion|RecoverableOperation|CredentialDeletionDispatchPermit|DurableCredentialDeletionDispatch|PinMutationSecrets|PinMutationDispatchPermit|MutationCompletion|WorkflowId|PromptInstanceId|recovery_journal|journal_path|dispatch_capable|current_pin|new_pin|confirm_pin)\b/.test(
       readFileSync(file, 'utf8'),
     )
   ) {
@@ -587,6 +638,9 @@ for (const [file, name] of [
   ['crates/fido-service/src/mutation.rs', 'OperationPermit'],
   ['crates/fido-service/src/mutation.rs', 'PinMutationDispatchPermit'],
   ['crates/fido-service/src/recovery.rs', 'DurablePinDispatch'],
+  ['crates/fido-service/src/deletion.rs', 'DeleteCredentialPermit'],
+  ['crates/fido-service/src/deletion.rs', 'CredentialDeletionDispatchPermit'],
+  ['crates/fido-service/src/recovery.rs', 'DurableCredentialDeletionDispatch'],
 ]) {
   const text = readFileSync(file, 'utf8');
   const unsafeDerive = new RegExp(
@@ -656,3 +710,100 @@ if (
 console.log(
   'Renderer boundary check passed; only reviewed backend PIN mutation path.',
 );
+
+// M5 deletion authority remains private, consumed once, and minted only after durable ordering.
+const deletionService = readFileSync(
+  'crates/fido-service/src/deletion.rs',
+  'utf8',
+);
+if (
+  /pub(?:\([^)]*\))? (?:struct|enum) CredentialDeletionDispatchPermit/.test(
+    deletionService,
+  )
+)
+  throw new Error('M5 dispatch authority must remain private.');
+for (const helper of [
+  'approve_delete_credential',
+  'write_delete_pending',
+  'mark_delete_dispatch_capable',
+  'reserve_delete_credential',
+]) {
+  if (new RegExp('pub(?:\\([^)]*\\))? fn ' + helper).test(deletionService))
+    throw new Error('M5 deletion helper must remain private.');
+}
+if (!/permit: CredentialDeletionDispatchPermit,/.test(deletionService))
+  throw new Error('M5 dispatch must consume its capability by value.');
+if (
+  !/durable: crate::recovery::DurableCredentialDeletionDispatch,/.test(
+    deletionService,
+  )
+)
+  throw new Error('M5 dispatch capability must own a durable journal receipt.');
+if (
+  !/self\.write_delete_pending\(&mut reservation, &permit\)\?;\s*let dispatch = self\.mark_delete_dispatch_capable\(/.test(
+    deletionService,
+  )
+)
+  throw new Error(
+    'M5 dispatch requires durable Pending and DispatchCapable ordering.',
+  );
+// N1: the PIN-bearing read-only proof runs BEFORE any durable record, so every provable
+// pre-delete failure is a clean rejection and only the one real delete can leave an unknown.
+if (
+  !/let proof = self\.prove_delete\([^;]*\)\?;[\s\S]*?DeleteProofOutcome::NotProved => return Ok\(\(\)\),\s*\}\s*self\.write_delete_pending\(&mut reservation, &permit\)\?;/.test(
+    deletionService,
+  )
+)
+  throw new Error(
+    'N1 the current-session proof must complete before durable Pending and DispatchCapable.',
+  );
+// Execute consumes the proven session: no secret frame and no second proof in dispatch.
+const dispatchBody =
+  deletionService.match(/fn dispatch_delete\(([\s\S]*?)\n    \}\n/)?.[1] ?? '';
+if (
+  !dispatchBody ||
+  /submit_secret|ProveCredentialDeletion|pin/.test(dispatchBody)
+)
+  throw new Error('N1 dispatch must not carry or re-prove the PIN.');
+if (
+  !/self\.persist\(record\)\?;\s*Ok\(DurableCredentialDeletionDispatch/.test(
+    recoveryService,
+  )
+)
+  throw new Error(
+    'M5 durable receipt requires successful journal persistence.',
+  );
+const inspectionService = readFileSync(
+  'crates/fido-service/src/inspection.rs',
+  'utf8',
+);
+for (const [name, fields] of [
+  [
+    'CredentialDisplay',
+    ['handle', 'user_name', 'display_name', 'credential_fingerprint'],
+  ],
+  ['RpDisplay', ['verified_text', 'issue', 'credentials']],
+  [
+    'InspectionSnapshot',
+    [
+      'device_handle',
+      'device_generation',
+      'epoch',
+      'authenticator',
+      'assessment',
+      'rps',
+    ],
+  ],
+]) {
+  const body =
+    inspectionService.match(
+      new RegExp('pub struct ' + name + ' \\{([^}]+)\\}', 's'),
+    )?.[1] ?? '';
+  assertExactArray(
+    [...body.matchAll(/pub ([a-z0-9_]+):/g)].map((m) => m[1]),
+    fields,
+    'M5 raw identity cannot enter renderer-facing DTOs.',
+  );
+  if (/DeletionIdentity|ExactCredentialTarget|Vec<u8>|\[u8;/.test(body))
+    throw new Error('M5 raw identity cannot enter renderer-facing DTOs.');
+}

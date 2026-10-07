@@ -39,6 +39,32 @@ pub use fido_auth::mutation::{PinOperation, pin_call_outcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RecoverableOperation {
+    SetPin,
+    ChangePin,
+    DeleteCredential,
+}
+type JournalOperation = RecoverableOperation;
+impl From<PinOperation> for RecoverableOperation {
+    fn from(operation: PinOperation) -> Self {
+        match operation {
+            PinOperation::SetPin => Self::SetPin,
+            PinOperation::ChangePin => Self::ChangePin,
+        }
+    }
+}
+impl RecoverableOperation {
+    fn pin(self) -> Option<PinOperation> {
+        match self {
+            Self::SetPin => Some(PinOperation::SetPin),
+            Self::ChangePin => Some(PinOperation::ChangePin),
+            Self::DeleteCredential => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum JournalPhase {
     Pending,
     DispatchCapable,
@@ -63,7 +89,7 @@ struct Record {
     schema: u8,
     application: String,
     incident: String,
-    operation: PinOperation,
+    operation: JournalOperation,
     created_unix_secs: u64,
     phase: JournalPhase,
     resolution: Option<Resolution>,
@@ -86,6 +112,12 @@ pub struct RecoveryJournal {
 pub(super) struct DurablePinDispatch {
     incident: String,
     operation: PinOperation,
+}
+
+/// Opaque proof that the deletion incident reached a durably synced DispatchCapable state.
+/// It is backend-private, single-owner authority and intentionally carries no credential identity.
+pub(super) struct DurableCredentialDeletionDispatch {
+    incident: String,
 }
 
 impl RecoveryJournal {
@@ -135,13 +167,51 @@ impl RecoveryJournal {
     pub fn phase(&self) -> Option<JournalPhase> {
         self.record.as_ref().map(|r| r.phase)
     }
-    pub fn operation(&self) -> Option<PinOperation> {
+    pub(crate) fn recoverable_operation(&self) -> Option<RecoverableOperation> {
+        self.can_acknowledge()
+            .then(|| self.record.as_ref().map(|r| r.operation))
+            .flatten()
+    }
+    /// Operation of the current incident in any phase; callers use it to refuse acknowledging an
+    /// incident that belongs to a different recovery family.
+    pub(crate) fn incident_operation(&self) -> Option<RecoverableOperation> {
         self.record.as_ref().map(|r| r.operation)
+    }
+    pub(crate) fn incident_created_unix_secs(&self) -> Option<u64> {
+        self.record.as_ref().map(|r| r.created_unix_secs)
+    }
+    pub fn operation(&self) -> Option<PinOperation> {
+        self.record
+            .as_ref()
+            .and_then(|record| record.operation.pin())
+    }
+    pub(crate) fn has_unresolved_credential_deletion(&self) -> bool {
+        !self.poisoned
+            && self.record.as_ref().is_some_and(|record| {
+                record.operation == JournalOperation::DeleteCredential
+                    && record.phase != JournalPhase::Resolved
+                    && record.resolution.is_none()
+            })
     }
 
     pub(crate) fn pending(
         &mut self,
         operation: PinOperation,
+        created_unix_secs: u64,
+    ) -> Result<(), JournalError> {
+        self.pending_operation(operation.into(), created_unix_secs)
+    }
+
+    pub(crate) fn pending_credential_deletion(
+        &mut self,
+        created_unix_secs: u64,
+    ) -> Result<(), JournalError> {
+        self.pending_operation(JournalOperation::DeleteCredential, created_unix_secs)
+    }
+
+    fn pending_operation(
+        &mut self,
+        operation: JournalOperation,
         created_unix_secs: u64,
     ) -> Result<(), JournalError> {
         // A valid Pending-only prior incident proves no dispatch-capable acknowledgement.
@@ -160,6 +230,7 @@ impl RecoveryJournal {
         let mut incident = [0u8; 16];
         getrandom::fill(&mut incident).map_err(|_| JournalError::Unavailable)?;
         self.persist(Record {
+            // Schema/application remain stable so existing M4 set/change records load unchanged.
             schema: 1,
             application: "fidomanager-m4-v1".into(),
             incident: format!("{:032x}", u128::from_be_bytes(incident)),
@@ -175,7 +246,7 @@ impl RecoveryJournal {
         operation: PinOperation,
     ) -> Result<DurablePinDispatch, JournalError> {
         let mut record = self.record.clone().ok_or(JournalError::InvalidTransition)?;
-        if record.phase != JournalPhase::Pending || record.operation != operation {
+        if record.phase != JournalPhase::Pending || record.operation != operation.into() {
             return Err(JournalError::InvalidTransition);
         }
         record.phase = JournalPhase::DispatchCapable;
@@ -193,7 +264,35 @@ impl RecoveryJournal {
                 record.phase == JournalPhase::DispatchCapable
                     && record.resolution.is_none()
                     && record.incident == receipt.incident
-                    && record.operation == receipt.operation
+                    && record.operation == receipt.operation.into()
+            })
+    }
+
+    pub(super) fn dispatch_capable_credential_deletion(
+        &mut self,
+    ) -> Result<DurableCredentialDeletionDispatch, JournalError> {
+        let mut record = self.record.clone().ok_or(JournalError::InvalidTransition)?;
+        if record.phase != JournalPhase::Pending
+            || record.operation != JournalOperation::DeleteCredential
+        {
+            return Err(JournalError::InvalidTransition);
+        }
+        record.phase = JournalPhase::DispatchCapable;
+        let incident = record.incident.clone();
+        self.persist(record)?;
+        Ok(DurableCredentialDeletionDispatch { incident })
+    }
+
+    pub(super) fn matches_credential_deletion_dispatch(
+        &self,
+        receipt: &DurableCredentialDeletionDispatch,
+    ) -> bool {
+        !self.poisoned
+            && self.record.as_ref().is_some_and(|record| {
+                record.phase == JournalPhase::DispatchCapable
+                    && record.resolution.is_none()
+                    && record.incident == receipt.incident
+                    && record.operation == JournalOperation::DeleteCredential
             })
     }
 
@@ -327,6 +426,65 @@ pub(crate) mod tests {
         assert_eq!(value["resolution"], "acknowledged_unknown");
         Ok(())
     }
+    #[test]
+    fn credential_deletion_uses_the_same_durable_barrier_contract() -> Result<(), JournalError> {
+        let disk = MemoryStorage::default();
+        let mut journal = RecoveryJournal::load(Box::new(disk.clone()));
+        journal.pending_credential_deletion(11)?;
+        assert!(journal.has_unresolved_credential_deletion());
+        assert_eq!(journal.phase(), Some(JournalPhase::Pending));
+        assert_eq!(journal.operation(), None);
+        assert_eq!(journal.admission(), RecoveryAdmission::Open);
+
+        let receipt = journal.dispatch_capable_credential_deletion()?;
+        assert!(journal.matches_credential_deletion_dispatch(&receipt));
+        assert!(journal.has_unresolved_credential_deletion());
+        assert_eq!(journal.admission(), RecoveryAdmission::Barrier);
+        assert!(journal.resolve(Resolution::NotDispatched).is_err());
+
+        journal.resolve(Resolution::AcknowledgedUnknown)?;
+        assert!(!journal.has_unresolved_credential_deletion());
+        assert!(!journal.matches_credential_deletion_dispatch(&receipt));
+        assert_eq!(journal.admission(), RecoveryAdmission::Open);
+
+        let restarted = RecoveryJournal::load(Box::new(disk));
+        assert_eq!(restarted.phase(), Some(JournalPhase::Resolved));
+        assert_eq!(restarted.operation(), None);
+        assert!(!restarted.has_unresolved_credential_deletion());
+        assert_eq!(restarted.admission(), RecoveryAdmission::Open);
+        Ok(())
+    }
+
+    #[test]
+    fn existing_m4_records_remain_schema_compatible() -> Result<(), JournalError> {
+        for operation in ["set_pin", "change_pin"] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "schema": 1,
+                "application": "fidomanager-m4-v1",
+                "incident": "0123456789abcdef0123456789abcdef",
+                "operation": operation,
+                "created_unix_secs": 7,
+                "phase": "dispatch_capable",
+                "resolution": null
+            }))
+            .map_err(|_| JournalError::Unavailable)?;
+            let disk = MemoryStorage::default();
+            disk.0.lock().unwrap_or_else(|_| panic!("disk")).bytes = Some(bytes);
+            let journal = RecoveryJournal::load(Box::new(disk));
+            assert_eq!(journal.admission(), RecoveryAdmission::Barrier);
+            assert_eq!(journal.phase(), Some(JournalPhase::DispatchCapable));
+            assert_eq!(
+                journal.operation(),
+                Some(if operation == "set_pin" {
+                    PinOperation::SetPin
+                } else {
+                    PinOperation::ChangePin
+                })
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn corrupt_unsupported_and_secret_extended_records_fail_closed() -> Result<(), JournalError> {
         let disk = MemoryStorage::default();

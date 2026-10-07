@@ -314,6 +314,12 @@ try {
     ['crates/fido-service/src/mutation.rs', 'OperationPermit'],
     ['crates/fido-service/src/mutation.rs', 'PinMutationDispatchPermit'],
     ['crates/fido-service/src/recovery.rs', 'DurablePinDispatch'],
+    ['crates/fido-service/src/deletion.rs', 'DeleteCredentialPermit'],
+    ['crates/fido-service/src/deletion.rs', 'CredentialDeletionDispatchPermit'],
+    [
+      'crates/fido-service/src/recovery.rs',
+      'DurableCredentialDeletionDispatch',
+    ],
   ]) {
     for (const trait of ['Serialize', 'Clone', 'Debug']) {
       mutate(
@@ -403,6 +409,11 @@ try {
   }
   for (const name of [
     'PinMutationSecrets',
+    'DeleteCredentialIntent',
+    'DeleteCredentialPermit',
+    'ExactCredentialTarget',
+    'DeletionIdentity',
+    'DeletionRecoveryCompletion',
     'PinMutationDispatchPermit',
     'current_pin',
     'new_pin',
@@ -415,6 +426,123 @@ try {
       `renderer ${name}`,
     );
   }
+
+  for (const [before, after, pattern] of [
+    [
+      'struct CredentialDeletionDispatchPermit',
+      'pub struct CredentialDeletionDispatchPermit',
+      /dispatch authority must remain private/,
+    ],
+    [
+      'permit: CredentialDeletionDispatchPermit,',
+      'permit: &CredentialDeletionDispatchPermit,',
+      /dispatch must consume its capability by value/,
+    ],
+    [
+      'self.write_delete_pending(&mut reservation, &permit)?;',
+      '',
+      /requires durable Pending and DispatchCapable ordering/,
+    ],
+    [
+      'let proof = self.prove_delete(',
+      'let proof = self.skip_proof(',
+      /proof must complete before durable Pending and DispatchCapable/,
+    ],
+    [
+      'fn dispatch_delete(',
+      'fn dispatch_delete_with_pin(pin: u8, ',
+      /dispatch must not carry or re-prove the PIN/,
+    ],
+    [
+      'let dispatch = self.mark_delete_dispatch_capable(',
+      'let dispatch = self.skip_durable_transition(',
+      /requires durable Pending and DispatchCapable ordering/,
+    ],
+    [
+      'durable: crate::recovery::DurableCredentialDeletionDispatch,',
+      '',
+      /dispatch capability must own a durable journal receipt/,
+    ],
+    [
+      'fn write_delete_pending(',
+      'pub fn write_delete_pending(',
+      /deletion helper must remain private/,
+    ],
+  ]) {
+    mutate(
+      'crates/fido-service/src/deletion.rs',
+      (text) => text.replace(before, after),
+      pattern,
+      'M5 ' + before,
+    );
+  }
+  for (const field of [
+    'credential_id',
+    'user_id',
+    'rp_hash',
+    'native_handle',
+  ]) {
+    for (const dto of [
+      'CredentialDisplay',
+      'RpDisplay',
+      'InspectionSnapshot',
+    ]) {
+      mutate(
+        'crates/fido-service/src/inspection.rs',
+        (text) =>
+          text.replace(
+            'pub struct ' + dto + ' {',
+            'pub struct ' + dto + ' {\n    pub ' + field + ': Vec<u8>,',
+          ),
+        /raw identity cannot enter renderer-facing DTOs/,
+        'M5 DTO ' + field,
+      );
+    }
+  }
+  for (const field of [
+    'credential_id',
+    'user_id',
+    'rp_hash',
+    'native_handle',
+    'pin',
+  ]) {
+    mutate(
+      'src-tauri/src/commands/mod.rs',
+      (text) =>
+        text.replace(
+          'pub struct DeleteCredentialRequest {',
+          'pub struct DeleteCredentialRequest {\n    pub ' +
+            field +
+            ': String,',
+        ),
+      /DeleteCredentialRequest contains an unreviewed renderer field/,
+      'DeleteCredentialRequest ' + field,
+    );
+  }
+  for (const field of ['permit', 'receipt', 'journal_path', 'pin']) {
+    mutate(
+      'src-tauri/src/commands/mod.rs',
+      (text) =>
+        text.replace(
+          'pub struct DeleteCredentialResponse {',
+          'pub struct DeleteCredentialResponse {\n    pub ' +
+            field +
+            ': String,',
+        ),
+      /DeleteCredentialResponse contains an unreviewed renderer field/,
+      'DeleteCredentialResponse ' + field,
+    );
+  }
+  mutate(
+    'src-tauri/src/commands/mod.rs',
+    (text) =>
+      text.replace(
+        'request: DeleteCredentialRequest,',
+        'request: DeleteCredentialRequest,\n    pin: String,',
+      ),
+    /delete_credential must accept only AppHandle, AppState and DeleteCredentialRequest/,
+    'delete_credential with pin parameter',
+  );
   assert.equal(check().status, 0, 'All restored M4 fixtures must pass.');
   console.log(
     `Renderer boundary regression checks passed (${checks} checker executions; 8 denied crates, command/permission allowlists, service separation and M4 controls).`,

@@ -29,6 +29,55 @@ pub(super) fn start(
             claim.finish(ActivityOutcome::Issue(activity::RESTART_NEEDED));
             return;
         };
+        if target.action == NativeAction::DeletionRecovery {
+            let presenter_app = app.clone();
+            let state = app.state::<AppState>();
+            let Ok(mut inspection) = state.inspection.lock() else {
+                claim.finish(ActivityOutcome::Issue(activity::RESTART_NEEDED));
+                return;
+            };
+            let result = authority.acknowledge_deletion_recovery(
+                &mut supervisor,
+                &mut inspection,
+                move |request, controller, reply, presentation, epoch, expected| {
+                    let callback_app = presenter_app.clone();
+                    presenter_app
+                        .run_on_main_thread(move || {
+                            let binding = request.binding();
+                            if let Some(window) = callback_app.get_webview_window("main") {
+                                if let Ok(parent) = window.ns_window() {
+                                    // SAFETY: live trusted main NSWindow on AppKit's main thread.
+                                    if unsafe {
+                                        fido_service::deletion::present_deletion_recovery(
+                                            parent,
+                                            request,
+                                            Arc::clone(&controller),
+                                            reply.clone(),
+                                            (epoch, expected),
+                                            presentation.explanation(),
+                                        )
+                                    }
+                                    .is_ok()
+                                    {
+                                        return;
+                                    }
+                                }
+                            }
+                            fido_service::deletion::recovery_presentation_failed(
+                                binding, controller, reply,
+                            );
+                        })
+                        .map_err(|_| "main thread unavailable")
+                },
+            );
+            if let Some(menu) = &menu {
+                menu.update(Vec::new(), &authority);
+            }
+            claim.finish(if result.is_ok() {
+                ActivityOutcome::Success("Deletion uncertainty acknowledged. Inspect the authenticator again before another credential mutation.")
+            } else { ActivityOutcome::Issue("Credential deletion remains unconfirmed. Review it from the Security key menu.") });
+            return;
+        }
         if target.action == NativeAction::Recovery {
             let presenter_app = app.clone();
             let result = authority.acknowledge_pin_recovery(

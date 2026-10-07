@@ -440,7 +440,12 @@ fn two_inspected_inventories_survive_real_worker_retirement_and_cancel() -> Test
         );
         if let Some(inventory) = result.inventory.take() {
             store
-                .replace(ids[selected], "Identical label".into(), inventory)
+                .replace(
+                    ids[selected],
+                    result.inspection_worker.ok_or("provenance")?,
+                    "Identical label".into(),
+                    inventory,
+                )
                 .map_err(|_| "replace")?;
         }
         assert!(ids.iter().all(|d| store.snapshot_for(*d).is_none()));

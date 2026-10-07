@@ -32,10 +32,13 @@ enum Purpose {
     Inspection,
     Mutation(PinOperation),
     Recovery(PinOperation),
+    DeletionRecovery,
+    Deletion,
 }
 enum Reply {
     Inspection(Sender<PinCompletion>),
     Mutation(Sender<crate::MutationCompletion>),
+    DeletionRecovery(Sender<crate::DeletionRecoveryCompletion>),
 }
 
 pub type Controller = Arc<Mutex<PromptController>>;
@@ -188,6 +191,53 @@ pub unsafe fn present_recovery(
         )
     }
 }
+/// # Safety
+/// Parent must be the live trusted main NSWindow, called on AppKit's main thread.
+pub unsafe fn present_deletion_recovery(
+    parent: *mut c_void,
+    request: PromptRequest,
+    controller: Controller,
+    reply: Sender<crate::DeletionRecoveryCompletion>,
+    revocation: (Arc<AtomicU64>, u64),
+    evidence: &str,
+) -> Result<(), &'static str> {
+    // SAFETY: forwards the trusted NSWindow contract; deletion-specific text and no secret input.
+    unsafe {
+        present_sheet(
+            parent,
+            request,
+            controller,
+            Reply::DeletionRecovery(reply),
+            None,
+            revocation,
+            (evidence, Purpose::DeletionRecovery),
+        )
+    }
+}
+/// # Safety
+/// Parent must be the live trusted main NSWindow, called on AppKit's main thread.
+pub unsafe fn present_deletion(
+    parent: *mut c_void,
+    request: PromptRequest,
+    controller: Controller,
+    reply: Sender<PinCompletion>,
+    retries: Option<u8>,
+    revocation: (Arc<AtomicU64>, u64),
+    description: &str,
+) -> Result<(), &'static str> {
+    // SAFETY: forwards the trusted NSWindow contract; collects PIN for credential deletion.
+    unsafe {
+        present_sheet(
+            parent,
+            request,
+            controller,
+            Reply::Inspection(reply),
+            retries,
+            revocation,
+            (description, Purpose::Deletion),
+        )
+    }
+}
 unsafe fn present_sheet(
     parent: *mut c_void,
     request: PromptRequest,
@@ -222,6 +272,8 @@ unsafe fn present_sheet(
         Purpose::Inspection => "Authenticate security key",
         Purpose::Mutation(op) => op.title(),
         Purpose::Recovery(_) => "Acknowledge uncertain PIN operation",
+        Purpose::DeletionRecovery => "Acknowledge uncertain credential deletion",
+        Purpose::Deletion => "Delete passkey",
     }));
     let retry_text = retries.map_or("Retry count unavailable.".to_owned(), |n| {
         if n <= 3 {
@@ -235,6 +287,7 @@ unsafe fn present_sheet(
             "Selected key: {target_label}. Inspect stored credentials and passkeys. This read-only operation will not change credentials. Enter this key's PIN. {retry_text} One submission makes one attempt; there is no automatic retry."
         ),
         Purpose::Mutation(op) => crate::mutation_description(op, target_label, retries),
+        Purpose::DeletionRecovery | Purpose::Deletion => target_label.to_owned(),
         Purpose::Recovery(op) => format!(
             "The previous {} result could not be confirmed. {} {} Acknowledging allows future security key operations but preserves the uncertain historical result. This does not confirm success or failure and makes no PIN attempt.",
             op.title(),
@@ -252,7 +305,8 @@ unsafe fn present_sheet(
     let approve = alert.addButtonWithTitle(&NSString::from_str(match purpose {
         Purpose::Inspection => "Authenticate",
         Purpose::Mutation(op) => op.title(),
-        Purpose::Recovery(_) => "Acknowledge uncertainty",
+        Purpose::Recovery(_) | Purpose::DeletionRecovery => "Acknowledge uncertainty",
+        Purpose::Deletion => "Delete Passkey",
     }));
     approve.setKeyEquivalent(&NSString::from_str(""));
     approve.setEnabled(matches!(purpose, Purpose::Inspection));
@@ -273,14 +327,16 @@ unsafe fn present_sheet(
     );
     input.setPlaceholderString(Some(&NSString::from_str("Security key PIN")));
     let last_retry_ack = if match purpose {
-        Purpose::Inspection => retries == Some(1),
+        Purpose::Inspection | Purpose::Deletion => retries == Some(1),
         Purpose::Mutation(op) => crate::last_retry_ack_required(op, retries),
-        Purpose::Recovery(_) => true,
+        Purpose::Recovery(_) | Purpose::DeletionRecovery => true,
     } {
         let button = NSButton::new(mtm);
         button.setButtonType(NSButtonType::Switch);
         button.setTitle(&NSString::from_str(
-            if matches!(purpose, Purpose::Recovery(_)) {
+            if matches!(purpose, Purpose::DeletionRecovery) {
+                "I acknowledge deletion is unconfirmed"
+            } else if matches!(purpose, Purpose::Recovery(_)) {
                 "I acknowledge the PIN result is unknown"
             } else {
                 "I understand this is the last PIN retry"
@@ -322,7 +378,7 @@ unsafe fn present_sheet(
             ),
         ),
     );
-    if !matches!(purpose, Purpose::Recovery(_)) {
+    if !matches!(purpose, Purpose::Recovery(_) | Purpose::DeletionRecovery) {
         input.setPlaceholderString(Some(&NSString::from_str(
             if matches!(purpose, Purpose::Mutation(PinOperation::ChangePin)) {
                 "Current PIN"
@@ -344,7 +400,7 @@ unsafe fn present_sheet(
             accessory.addSubview(button);
         }
     }
-    if matches!(purpose, Purpose::Recovery(_)) {
+    if matches!(purpose, Purpose::Recovery(_) | Purpose::DeletionRecovery) {
         if let Some(button) = &last_retry_ack {
             accessory.addSubview(button);
         }
@@ -353,7 +409,7 @@ unsafe fn present_sheet(
     alert.layout();
     let initial_input = match purpose {
         Purpose::Mutation(PinOperation::SetPin) => new_input.as_ref(),
-        Purpose::Recovery(_) => None,
+        Purpose::Recovery(_) | Purpose::DeletionRecovery => None,
         _ => Some(&input),
     };
     // Set the initial responder before presentation; NSAlert may otherwise choose a field.
@@ -433,7 +489,7 @@ unsafe fn present_sheet(
     });
     eprintln!(
         "[authentication] prompt main=true secure_control={} window_modal={} default_cancel={default_cancel}",
-        !matches!(purpose, Purpose::Recovery(_)),
+        !matches!(purpose, Purpose::Recovery(_) | Purpose::DeletionRecovery),
         associated && attached
     );
     if !associated || !attached || !default_cancel {
@@ -528,11 +584,11 @@ fn complete(binding: PromptBinding, response: Option<NSModalResponse>) {
                     PromptOutcome::Cancelled(binding)
                 } else {
                     let approved = match s.purpose {
-                        Purpose::Inspection => {
+                        Purpose::Inspection | Purpose::Deletion => {
                             s.pin = collect_field(&s.input);
                             s.pin.is_some()
                         }
-                        Purpose::Recovery(_) => true,
+                        Purpose::Recovery(_) | Purpose::DeletionRecovery => true,
                         Purpose::Mutation(op) => {
                             s.secrets = s
                                 .new_input
@@ -626,6 +682,9 @@ fn complete(binding: PromptBinding, response: Option<NSModalResponse>) {
                         outcome,
                         pin,
                     });
+                }
+                Reply::DeletionRecovery(reply) => {
+                    let _ = reply.send(crate::DeletionRecoveryCompletion { binding, outcome });
                 }
                 Reply::Mutation(reply) => {
                     let _ = reply.send(crate::MutationCompletion {
