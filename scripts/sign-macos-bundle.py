@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Sign an assembled Fido Manager.app inside-out with an explicit identity.
 
-M7.0 runs this only with the ad-hoc identity ("-"). Ad-hoc signing seals the bundle so that
+M7.0/M7.1 run this only with the ad-hoc identity ("-"). Ad-hoc signing seals the bundle so that
 `codesign --verify --strict --deep` and Gatekeeper-independent structure checks are meaningful,
 but it is not authenticity: there is no certificate and no Team ID.
 
-Hardened Runtime is applied only for a real Developer ID identity. Under Hardened Runtime,
-library validation requires every bundled dylib to carry the same Team ID as the process, which an
-ad-hoc signature cannot provide; the only ad-hoc workaround would be the broad
-`com.apple.security.cs.disable-library-validation` entitlement, which this project forbids.
+Hardened Runtime is applied only for a real Developer ID identity. Under Hardened Runtime, library
+validation requires every loaded non-platform library to carry the process's Team ID. Since M7.1
+the bundle contains no dylibs at all (libfido2, OpenSSL and libcbor are statically linked into the
+worker), so only the two executables and the bundle seal are signed. The broad
+`com.apple.security.cs.disable-library-validation` entitlement is forbidden.
 
 No entitlements are ever applied. Existing signatures are replaced (`--force`), which also drops
 any entitlements a previous signer may have embedded.
@@ -53,24 +54,19 @@ def sign(app, identity):
     runtime = identity != "-"
 
     nested = [path for path in sorted(app.rglob("*")) if path.is_file() and not path.is_symlink() and mach_o(path)]
-    frameworks = [path for path in nested if path.parent == contents / "Frameworks"]
     helpers = [path for path in nested if path.parent == contents / "MacOS" and path != main]
-    unexpected = set(nested) - set(frameworks) - set(helpers) - {main}
-    if unexpected:
-        raise RuntimeError("Unexpected nested code outside Contents/MacOS or Contents/Frameworks: "
+    unexpected = set(nested) - set(helpers) - {main}
+    if unexpected or (contents / "Frameworks").exists():
+        raise RuntimeError("Unexpected nested code or Contents/Frameworks (the bundle carries no dylibs): "
                            + ", ".join(str(path.relative_to(app)) for path in sorted(unexpected)))
-    if any(path.suffix != ".dylib" for path in frameworks):
-        raise RuntimeError("Contents/Frameworks may contain only flat .dylib files")
 
-    # Inside-out: libraries, then helper executables, then the bundle (main executable + seal).
-    for library in frameworks:
-        codesign(library, identity, runtime=False)
+    # Inside-out: helper executables, then the bundle (main executable + seal).
     for helper in helpers:
         codesign(helper, identity, runtime=runtime, identifier=f"{bundle_id}.{helper.name}")
     codesign(app, identity, runtime=runtime)
     subprocess.run(["codesign", "--verify", "--strict", "--deep", "--verbose=2", str(app)], check=True)
     kind = "ad-hoc (no Team ID, no Hardened Runtime; NOT release signing)" if identity == "-" else "Developer ID + Hardened Runtime"
-    print(f"Signed inside-out: {len(frameworks)} dylib(s), {len(helpers)} helper(s), bundle; {kind}")
+    print(f"Signed inside-out: {len(helpers)} helper(s), bundle; no dylibs; {kind}")
 
 
 if __name__ == "__main__":

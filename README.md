@@ -70,23 +70,30 @@ Apache-2.0. See [LICENSE](LICENSE).
 ## macOS native worker development
 
 The macOS worker builds a private, checksum-pinned libfido2 1.17.0 static archive
-with a reviewed credential-management allocation bound. Install Python 3.9+, Xcode
-Command Line Tools, CMake, pkg-config, OpenSSL and libcbor, then prepare the source:
+with a reviewed credential-management allocation bound. Its OpenSSL 3.5.9 (libcrypto)
+and libcbor 0.14.0 dependencies are also built from checksum-pinned upstream source
+as private static archives targeting macOS 11.0; Homebrew/system copies are never
+used. Install Python 3.9+, Xcode Command Line Tools, CMake and pkg-config, then
+prepare the sources:
 
 ```sh
-brew install cmake pkg-config openssl@3 libcbor
+brew install cmake pkg-config
 python3 scripts/build-libfido2.py fetch
 cargo build -p fido-worker --locked
 python3 scripts/verify-libfido2-linkage.py target/debug/fido-worker
 ```
 
-Cargo fails if the pinned source is missing or invalid; it never falls back to
-Homebrew/system libfido2 on macOS. See the [build design and validation](docs/validation/M3-bounded-libfido2.md)
+Cargo fails if a pinned source is missing or invalid; it never falls back to
+Homebrew/system libfido2, libcrypto or libcbor on macOS. See the [build design and validation](docs/validation/M3-bounded-libfido2.md)
+and [pinned static native dependencies](docs/validation/M7.1-static-native-deps.md)
 for native tests, offline builds, limits and packaging implications. Linux retains
 the existing discovery-only system-library build.
 
 ### Unsigned macOS app bundle (development only)
 
 `python3 scripts/package-macos.py --dmg` builds an ad-hoc sealed `Fido Manager.app` and an
-unsigned DMG under `target/macos-package/`. It is not signed, notarized or distributable; see
-[docs/validation/M7.0-macos-packaging-foundation.md](docs/validation/M7.0-macos-packaging-foundation.md).
+unsigned DMG under `target/macos-package/`. The bundle contains no third-party dylibs and
+includes [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). It is not signed, notarized or
+distributable; see
+[docs/validation/M7.0-macos-packaging-foundation.md](docs/validation/M7.0-macos-packaging-foundation.md)
+and [docs/validation/M7.1-static-native-deps.md](docs/validation/M7.1-static-native-deps.md).

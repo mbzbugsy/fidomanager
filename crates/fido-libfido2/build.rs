@@ -1,30 +1,8 @@
 use std::{env, path::PathBuf, process::Command};
 
-fn validated_pkg_config_libdir(output: &[u8]) -> Result<PathBuf, &'static str> {
-    let output = std::str::from_utf8(output).map_err(|_| "invalid dependency directory UTF-8")?;
-    // pkg-config terminates its output with LF. Consume exactly that record terminator,
-    // preserving path whitespace and rejecting any remaining control characters.
-    let directory = output.strip_suffix('\n').unwrap_or(output);
-    if directory.chars().any(char::is_control) {
-        return Err("control character in dependency directory");
-    }
-    let directory = PathBuf::from(directory);
-    if !directory.is_absolute() || !directory.is_dir() {
-        return Err("dependency directory must be an existing absolute directory");
-    }
-    Ok(directory)
-}
-
 fn main() {
     println!("cargo:rerun-if-env-changed=LIBFIDO2_LIB_DIR");
-    for variable in [
-        "PKG_CONFIG_PATH",
-        "PKG_CONFIG_LIBDIR",
-        "PKG_CONFIG_SYSROOT_DIR",
-        "SDKROOT",
-        "DEVELOPER_DIR",
-        "PATH",
-    ] {
+    for variable in ["SDKROOT", "DEVELOPER_DIR", "PATH"] {
         println!("cargo:rerun-if-env-changed={variable}");
     }
     if env::var_os("CARGO_FEATURE_NATIVE_LIBFIDO2").is_none() {
@@ -51,9 +29,16 @@ fn main() {
     let output = PathBuf::from(env::var_os("OUT_DIR").unwrap_or_default()).join("private-libfido2");
     for input in [
         "scripts/build-libfido2.py",
+        "scripts/build-native-deps.py",
         "native/libfido2/source.lock.json",
         "native/libfido2/credman-allocation-bound.patch",
+        "native/openssl/source.lock.json",
+        "native/openssl/LICENSE.upstream",
+        "native/libcbor/source.lock.json",
+        "native/libcbor/LICENSE.upstream",
         "target/native-sources/b974e7cf2ee7392134cc12c08b76a068cf250dd8.tar.gz",
+        "target/native-sources/openssl-3.5.9.tar.gz",
+        "target/native-sources/libcbor-6730c20ab487c0b4dc5fb3fea918937085355bac.tar.gz",
     ] {
         println!("cargo:rerun-if-changed={}", root.join(input).display());
     }
@@ -71,77 +56,21 @@ fn main() {
         String::from_utf8_lossy(&build.stdout),
         String::from_utf8_lossy(&build.stderr)
     );
+    // The only native search path is the private build output. Project-unique archive names mean
+    // no Homebrew/system libfido2, libcrypto or libcbor can satisfy these link requests.
     println!("cargo:rustc-link-search=native={}", output.display());
-    // Keep the native archive separate from the Rust rlib so the final link map can prove the
+    // Keep the native archives separate from the Rust rlib so the final link map can prove the
     // exact archive/object identity instead of hiding it inside an intermediate Rust archive.
-    println!("cargo:rustc-link-lib=static:-bundle=fidomanager_fido2_bounded");
-    // Only transitive crypto/CBOR dependencies use pkg-config; never query libfido2 here.
-    for package in ["libcrypto", "libcbor"] {
-        let directory = Command::new("pkg-config")
-            .args(["--variable=libdir", package])
-            .output()
-            .unwrap_or_else(|_| panic!("pkg-config is required for native dependencies"));
-        assert!(directory.status.success(), "native dependency unavailable");
-        let directory = validated_pkg_config_libdir(&directory.stdout)
-            .unwrap_or_else(|reason| panic!("{reason}"));
-        println!("cargo:rustc-link-search=native={}", directory.display());
+    for archive in [
+        "fidomanager_fido2_bounded",
+        "fidomanager_cbor",
+        "fidomanager_crypto",
+    ] {
+        println!("cargo:rustc-link-lib=static:-bundle={archive}");
     }
-    for library in ["crypto", "cbor", "z"] {
-        println!("cargo:rustc-link-lib={library}");
-    }
+    // zlib, CoreFoundation and IOKit are macOS system components.
+    println!("cargo:rustc-link-lib=z");
     for framework in ["CoreFoundation", "IOKit"] {
         println!("cargo:rustc-link-lib=framework={framework}");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validated_pkg_config_libdir;
-    use std::{env, fs, path::PathBuf};
-
-    #[test]
-    fn dependency_libdir_rejects_invalid_output_before_cargo_emission() {
-        let root = PathBuf::from(env::var_os("FIDOMANAGER_LIBDIR_TEST_ROOT").unwrap());
-        assert!(root.is_dir());
-        let directory = root.to_str().unwrap();
-        for output in [directory.to_owned(), format!("{directory}\n")] {
-            assert_eq!(
-                validated_pkg_config_libdir(output.as_bytes()),
-                Ok(root.clone())
-            );
-        }
-        let file = root.join("regular-file");
-        fs::write(&file, b"not a directory").unwrap();
-        for output in [
-            format!("{directory}\n\n"),
-            format!("{directory}\r"),
-            format!("{directory}\r\n"),
-            format!("{directory}\ncargo:rustc-link-lib=fido2\n"),
-            format!("{directory}\t"),
-            format!("{directory}\0"),
-            format!("{directory}\u{0085}"),
-        ] {
-            assert_eq!(
-                validated_pkg_config_libdir(output.as_bytes()),
-                Err("control character in dependency directory"),
-                "{output:?}"
-            );
-        }
-        for output in [
-            "relative-directory".to_owned(),
-            String::new(),
-            root.join("missing-directory").to_str().unwrap().to_owned(),
-            file.to_str().unwrap().to_owned(),
-        ] {
-            assert_eq!(
-                validated_pkg_config_libdir(output.as_bytes()),
-                Err("dependency directory must be an existing absolute directory"),
-                "{output:?}"
-            );
-        }
-        assert_eq!(
-            validated_pkg_config_libdir(&[0xff]),
-            Err("invalid dependency directory UTF-8")
-        );
     }
 }

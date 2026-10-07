@@ -5,19 +5,6 @@ use std::{env, fs, path::PathBuf, process::Command};
 // mutation code. The final link map is written next to the archive so the structural test can
 // prove which libfido2 objects were (and were not) linked.
 
-fn validated_pkg_config_libdir(output: &[u8]) -> Result<PathBuf, &'static str> {
-    let output = std::str::from_utf8(output).map_err(|_| "invalid dependency directory UTF-8")?;
-    let directory = output.strip_suffix('\n').unwrap_or(output);
-    if directory.chars().any(char::is_control) {
-        return Err("control character in dependency directory");
-    }
-    let directory = PathBuf::from(directory);
-    if !directory.is_absolute() || !directory.is_dir() {
-        return Err("dependency directory must be an existing absolute directory");
-    }
-    Ok(directory)
-}
-
 fn pinned_revision(root: &std::path::Path) -> String {
     let lock = fs::read_to_string(root.join("native/libfido2/source.lock.json"))
         .unwrap_or_else(|_| panic!("libfido2 source lock unavailable"));
@@ -61,7 +48,10 @@ fn main() {
     }
     for input in [
         "scripts/build-libfido2.py",
+        "scripts/build-native-deps.py",
         "native/libfido2/credman-allocation-bound.patch",
+        "native/openssl/source.lock.json",
+        "native/libcbor/source.lock.json",
     ] {
         println!("cargo:rerun-if-changed={}", root.join(input).display());
     }
@@ -80,20 +70,15 @@ fn main() {
         String::from_utf8_lossy(&build.stderr)
     );
     println!("cargo:rustc-link-search=native={}", output.display());
-    println!("cargo:rustc-link-lib=static:-bundle=fidomanager_fido2_bounded");
-    for package in ["libcrypto", "libcbor"] {
-        let directory = Command::new("pkg-config")
-            .args(["--variable=libdir", package])
-            .output()
-            .unwrap_or_else(|_| panic!("pkg-config is required for native dependencies"));
-        assert!(directory.status.success(), "native dependency unavailable");
-        let directory = validated_pkg_config_libdir(&directory.stdout)
-            .unwrap_or_else(|reason| panic!("{reason}"));
-        println!("cargo:rustc-link-search=native={}", directory.display());
+    // Same private static OpenSSL/libcbor archives as the worker; never Homebrew/system copies.
+    for archive in [
+        "fidomanager_fido2_bounded",
+        "fidomanager_cbor",
+        "fidomanager_crypto",
+    ] {
+        println!("cargo:rustc-link-lib=static:-bundle={archive}");
     }
-    for library in ["crypto", "cbor", "z"] {
-        println!("cargo:rustc-link-lib={library}");
-    }
+    println!("cargo:rustc-link-lib=z");
     for framework in ["CoreFoundation", "IOKit"] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }

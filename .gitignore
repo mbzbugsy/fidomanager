@@ -8,6 +8,10 @@ pnpm-debug.log*
 /target/
 **/*.rs.bk
 
+# Python (build/check scripts)
+__pycache__/
+*.py[cod]
+
 # Tauri / OS
 src-tauri/target/
 src-tauri/gen/
