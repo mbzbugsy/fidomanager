@@ -6,6 +6,7 @@
   "permissions": [
     "allow-foundation-status",
     "allow-list-authenticators",
-    "allow-boogoocypher-status"
+    "allow-boogoocypher-status",
+    "allow-delete-credential"
   ]
 }

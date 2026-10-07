@@ -4,6 +4,7 @@ fn main() {
             "foundation_status",
             "list_authenticators",
             "boogoocypher_status",
+            "delete_credential",
         ]));
 
     if let Err(error) = tauri_build::try_build(attributes) {

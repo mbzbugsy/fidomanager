@@ -264,9 +264,11 @@ impl DeletionRecoveryPresentation {
     }
 }
 
+pub use fido_auth::deletion::DeleteCredentialRejection;
 pub use fido_native_ui::DeletionRecoveryCompletion;
+pub use fido_native_ui::deletion_description;
 #[cfg(all(feature = "native-pin", target_os = "macos"))]
-pub use fido_native_ui::macos_pin::present_deletion_recovery;
+pub use fido_native_ui::macos_pin::{present_deletion, present_deletion_recovery};
 
 pub fn recovery_presentation_failed(
     binding: PromptBinding,
@@ -279,6 +281,23 @@ pub fn recovery_presentation_failed(
         let _ = c.did_teardown(binding, Instant::now());
     }
     let _ = reply.send(DeletionRecoveryCompletion { binding, outcome });
+}
+
+pub fn deletion_presentation_failed(
+    binding: PromptBinding,
+    controller: NativeController,
+    reply: std::sync::mpsc::Sender<PinCompletion>,
+) {
+    let outcome = PromptOutcome::PresentationFailed(binding);
+    if let Ok(mut c) = controller.lock() {
+        let _ = c.revoke(outcome);
+        let _ = c.did_teardown(binding, Instant::now());
+    }
+    let _ = reply.send(PinCompletion {
+        binding,
+        outcome,
+        pin: None,
+    });
 }
 
 impl AuthenticationAuthority {

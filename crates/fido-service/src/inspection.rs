@@ -108,7 +108,7 @@ pub struct ExactCredentialTarget {
     display_name: Option<String>,
 }
 impl ExactCredentialTarget {
-    pub(crate) fn device(&self) -> InventoryDevice {
+    pub fn device(&self) -> InventoryDevice {
         self.device
     }
     pub(crate) fn epoch(&self) -> &EnumerationEpoch {

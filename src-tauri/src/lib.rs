@@ -122,6 +122,7 @@ pub fn run() {
             commands::foundation_status,
             commands::list_authenticators,
             commands::boogoocypher_status,
+            commands::delete_credential,
         ]);
     #[cfg(all(
         feature = "native-pin",

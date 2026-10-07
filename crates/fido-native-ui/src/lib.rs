@@ -315,6 +315,54 @@ pub fn last_retry_ack_required(
 ) -> bool {
     operation == fido_auth::mutation::PinOperation::ChangePin && retries == Some(1)
 }
+
+/// Detailed, trusted informative text for the native credential-deletion confirmation sheet.
+pub fn deletion_description(
+    authenticator: &str,
+    rp_id: &str,
+    user_name: Option<&str>,
+    display_name: Option<&str>,
+    credential_fingerprint: &str,
+    inventory_incomplete: bool,
+    retries: Option<u8>,
+) -> String {
+    let is_non_ascii = !rp_id.is_ascii();
+    let account_lines = match (display_name, user_name) {
+        (Some(dn), Some(un)) if dn != un => format!("Display Name: {dn}\nUser Name: {un}"),
+        (Some(name), _) => format!("Display Name: {name}"),
+        (_, Some(name)) => format!("User Name: {name}"),
+        (None, None) => "Account: (No username stored)".to_string(),
+    };
+    let incomplete_warning = if inventory_incomplete {
+        "\n\nWarning: other credentials may exist that Fido Manager could not enumerate; only the credential shown in this confirmation is targeted."
+    } else {
+        ""
+    };
+    let confusable_warning = if is_non_ascii {
+        " (Warning: contains non-ASCII characters; inspect carefully)"
+    } else {
+        ""
+    };
+    let retry_text = retries.map_or("PIN retry count unavailable.".to_owned(), |n| {
+        if n == 1 {
+            "Warning: only 1 PIN retry remains. An incorrect PIN will lock this security key."
+                .to_owned()
+        } else if n <= 3 {
+            format!("Warning: only {n} PIN retries remain.")
+        } else {
+            format!("PIN retries remaining: {n}.")
+        }
+    });
+
+    format!(
+        "Security key: {authenticator}\n\
+         Website / RP: {rp_id}{confusable_warning}\n\
+         {account_lines}\n\
+         Fingerprint: {credential_fingerprint}\n\n\
+         This deletes this passkey from THIS security key. It does NOT delete your website/account, and the website is NOT notified. The action cannot be undone from Fido Manager. Fido Manager will not automatically retry an uncertain deletion.{incomplete_warning}\n\n\
+         Enter this security key's PIN to confirm deletion. {retry_text} One submission makes one attempt; there is no automatic retry."
+    )
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,6 +408,70 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn deletion_description_and_policy_are_exact() {
+        let full = deletion_description(
+            "Thetis FIDO2 Key",
+            "example.com",
+            Some("alice@example.com"),
+            Some("Alice Smith"),
+            "0123456789abcdef",
+            false,
+            Some(8),
+        );
+        assert!(full.contains("Security key: Thetis FIDO2 Key"));
+        assert!(full.contains("Website / RP: example.com"));
+        assert!(!full.contains("non-ASCII"));
+        assert!(full.contains("Display Name: Alice Smith"));
+        assert!(full.contains("User Name: alice@example.com"));
+        assert!(full.contains("Fingerprint: 0123456789abcdef"));
+        assert!(full.contains("This deletes this passkey from THIS security key."));
+        assert!(
+            full.contains(
+                "It does NOT delete your website/account, and the website is NOT notified."
+            )
+        );
+        assert!(full.contains("The action cannot be undone from Fido Manager."));
+        assert!(full.contains("Fido Manager will not automatically retry an uncertain deletion."));
+        assert!(!full.contains("other credentials may exist"));
+        assert!(full.contains("PIN retries remaining: 8."));
+
+        // Non-ASCII RP warning
+        let non_ascii = deletion_description(
+            "Thetis FIDO2 Key",
+            "exämple.com",
+            None,
+            None,
+            "0123456789abcdef",
+            false,
+            Some(3),
+        );
+        assert!(non_ascii.contains(
+            "Website / RP: exämple.com (Warning: contains non-ASCII characters; inspect carefully)"
+        ));
+        assert!(non_ascii.contains("Account: (No username stored)"));
+        assert!(non_ascii.contains("Warning: only 3 PIN retries remain."));
+
+        // Incomplete inventory warning
+        let incomplete = deletion_description(
+            "Thetis FIDO2 Key",
+            "example.com",
+            Some("bob"),
+            None,
+            "0123456789abcdef",
+            true,
+            Some(1),
+        );
+        assert!(incomplete.contains("User Name: bob"));
+        assert!(incomplete.contains(
+            "Warning: other credentials may exist that Fido Manager could not enumerate"
+        ));
+        assert!(incomplete.contains(
+            "Warning: only 1 PIN retry remains. An incorrect PIN will lock this security key."
+        ));
+    }
+
     #[test]
     fn mutation_confirmation_is_native_only_exact_and_discards_third_secret() {
         use fido_auth::mutation::PinOperation;

@@ -7,11 +7,13 @@ const EXPECTED_COMMANDS = [
   'foundation_status',
   'list_authenticators',
   'boogoocypher_status',
+  'delete_credential',
 ];
 const EXPECTED_PERMISSIONS = [
   'allow-foundation-status',
   'allow-list-authenticators',
   'allow-boogoocypher-status',
+  'allow-delete-credential',
 ];
 
 function listFiles(root, predicate) {
@@ -148,6 +150,19 @@ if (
   );
 }
 
+const deleteCredentialCmd = discoveredCommands.find(
+  ({ name }) => name === 'delete_credential',
+);
+if (
+  !deleteCredentialCmd ||
+  deleteCredentialCmd.parameters.replace(/\s+/g, '').replace(/,$/, '') !==
+    "app:tauri::AppHandle,state:tauri::State<'_,AppState>,request:DeleteCredentialRequest"
+) {
+  throw new Error(
+    'delete_credential must accept only AppHandle, AppState and DeleteCredentialRequest.',
+  );
+}
+
 // foundation_status retrieves a backend-created snapshot; it must never return authority.
 const commandSource = readFileSync('src-tauri/src/commands/mod.rs', 'utf8');
 // Discovery classification is backend-owned and carries no error text or authority.
@@ -226,6 +241,37 @@ assertExactArray(
     'pin_check_passed',
   ],
   'AuthenticatorSummary contains an unreviewed renderer field.',
+);
+
+const deleteRequestFields = [
+  ...(
+    commandSource.match(
+      /pub struct DeleteCredentialRequest \{([^}]+)\}/s,
+    )?.[1] ?? ''
+  ).matchAll(/^\s*(?:#\[[^\]]*\]\s*)*pub\s+([a-z0-9_]+):/gm),
+].map((m) => m[1]);
+assertExactArray(
+  deleteRequestFields,
+  [
+    'display_device_handle',
+    'device_generation',
+    'enumeration_epoch',
+    'credential_handle',
+  ],
+  'DeleteCredentialRequest contains an unreviewed renderer field.',
+);
+
+const deleteResponseFields = [
+  ...(
+    commandSource.match(
+      /pub struct DeleteCredentialResponse \{([^}]+)\}/s,
+    )?.[1] ?? ''
+  ).matchAll(/^\s*(?:#\[[^\]]*\]\s*)*pub\s+([a-z0-9_]+):/gm),
+].map((m) => m[1]);
+assertExactArray(
+  deleteResponseFields,
+  ['outcome', 'message', 'recovery_required'],
+  'DeleteCredentialResponse contains an unreviewed renderer field.',
 );
 
 const appSource = readFileSync('src-tauri/src/lib.rs', 'utf8');

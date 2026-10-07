@@ -33,6 +33,7 @@ enum Purpose {
     Mutation(PinOperation),
     Recovery(PinOperation),
     DeletionRecovery,
+    Deletion,
 }
 enum Reply {
     Inspection(Sender<PinCompletion>),
@@ -213,6 +214,30 @@ pub unsafe fn present_deletion_recovery(
         )
     }
 }
+/// # Safety
+/// Parent must be the live trusted main NSWindow, called on AppKit's main thread.
+pub unsafe fn present_deletion(
+    parent: *mut c_void,
+    request: PromptRequest,
+    controller: Controller,
+    reply: Sender<PinCompletion>,
+    retries: Option<u8>,
+    revocation: (Arc<AtomicU64>, u64),
+    description: &str,
+) -> Result<(), &'static str> {
+    // SAFETY: forwards the trusted NSWindow contract; collects PIN for credential deletion.
+    unsafe {
+        present_sheet(
+            parent,
+            request,
+            controller,
+            Reply::Inspection(reply),
+            retries,
+            revocation,
+            (description, Purpose::Deletion),
+        )
+    }
+}
 unsafe fn present_sheet(
     parent: *mut c_void,
     request: PromptRequest,
@@ -248,6 +273,7 @@ unsafe fn present_sheet(
         Purpose::Mutation(op) => op.title(),
         Purpose::Recovery(_) => "Acknowledge uncertain PIN operation",
         Purpose::DeletionRecovery => "Acknowledge uncertain credential deletion",
+        Purpose::Deletion => "Delete passkey",
     }));
     let retry_text = retries.map_or("Retry count unavailable.".to_owned(), |n| {
         if n <= 3 {
@@ -261,7 +287,7 @@ unsafe fn present_sheet(
             "Selected key: {target_label}. Inspect stored credentials and passkeys. This read-only operation will not change credentials. Enter this key's PIN. {retry_text} One submission makes one attempt; there is no automatic retry."
         ),
         Purpose::Mutation(op) => crate::mutation_description(op, target_label, retries),
-        Purpose::DeletionRecovery => target_label.to_owned(),
+        Purpose::DeletionRecovery | Purpose::Deletion => target_label.to_owned(),
         Purpose::Recovery(op) => format!(
             "The previous {} result could not be confirmed. {} {} Acknowledging allows future security key operations but preserves the uncertain historical result. This does not confirm success or failure and makes no PIN attempt.",
             op.title(),
@@ -280,6 +306,7 @@ unsafe fn present_sheet(
         Purpose::Inspection => "Authenticate",
         Purpose::Mutation(op) => op.title(),
         Purpose::Recovery(_) | Purpose::DeletionRecovery => "Acknowledge uncertainty",
+        Purpose::Deletion => "Delete Passkey",
     }));
     approve.setKeyEquivalent(&NSString::from_str(""));
     approve.setEnabled(matches!(purpose, Purpose::Inspection));
@@ -300,7 +327,7 @@ unsafe fn present_sheet(
     );
     input.setPlaceholderString(Some(&NSString::from_str("Security key PIN")));
     let last_retry_ack = if match purpose {
-        Purpose::Inspection => retries == Some(1),
+        Purpose::Inspection | Purpose::Deletion => retries == Some(1),
         Purpose::Mutation(op) => crate::last_retry_ack_required(op, retries),
         Purpose::Recovery(_) | Purpose::DeletionRecovery => true,
     } {
@@ -557,7 +584,7 @@ fn complete(binding: PromptBinding, response: Option<NSModalResponse>) {
                     PromptOutcome::Cancelled(binding)
                 } else {
                     let approved = match s.purpose {
-                        Purpose::Inspection => {
+                        Purpose::Inspection | Purpose::Deletion => {
                             s.pin = collect_field(&s.input);
                             s.pin.is_some()
                         }

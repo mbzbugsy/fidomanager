@@ -31,6 +31,7 @@ pub use supervisor::{
     SupervisorState, SupervisorStatus, WorkerLauncher,
 };
 
+pub use fido_core::{DeviceGeneration, MutationOutcome};
 pub use fido_worker_protocol::WorkerGeneration;
 
 use std::collections::VecDeque;

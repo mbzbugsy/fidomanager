@@ -499,6 +499,50 @@ try {
       );
     }
   }
+  for (const field of [
+    'credential_id',
+    'user_id',
+    'rp_hash',
+    'native_handle',
+    'pin',
+  ]) {
+    mutate(
+      'src-tauri/src/commands/mod.rs',
+      (text) =>
+        text.replace(
+          'pub struct DeleteCredentialRequest {',
+          'pub struct DeleteCredentialRequest {\n    pub ' +
+            field +
+            ': String,',
+        ),
+      /DeleteCredentialRequest contains an unreviewed renderer field/,
+      'DeleteCredentialRequest ' + field,
+    );
+  }
+  for (const field of ['permit', 'receipt', 'journal_path', 'pin']) {
+    mutate(
+      'src-tauri/src/commands/mod.rs',
+      (text) =>
+        text.replace(
+          'pub struct DeleteCredentialResponse {',
+          'pub struct DeleteCredentialResponse {\n    pub ' +
+            field +
+            ': String,',
+        ),
+      /DeleteCredentialResponse contains an unreviewed renderer field/,
+      'DeleteCredentialResponse ' + field,
+    );
+  }
+  mutate(
+    'src-tauri/src/commands/mod.rs',
+    (text) =>
+      text.replace(
+        'request: DeleteCredentialRequest,',
+        'request: DeleteCredentialRequest,\n    pin: String,',
+      ),
+    /delete_credential must accept only AppHandle, AppState and DeleteCredentialRequest/,
+    'delete_credential with pin parameter',
+  );
   assert.equal(check().status, 0, 'All restored M4 fixtures must pass.');
   console.log(
     `Renderer boundary regression checks passed (${checks} checker executions; 8 denied crates, command/permission allowlists, service separation and M4 controls).`,
