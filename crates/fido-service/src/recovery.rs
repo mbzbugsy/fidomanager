@@ -39,12 +39,13 @@ pub use fido_auth::mutation::{PinOperation, pin_call_outcome};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum JournalOperation {
+pub enum RecoverableOperation {
     SetPin,
     ChangePin,
     DeleteCredential,
 }
-impl From<PinOperation> for JournalOperation {
+type JournalOperation = RecoverableOperation;
+impl From<PinOperation> for RecoverableOperation {
     fn from(operation: PinOperation) -> Self {
         match operation {
             PinOperation::SetPin => Self::SetPin,
@@ -52,7 +53,7 @@ impl From<PinOperation> for JournalOperation {
         }
     }
 }
-impl JournalOperation {
+impl RecoverableOperation {
     fn pin(self) -> Option<PinOperation> {
         match self {
             Self::SetPin => Some(PinOperation::SetPin),
@@ -165,6 +166,14 @@ impl RecoveryJournal {
     }
     pub fn phase(&self) -> Option<JournalPhase> {
         self.record.as_ref().map(|r| r.phase)
+    }
+    pub(crate) fn recoverable_operation(&self) -> Option<RecoverableOperation> {
+        self.can_acknowledge()
+            .then(|| self.record.as_ref().map(|r| r.operation))
+            .flatten()
+    }
+    pub(crate) fn incident_created_unix_secs(&self) -> Option<u64> {
+        self.record.as_ref().map(|r| r.created_unix_secs)
     }
     pub fn operation(&self) -> Option<PinOperation> {
         self.record

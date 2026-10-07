@@ -178,6 +178,7 @@ const build = (
       ...group,
       credentials: group.credentials.map((credential) => ({
         ...credential,
+        credentialFingerprint: '001122aabbcc',
         handle: `opaque-credential-${handleCounter++}`,
       })),
     })),
@@ -331,6 +332,7 @@ describe('connected-key credential display', () => {
     expect(result).toContain('Only Display');
     expect(result).toContain('>Passkey<');
     expect(result).not.toContain('credential-sub');
+    expect(result.match(/Fingerprint: 001122aabbcc/g)?.length).toBe(3);
   });
   it('groups several RPs with their own counts', () => {
     const result = html(

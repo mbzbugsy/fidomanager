@@ -123,6 +123,9 @@
                     {#if labels.secondary}<span class="credential-sub"
                         >{labels.secondary}</span
                       >{/if}
+                    <span class="credential-fingerprint"
+                      >Fingerprint: {credential.credentialFingerprint}</span
+                    >
                   </li>
                 {/each}
               </ul>

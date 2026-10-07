@@ -21,6 +21,12 @@ pub struct MutationCompletion {
     pub secrets: Option<fido_auth::mutation::PinMutationSecrets>,
 }
 
+/// Deletion recovery cannot submit PIN secrets or masquerade as PIN recovery.
+pub struct DeletionRecoveryCompletion {
+    pub binding: PromptBinding,
+    pub outcome: PromptOutcome,
+}
+
 pub struct PinCompletion {
     pub binding: PromptBinding,
     pub outcome: PromptOutcome,

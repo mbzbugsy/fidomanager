@@ -557,7 +557,7 @@ for (const file of [
 }
 for (const file of rendererFiles) {
   if (
-    /\b(?:OperationPermit|OperationIntent|DeleteCredentialIntent|DeleteCredentialPermit|ExactCredentialTarget|PinMutationSecrets|PinMutationDispatchPermit|MutationCompletion|WorkflowId|PromptInstanceId|recovery_journal|journal_path|dispatch_capable|current_pin|new_pin|confirm_pin)\b/.test(
+    /\b(?:OperationPermit|OperationIntent|DeleteCredentialIntent|DeleteCredentialPermit|ExactCredentialTarget|DeletionIdentity|DeletionRecoveryCompletion|RecoverableOperation|CredentialDeletionDispatchPermit|DurableCredentialDeletionDispatch|PinMutationSecrets|PinMutationDispatchPermit|MutationCompletion|WorkflowId|PromptInstanceId|recovery_journal|journal_path|dispatch_capable|current_pin|new_pin|confirm_pin)\b/.test(
       readFileSync(file, 'utf8'),
     )
   ) {
@@ -592,6 +592,7 @@ for (const [file, name] of [
   ['crates/fido-service/src/mutation.rs', 'PinMutationDispatchPermit'],
   ['crates/fido-service/src/recovery.rs', 'DurablePinDispatch'],
   ['crates/fido-service/src/deletion.rs', 'DeleteCredentialPermit'],
+  ['crates/fido-service/src/deletion.rs', 'CredentialDeletionDispatchPermit'],
   ['crates/fido-service/src/recovery.rs', 'DurableCredentialDeletionDispatch'],
 ]) {
   const text = readFileSync(file, 'utf8');
@@ -662,3 +663,82 @@ if (
 console.log(
   'Renderer boundary check passed; only reviewed backend PIN mutation path.',
 );
+
+// M5 deletion authority remains private, consumed once, and minted only after durable ordering.
+const deletionService = readFileSync(
+  'crates/fido-service/src/deletion.rs',
+  'utf8',
+);
+if (
+  /pub(?:\([^)]*\))? (?:struct|enum) CredentialDeletionDispatchPermit/.test(
+    deletionService,
+  )
+)
+  throw new Error('M5 dispatch authority must remain private.');
+for (const helper of [
+  'approve_delete_credential',
+  'write_delete_pending',
+  'mark_delete_dispatch_capable',
+  'reserve_delete_credential',
+]) {
+  if (new RegExp('pub(?:\\([^)]*\\))? fn ' + helper).test(deletionService))
+    throw new Error('M5 deletion helper must remain private.');
+}
+if (!/permit: CredentialDeletionDispatchPermit,/.test(deletionService))
+  throw new Error('M5 dispatch must consume its capability by value.');
+if (
+  !/durable: crate::recovery::DurableCredentialDeletionDispatch,/.test(
+    deletionService,
+  )
+)
+  throw new Error('M5 dispatch capability must own a durable journal receipt.');
+if (
+  !/self\.write_delete_pending\(&mut reservation, &permit\)\?;\s*let dispatch = self\.mark_delete_dispatch_capable\(/.test(
+    deletionService,
+  )
+)
+  throw new Error(
+    'M5 dispatch requires durable Pending and DispatchCapable ordering.',
+  );
+if (
+  !/self\.persist\(record\)\?;\s*Ok\(DurableCredentialDeletionDispatch/.test(
+    recoveryService,
+  )
+)
+  throw new Error(
+    'M5 durable receipt requires successful journal persistence.',
+  );
+const inspectionService = readFileSync(
+  'crates/fido-service/src/inspection.rs',
+  'utf8',
+);
+for (const [name, fields] of [
+  [
+    'CredentialDisplay',
+    ['handle', 'user_name', 'display_name', 'credential_fingerprint'],
+  ],
+  ['RpDisplay', ['verified_text', 'issue', 'credentials']],
+  [
+    'InspectionSnapshot',
+    [
+      'device_handle',
+      'device_generation',
+      'epoch',
+      'authenticator',
+      'assessment',
+      'rps',
+    ],
+  ],
+]) {
+  const body =
+    inspectionService.match(
+      new RegExp('pub struct ' + name + ' \\{([^}]+)\\}', 's'),
+    )?.[1] ?? '';
+  assertExactArray(
+    [...body.matchAll(/pub ([a-z0-9_]+):/g)].map((m) => m[1]),
+    fields,
+    'M5 raw identity cannot enter renderer-facing DTOs.',
+  );
+  if (/DeletionIdentity|ExactCredentialTarget|Vec<u8>|\[u8;/.test(body))
+    throw new Error('M5 raw identity cannot enter renderer-facing DTOs.');
+}

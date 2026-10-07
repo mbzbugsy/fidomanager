@@ -3,8 +3,7 @@
 //! The public API deliberately exposes owned values only. Native paths remain opaque inside the
 //! worker and libfido2 pointers never cross this crate boundary.
 
-#[cfg(any(test, all(feature = "native-libfido2", target_os = "macos")))]
-mod deletion;
+pub mod deletion;
 pub mod inspection;
 #[cfg(any(test, all(feature = "native-libfido2", target_os = "macos")))]
 mod mutation;
@@ -215,7 +214,7 @@ pub trait NativeCredentialDeletionSession: Send {
     fn pin_retries(&self) -> u8;
     fn execute(
         self: Box<Self>,
-        credential_id: Vec<u8>,
+        target: fido_core::inventory::DeletionIdentity,
         pin: fido_auth::PinSecret,
         deadline: NativeDeadline,
     ) -> fido_auth::deletion::DeleteCredentialResult;

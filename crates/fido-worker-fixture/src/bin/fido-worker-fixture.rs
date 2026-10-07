@@ -68,6 +68,8 @@ struct ScriptedBackend {
     wrong_pin: bool,
     two_devices: bool,
     mutation_mode: Option<String>,
+    deletion_mode: Option<String>,
+    deletion_log: Option<std::path::PathBuf>,
 }
 
 fn apply(step: Step) {
@@ -86,6 +88,7 @@ fn apply(step: Step) {
 }
 
 struct AuthFixture {
+    deletion_inventory: bool,
     cleanup_failed: bool,
     wrong_pin: bool,
     kind: fido_auth::GrantKind,
@@ -103,12 +106,17 @@ impl fido_libfido2::NativeAuthenticationSession for AuthFixture {
         pin: fido_auth::PinSecret,
         deadline: NativeDeadline,
     ) -> fido_libfido2::inspection::NativeInspection {
+        let deletion_inventory = self.deletion_inventory;
         let evidence = self.validate(binding, pin, deadline);
         fido_libfido2::inspection::NativeInspection {
             evidence,
-            inventory: Some(fido_core::inventory::OwnedInventory {
-                metadata_existing: 0,
-                rps: Vec::new(),
+            inventory: Some(if deletion_inventory {
+                fido_worker_fixture::inventory()
+            } else {
+                fido_core::inventory::OwnedInventory {
+                    metadata_existing: 0,
+                    rps: Vec::new(),
+                }
             }),
             error: None,
         }
@@ -169,7 +177,103 @@ impl fido_libfido2::NativePinMutationSession for MutationFixture {
         )
     }
 }
+struct DeletionFixture {
+    mode: String,
+    log: Option<std::path::PathBuf>,
+    selected_key: NativeDeviceKey,
+}
+impl DeletionFixture {
+    fn record(&self, event: &str) {
+        if let Some(path) = &self.log {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .unwrap_or_else(|_| exit_immediately(exit::OS));
+            writeln!(file, "{event}").unwrap_or_else(|_| exit_immediately(exit::OS));
+            file.sync_all()
+                .unwrap_or_else(|_| exit_immediately(exit::OS));
+        }
+    }
+}
+impl fido_libfido2::NativeCredentialDeletionSession for DeletionFixture {
+    fn kind(&self) -> fido_auth::GrantKind {
+        fido_auth::GrantKind::CredMan
+    }
+    fn pin_retries(&self) -> u8 {
+        8
+    }
+    fn execute(
+        self: Box<Self>,
+        target: fido_core::inventory::DeletionIdentity,
+        pin: fido_auth::PinSecret,
+        _: NativeDeadline,
+    ) -> fido_auth::deletion::DeleteCredentialResult {
+        drop(pin);
+        self.record("proof");
+        let mut credentials = fido_worker_fixture::inventory().rps.remove(0).credentials;
+        match self.mode.as_str() {
+            "absent" => credentials.clear(),
+            "ambiguous" => credentials.push(credentials[0].clone()),
+            "wrong-user" => credentials[0].user_id = Some(vec![255]),
+            "malformed" => credentials[0].user_name = Some("bad\n".into()),
+            "wrong-id" => credentials[0].id = vec![255],
+            _ => {}
+        }
+        if self.selected_key
+            != NativeDeviceKey::from_bytes(b"ioreg://100".to_vec())
+                .unwrap_or_else(|_| panic!("fixture key"))
+            || !fido_libfido2::deletion::matches_current_credentials(&target, &credentials)
+        {
+            self.record("proof-rejected");
+            return fido_auth::deletion::DeleteCredentialResult::from_code(false, -1, true);
+        }
+        self.record("entered");
+        match self.mode.as_str() {
+            "crash" => exit_immediately(134),
+            "lost-response" => exit_immediately(0),
+            "hang" => apply(Step::Hang),
+            _ => {}
+        }
+        fido_auth::deletion::DeleteCredentialResult::from_code(
+            true,
+            match self.mode.as_str() {
+                "reject" => 0x2e,
+                "unknown" => -2,
+                _ => 0,
+            },
+            self.mode != "cleanup",
+        )
+    }
+}
 impl NativeDiscoveryBackend for ScriptedBackend {
+    fn prepare_credential_deletion(
+        &mut self,
+        key: &NativeDeviceKey,
+        _: NativeDeadline,
+    ) -> Result<Box<dyn fido_libfido2::NativeCredentialDeletionSession>, NativeError> {
+        let mode = self.deletion_mode.clone().ok_or(NativeError::new(
+            fido_libfido2::NativeErrorKind::Unsupported,
+            None,
+        ))?;
+        if mode == "prepare-failure" {
+            return Err(NativeError::new(
+                fido_libfido2::NativeErrorKind::Unsupported,
+                None,
+            ));
+        }
+        let session = DeletionFixture {
+            mode: mode.clone(),
+            log: self.deletion_log.clone(),
+            selected_key: if mode == "wrong-device" {
+                NativeDeviceKey::from_bytes(b"ioreg://101".to_vec())?
+            } else {
+                key.clone()
+            },
+        };
+        session.record("prepared");
+        Ok(Box::new(session))
+    }
     fn prepare_pin_mutation(
         &mut self,
         _: &NativeDeviceKey,
@@ -194,6 +298,7 @@ impl NativeDiscoveryBackend for ScriptedBackend {
         _: NativeDeadline,
     ) -> Result<Box<dyn fido_libfido2::NativeAuthenticationSession>, NativeError> {
         Ok(Box::new(AuthFixture {
+            deletion_inventory: self.deletion_mode.is_some(),
             cleanup_failed: self.cleanup_failed,
             wrong_pin: self.wrong_pin,
             kind: if key == &NativeDeviceKey::from_bytes(b"ioreg://101".to_vec())? {
@@ -249,6 +354,8 @@ impl NativeDiscoveryBackend for ScriptedBackend {
 fn main() {
     let mut authentication = false;
     let mut mutation_mode = None;
+    let mut deletion_mode = None;
+    let mut deletion_log = None;
     let mut cleanup_failed = false;
     let mut wrong_pin = false;
     let mut two_devices = false;
@@ -260,6 +367,10 @@ fn main() {
             authentication = true;
         } else if let Some(mode) = argument.strip_prefix("--mutation=") {
             mutation_mode = Some(mode.to_owned());
+        } else if let Some(mode) = argument.strip_prefix("--deletion=") {
+            deletion_mode = Some(mode.to_owned());
+        } else if let Some(path) = argument.strip_prefix("--deletion-log=") {
+            deletion_log = Some(std::path::PathBuf::from(path));
         } else if argument == "--cleanup-failed" {
             cleanup_failed = true;
         } else if argument == "--wrong-pin" {
@@ -306,6 +417,8 @@ fn main() {
                 wrong_pin,
                 two_devices,
                 mutation_mode,
+                deletion_mode,
+                deletion_log,
             },
             RuntimeConfig::default(),
             Some(Box::new(channel)),
@@ -327,6 +440,8 @@ fn main() {
                 wrong_pin,
                 two_devices,
                 mutation_mode,
+                deletion_mode,
+                deletion_log,
             },
             RuntimeConfig::default(),
         ),

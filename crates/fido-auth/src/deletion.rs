@@ -38,7 +38,7 @@ pub fn select_delete_kind<'a>(
         return None;
     }
 
-    if permissions && (credman || preview) {
+    if permissions && credman {
         Some(GrantKind::CredMan)
     } else if !permissions && !credman && preview && versions.iter().any(|v| v == "FIDO_2_0") {
         Some(GrantKind::LegacyUnscoped)
@@ -157,6 +157,19 @@ mod tests {
             ),
             Some(GrantKind::LegacyUnscoped)
         );
+        for versions in [&v21, &vec!["FIDO_2_0".into()]] {
+            assert_eq!(
+                select_delete_kind(
+                    versions,
+                    [
+                        ("clientPin", true),
+                        ("pinUvAuthToken", true),
+                        ("credentialMgmtPreview", true)
+                    ]
+                ),
+                None
+            );
+        }
         assert_eq!(
             select_delete_kind(&v21, [("clientPin", true), ("credMgmt", true)]),
             None

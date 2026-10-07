@@ -120,11 +120,12 @@ impl MutationReservation {
     }
 }
 
-pub struct RecoveryReservation {
-    reservation: AuthenticationReservation,
+pub(crate) struct RecoveryReservation {
+    pub(crate) reservation: AuthenticationReservation,
     authority_epoch: Arc<AtomicU64>,
 }
 impl RecoveryReservation {
+    #[cfg(test)]
     pub fn prompt(&self) -> &PromptRequest {
         &self.reservation.prompt
     }
@@ -442,6 +443,10 @@ impl AuthenticationAuthority {
     }
     /// Only a valid, unresolved dispatch record can offer acknowledgement. Poisoned storage
     /// exposes informational failure only; it cannot be acknowledged away.
+    pub fn recoverable_operation(&self) -> Option<crate::recovery::RecoverableOperation> {
+        self.recovery.lock().ok()?.as_ref()?.recoverable_operation()
+    }
+
     pub fn recoverable_pin_operation(&self) -> Option<PinOperation> {
         self.recovery
             .lock()
@@ -737,7 +742,7 @@ impl AuthenticationAuthority {
         }
         self.finish_sensitive(r.reservation, completion, quiescence)
     }
-    fn finish_sensitive(
+    pub(crate) fn finish_sensitive(
         &self,
         r: AuthenticationReservation,
         completion: WorkflowCompletion,
@@ -766,14 +771,14 @@ impl AuthenticationAuthority {
         Ok(())
     }
 
-    pub fn reserve_recovery(&self) -> Result<RecoveryReservation, MutationError> {
+    pub(crate) fn reserve_recovery(&self) -> Result<RecoveryReservation, MutationError> {
         Ok(RecoveryReservation {
             reservation: self.reserve_sensitive(SensitiveWorkflowKind::Recovery)?,
             authority_epoch: Arc::clone(&self.epoch),
         })
     }
 
-    pub fn finish_recovery_foundation(
+    pub(crate) fn finish_recovery_foundation(
         &self,
         r: RecoveryReservation,
         completion: WorkflowCompletion,
@@ -791,7 +796,7 @@ impl AuthenticationAuthority {
     /// incident as NotDispatched. No automatic probing or passive read implementation. A corrupt
     /// journal cannot be cleared by this primitive. Remaining-retry display belongs to the future
     /// explicit verification workflow, which is not implemented here.
-    pub fn resolve_recovery(
+    pub(crate) fn resolve_recovery(
         &self,
         r: &mut RecoveryReservation,
         resolution: Resolution,

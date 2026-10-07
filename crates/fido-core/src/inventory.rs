@@ -64,6 +64,26 @@ pub struct OwnedInventory {
     pub metadata_existing: u64,
     pub rps: Vec<OwnedRp>,
 }
+/// Backend/worker transport identity. Never a renderer DTO or deletion capability.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeletionIdentity {
+    pub rp_hash: [u8; 32],
+    pub rp_text: String,
+    pub credential_id: Vec<u8>,
+    pub user_id: Option<Vec<u8>>,
+}
+impl DeletionIdentity {
+    pub fn within_bounds(&self) -> bool {
+        safe_text(&self.rp_text, MAX_RP_TEXT_BYTES)
+            && !self.credential_id.is_empty()
+            && self.credential_id.len() <= MAX_CREDENTIAL_ID_BYTES
+            && self
+                .user_id
+                .as_ref()
+                .is_none_or(|id| !id.is_empty() && id.len() <= MAX_USER_ID_BYTES)
+    }
+}
 macro_rules! redacted_debug {
     ($($ty:ty),+) => {$(impl std::fmt::Debug for $ty {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -71,7 +91,7 @@ macro_rules! redacted_debug {
         }
     })+};
 }
-redacted_debug!(OwnedCredential, OwnedRp, OwnedInventory);
+redacted_debug!(OwnedCredential, OwnedRp, OwnedInventory, DeletionIdentity);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

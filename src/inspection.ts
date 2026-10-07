@@ -15,6 +15,7 @@ export type InspectionSnapshot = {
     issue: string | null;
     credentials: {
       handle: string;
+      credentialFingerprint: string;
       userName: string | null;
       displayName: string | null;
     }[];

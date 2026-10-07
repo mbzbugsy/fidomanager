@@ -36,10 +36,12 @@ pub enum Progress {
     PinSubmitted,
 }
 
-/// Deliberately contains no grant/acquisition/worker identity, token or PIN.
+/// Backend result: inspection worker is provenance for publication, never deletion authority.
+/// No token or PIN is returned.
 #[derive(Debug)]
 pub struct AuthenticationResult {
     pub inventory: Option<fido_core::inventory::OwnedInventory>,
+    pub inspection_worker: Option<crate::WorkerGeneration>,
     pub inspection_error: Option<fido_worker_protocol::InspectionError>,
     pub status: Status,
     pub grant_kind: Option<GrantKind>,
@@ -326,6 +328,7 @@ impl AuthenticationAuthority {
         let mut presented = false;
         let mut result = AuthenticationResult {
             inventory: None,
+            inspection_worker: None,
             inspection_error: None,
             status: Status::Unsupported,
             grant_kind: None,
@@ -493,6 +496,8 @@ impl AuthenticationAuthority {
                                 .filter(|i| i.within_bounds())
                                 .ok_or(Status::Uncertain)?;
                             result.inventory = Some(inventory);
+                            result.inspection_worker =
+                                Some(crate::WorkerGeneration(binding.worker_generation));
                         } else if inventory.is_some() {
                             return Err(Status::Uncertain);
                         }

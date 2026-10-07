@@ -11,6 +11,7 @@ pub(super) enum NativeAction {
     Inspect,
     Pin(fido_service::recovery::PinOperation),
     Recovery,
+    DeletionRecovery,
 }
 #[derive(Clone, PartialEq, Eq)]
 pub struct NativeTarget {
@@ -55,6 +56,7 @@ impl NativeTarget {
             NativeAction::Inspect => "Inspect credentials…".into(),
             NativeAction::Pin(op) => format!("{}…", op.title()),
             NativeAction::Recovery => "Review uncertain PIN operation…".into(),
+            NativeAction::DeletionRecovery => "Review uncertain credential deletion…".into(),
         }
     }
 }
@@ -73,7 +75,10 @@ enum MenuGroup<'a> {
 fn group_targets(targets: &[NativeTarget]) -> Vec<MenuGroup<'_>> {
     let mut groups = Vec::new();
     for target in targets {
-        if target.action == NativeAction::Recovery {
+        if matches!(
+            target.action,
+            NativeAction::Recovery | NativeAction::DeletionRecovery
+        ) {
             groups.push(MenuGroup::Recovery(target));
             continue;
         }
@@ -148,14 +153,20 @@ impl AuthenticationMenu {
         authority: &fido_service::authentication::AuthenticationAuthority,
     ) {
         let barrier = authority.sensitive_blocked();
-        let recoverable = authority.recoverable_pin_operation().is_some();
+        let recoverable = authority.recoverable_operation();
         if barrier {
-            targets = if recoverable {
+            targets = if let Some(operation) = recoverable {
                 vec![NativeTarget {
-                    id: "recover-pin".into(),
+                    id: "recover-operation".into(),
                     handle: authentication::DeviceHandle::from_raw(0),
                     label: String::new(),
-                    action: NativeAction::Recovery,
+                    action: if operation
+                        == fido_service::recovery::RecoverableOperation::DeleteCredential
+                    {
+                        NativeAction::DeletionRecovery
+                    } else {
+                        NativeAction::Recovery
+                    },
                 }]
             } else {
                 Vec::new()
@@ -406,10 +417,19 @@ pub fn start(app: &tauri::AppHandle, id: &str) {
             } else {
                 store.clear();
             }
-            if let Some(inventory) = result.inventory.take() {
+            if let Some(inventory) = result
+                .inventory
+                .take()
+                .filter(|_| result.inspection_worker == Some(worker_generation))
+            {
                 let assessment = inventory.assess();
                 if store
-                    .replace(inventory_device, snapshot_label, inventory)
+                    .replace(
+                        inventory_device,
+                        worker_generation,
+                        snapshot_label,
+                        inventory,
+                    )
                     .is_ok()
                 {
                     eprintln!(
@@ -603,19 +623,27 @@ mod tests {
 
     #[test]
     fn recovery_stays_at_the_top_level_without_a_device_identity() {
-        let target = NativeTarget {
-            id: "recover-pin".into(),
-            handle: authentication::DeviceHandle::from_raw(0),
-            label: String::new(),
-            action: NativeAction::Recovery,
-        };
-        let targets = [target];
-        let groups = group_targets(&targets);
-        let [MenuGroup::Recovery(action)] = groups.as_slice() else {
-            panic!("expected top-level recovery");
-        };
-        assert_eq!(action.id, "recover-pin");
-        assert_eq!(action.title(), "Review uncertain PIN operation…");
-        assert!(select_target(&targets, &action.title()).is_none());
+        for (kind, title) in [
+            (NativeAction::Recovery, "Review uncertain PIN operation…"),
+            (
+                NativeAction::DeletionRecovery,
+                "Review uncertain credential deletion…",
+            ),
+        ] {
+            let target = NativeTarget {
+                id: "recover-operation".into(),
+                handle: authentication::DeviceHandle::from_raw(0),
+                label: String::new(),
+                action: kind,
+            };
+            let targets = [target];
+            let groups = group_targets(&targets);
+            let [MenuGroup::Recovery(action)] = groups.as_slice() else {
+                panic!("expected top-level recovery");
+            };
+            assert_eq!(action.id, "recover-operation");
+            assert_eq!(action.title(), title);
+            assert!(select_target(&targets, &action.title()).is_none());
+        }
     }
 }

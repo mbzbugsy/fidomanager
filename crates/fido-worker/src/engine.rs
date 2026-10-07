@@ -276,7 +276,7 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
         &mut self,
         request: &WorkerRequestEnvelope,
         binding: fido_auth::deletion::DeleteCredentialBinding,
-        credential_id: Vec<u8>,
+        target: fido_core::inventory::DeletionIdentity,
         deadline: NativeDeadline,
     ) -> WorkerResponse {
         let session = self.deletion.take();
@@ -302,7 +302,7 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
         };
         WorkerResponse::CredentialDeletionCompleted {
             binding,
-            result: native.execute(credential_id, pin, deadline),
+            result: native.execute(target, pin, deadline),
         }
     }
 
@@ -458,15 +458,9 @@ impl<B: NativeDiscoveryBackend> WorkerEngine<B> {
             WorkerRequest::PrepareCredentialDeletion { device_id, binding } => {
                 self.prepare_credential_deletion(&request, *device_id, *binding, deadline)
             }
-            WorkerRequest::ExecuteCredentialDeletion {
-                binding,
-                credential_id,
-            } => self.execute_credential_deletion(
-                &request,
-                *binding,
-                credential_id.clone(),
-                deadline,
-            ),
+            WorkerRequest::ExecuteCredentialDeletion { binding, target } => {
+                self.execute_credential_deletion(&request, *binding, target.clone(), deadline)
+            }
             WorkerRequest::PreparePinMutation { device_id, binding } => {
                 self.prepare_pin_mutation(&request, *device_id, *binding, deadline)
             }
@@ -1216,6 +1210,14 @@ mod tests {
         }
         Ok(())
     }
+    fn deletion_target(credential_id: Vec<u8>) -> fido_core::inventory::DeletionIdentity {
+        fido_core::inventory::DeletionIdentity {
+            rp_hash: [1; 32],
+            rp_text: "example.com".into(),
+            credential_id,
+            user_id: None,
+        }
+    }
     struct DeletionBackend {
         calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         compatible: bool,
@@ -1237,11 +1239,11 @@ mod tests {
         }
         fn execute(
             self: Box<Self>,
-            credential_id: Vec<u8>,
+            target: fido_core::inventory::DeletionIdentity,
             pin: fido_auth::PinSecret,
             _: NativeDeadline,
         ) -> fido_auth::deletion::DeleteCredentialResult {
-            assert_eq!(credential_id, vec![1, 2, 3]);
+            assert_eq!(target.credential_id, vec![1, 2, 3]);
             drop(pin);
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             fido_auth::deletion::DeleteCredentialResult::from_code(true, 0, true)
@@ -1294,7 +1296,7 @@ mod tests {
             intent_digest: [9; 32],
         };
 
-        for scenario in 0..11 {
+        for scenario in 0..20 {
             let calls = Arc::new(AtomicUsize::new(0));
             let mut secret = Vec::new();
             let pin = PinSecret::collect(|bytes| {
@@ -1308,6 +1310,9 @@ mod tests {
             }
             if scenario == 9 {
                 secret.push(1);
+            }
+            if scenario == 16 {
+                secret[0] ^= 0xff;
             }
 
             let mut engine = WorkerEngine::new(
@@ -1326,16 +1331,26 @@ mod tests {
             ));
 
             if scenario != 1 {
+                let mut prepared_binding = binding;
+                if scenario == 13 {
+                    prepared_binding.session.device_generation = DeviceGeneration(2);
+                }
+                if scenario == 14 {
+                    prepared_binding.session.worker_generation = 2;
+                }
+                if scenario == 19 {
+                    prepared_binding.session.acquisition_id = AcquisitionId(0);
+                }
                 let prepared = engine.handle(request(
                     WorkerGeneration(1),
                     2,
                     WorkerRequest::PrepareCredentialDeletion {
-                        device_id: WorkerDeviceId(1),
-                        binding,
+                        device_id: WorkerDeviceId(if scenario == 12 { 99 } else { 1 }),
+                        binding: prepared_binding,
                     },
                     Some(DeviceGeneration(1)),
                 ));
-                if scenario == 10 {
+                if matches!(scenario, 10 | 12 | 13 | 14 | 19) {
                     assert!(matches!(prepared.response, WorkerResponse::Error { .. }));
                 } else {
                     assert!(matches!(
@@ -1349,9 +1364,28 @@ mod tests {
                 }
             }
 
+            if scenario == 11 || scenario == 15 {
+                let interrupt = engine.handle(request(
+                    WorkerGeneration(1),
+                    3,
+                    if scenario == 11 {
+                        WorkerRequest::PrepareCredentialDeletion {
+                            device_id: WorkerDeviceId(1),
+                            binding,
+                        }
+                    } else {
+                        WorkerRequest::GetDeviceInfo {
+                            device_id: WorkerDeviceId(1),
+                        }
+                    },
+                    Some(DeviceGeneration(1)),
+                ));
+                assert!(matches!(interrupt.response, WorkerResponse::Error { .. }));
+                assert!(engine.deletion.is_none() && engine.secret.is_none());
+            }
             let mut submitted = binding;
             let mut worker = WorkerGeneration(1);
-            let request_id = 3;
+            let request_id = if scenario == 17 { 2 } else { 3 };
             let mut credential_id = vec![1, 2, 3];
             match scenario {
                 2 => submitted.intent_digest = [8; 32],
@@ -1362,15 +1396,15 @@ mod tests {
                 7 => worker = WorkerGeneration(2),
                 _ => {}
             }
-            if scenario == 1 {
-                credential_id = vec![1, 2, 3];
+            if scenario == 18 {
+                credential_id.clear();
             }
             let response = engine.handle(request(
                 worker,
                 request_id,
                 WorkerRequest::ExecuteCredentialDeletion {
                     binding: submitted,
-                    credential_id,
+                    target: deletion_target(credential_id),
                 },
                 Some(submitted.session.device_generation),
             ));
@@ -1394,7 +1428,7 @@ mod tests {
                 8,
                 WorkerRequest::ExecuteCredentialDeletion {
                     binding,
-                    credential_id: vec![1, 2, 3],
+                    target: deletion_target(vec![1, 2, 3]),
                 },
                 Some(DeviceGeneration(1)),
             ));

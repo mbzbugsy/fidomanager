@@ -104,11 +104,11 @@ impl crate::NativeCredentialDeletionSession for Session {
 
     fn execute(
         mut self: Box<Self>,
-        credential_id: Vec<u8>,
+        target: fido_core::inventory::DeletionIdentity,
         pin: PinSecret,
         deadline: NativeDeadline,
     ) -> DeleteCredentialResult {
-        let result = crate::deletion::execute(&mut *self, credential_id, pin, deadline);
+        let result = crate::deletion::execute(&mut *self, target, pin, deadline);
         drop(self);
         result
     }
@@ -131,6 +131,16 @@ impl crate::deletion::DeletionNative for Session {
             return false;
         }
         self.device.set_timeout(deadline).is_ok()
+    }
+
+    fn prove(
+        &mut self,
+        target: &fido_core::inventory::DeletionIdentity,
+        pin: &PinSecret,
+        deadline: &NativeDeadline,
+    ) -> bool {
+        super::inspection::prove_deletion_target(&mut self.device, target, pin, deadline).is_ok()
+            && self.device.set_timeout(deadline).is_ok()
     }
 
     fn enter_once(&mut self, credential_id: &[u8], pin: &PinSecret) -> i32 {

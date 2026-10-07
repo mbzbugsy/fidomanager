@@ -19,7 +19,7 @@ use fido_auth::{AcquisitionBinding, AuthenticationEvidence, GrantKind};
 use fido_core::{Aaguid, DeviceGeneration, ExecutionQuiescence, MutationOutcome};
 use serde::{Deserialize, Serialize};
 
-pub const WORKER_PROTOCOL_VERSION: u16 = 6;
+pub const WORKER_PROTOCOL_VERSION: u16 = 7;
 /// Largest frame the service accepts from a worker (responses). Transport implementations must
 /// reject larger frames before deserialization, and before allocating their payload.
 pub const MAX_WORKER_FRAME_BYTES: usize = 1_048_576;
@@ -145,9 +145,8 @@ impl WorkerRequestEnvelope {
             }
         }
 
-        if let WorkerRequest::ExecuteCredentialDeletion { credential_id, .. } = &self.request
-            && (credential_id.is_empty()
-                || credential_id.len() > fido_core::inventory::MAX_CREDENTIAL_ID_BYTES)
+        if let WorkerRequest::ExecuteCredentialDeletion { target, .. } = &self.request
+            && !target.within_bounds()
         {
             return Err(WorkerRequestValidationError::InvalidCredentialId);
         }
@@ -165,7 +164,7 @@ impl WorkerRequestEnvelope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkerRequest {
     PrepareCredentialDeletion {
@@ -174,7 +173,7 @@ pub enum WorkerRequest {
     },
     ExecuteCredentialDeletion {
         binding: fido_auth::deletion::DeleteCredentialBinding,
-        credential_id: Vec<u8>,
+        target: fido_core::inventory::DeletionIdentity,
     },
     PreparePinMutation {
         device_id: WorkerDeviceId,
@@ -202,6 +201,13 @@ pub enum WorkerRequest {
     ValidateAuthentication {
         binding: AcquisitionBinding,
     },
+}
+
+// Future additions remain redacted by default, including all raw credential identity.
+impl std::fmt::Debug for WorkerRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkerRequest(<redacted>)")
+    }
 }
 
 impl WorkerRequest {
@@ -344,6 +350,33 @@ pub enum WorkerErrorCode {
 
 #[cfg(test)]
 mod tests {
+    fn deletion_target(credential_id: Vec<u8>) -> fido_core::inventory::DeletionIdentity {
+        fido_core::inventory::DeletionIdentity {
+            rp_hash: [1; 32],
+            rp_text: "example.com".into(),
+            credential_id,
+            user_id: None,
+        }
+    }
+    #[test]
+    fn request_debug_never_discloses_identity() {
+        let binding = fido_auth::deletion::DeleteCredentialBinding {
+            session: fido_auth::AcquisitionBinding {
+                worker_generation: 1,
+                device_generation: fido_core::DeviceGeneration(1),
+                workflow_id: fido_core::WorkflowId::from_raw(1),
+                prompt_instance_id: fido_core::PromptInstanceId::from_raw(1),
+                acquisition_id: fido_auth::AcquisitionId(1),
+            },
+            intent_digest: [9; 32],
+        };
+        let request = WorkerRequest::ExecuteCredentialDeletion {
+            binding,
+            target: deletion_target(vec![17, 19, 23]),
+        };
+        assert_eq!(format!("{request:?}"), "WorkerRequest(<redacted>)");
+    }
+
     use super::*;
 
     #[test]
@@ -431,7 +464,7 @@ mod tests {
             },
             WorkerRequest::ExecuteCredentialDeletion {
                 binding,
-                credential_id: vec![1, 2, 3],
+                target: deletion_target(vec![1, 2, 3]),
             },
         ] {
             let mutation = matches!(request, WorkerRequest::ExecuteCredentialDeletion { .. });
@@ -494,7 +527,7 @@ mod tests {
             let invalid = request_envelope(
                 WorkerRequest::ExecuteCredentialDeletion {
                     binding,
-                    credential_id,
+                    target: deletion_target(credential_id),
                 },
                 Some(DeviceGeneration(1)),
             );

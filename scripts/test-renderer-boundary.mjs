@@ -314,6 +314,12 @@ try {
     ['crates/fido-service/src/mutation.rs', 'OperationPermit'],
     ['crates/fido-service/src/mutation.rs', 'PinMutationDispatchPermit'],
     ['crates/fido-service/src/recovery.rs', 'DurablePinDispatch'],
+    ['crates/fido-service/src/deletion.rs', 'DeleteCredentialPermit'],
+    ['crates/fido-service/src/deletion.rs', 'CredentialDeletionDispatchPermit'],
+    [
+      'crates/fido-service/src/recovery.rs',
+      'DurableCredentialDeletionDispatch',
+    ],
   ]) {
     for (const trait of ['Serialize', 'Clone', 'Debug']) {
       mutate(
@@ -403,6 +409,11 @@ try {
   }
   for (const name of [
     'PinMutationSecrets',
+    'DeleteCredentialIntent',
+    'DeleteCredentialPermit',
+    'ExactCredentialTarget',
+    'DeletionIdentity',
+    'DeletionRecoveryCompletion',
     'PinMutationDispatchPermit',
     'current_pin',
     'new_pin',
@@ -414,6 +425,69 @@ try {
       /authority or recovery data must not enter renderer/,
       `renderer ${name}`,
     );
+  }
+
+  for (const [before, after, pattern] of [
+    [
+      'struct CredentialDeletionDispatchPermit',
+      'pub struct CredentialDeletionDispatchPermit',
+      /dispatch authority must remain private/,
+    ],
+    [
+      'permit: CredentialDeletionDispatchPermit,',
+      'permit: &CredentialDeletionDispatchPermit,',
+      /dispatch must consume its capability by value/,
+    ],
+    [
+      'self.write_delete_pending(&mut reservation, &permit)?;',
+      '',
+      /requires durable Pending and DispatchCapable ordering/,
+    ],
+    [
+      'let dispatch = self.mark_delete_dispatch_capable(',
+      'let dispatch = self.skip_durable_transition(',
+      /requires durable Pending and DispatchCapable ordering/,
+    ],
+    [
+      'durable: crate::recovery::DurableCredentialDeletionDispatch,',
+      '',
+      /dispatch capability must own a durable journal receipt/,
+    ],
+    [
+      'fn write_delete_pending(',
+      'pub fn write_delete_pending(',
+      /deletion helper must remain private/,
+    ],
+  ]) {
+    mutate(
+      'crates/fido-service/src/deletion.rs',
+      (text) => text.replace(before, after),
+      pattern,
+      'M5 ' + before,
+    );
+  }
+  for (const field of [
+    'credential_id',
+    'user_id',
+    'rp_hash',
+    'native_handle',
+  ]) {
+    for (const dto of [
+      'CredentialDisplay',
+      'RpDisplay',
+      'InspectionSnapshot',
+    ]) {
+      mutate(
+        'crates/fido-service/src/inspection.rs',
+        (text) =>
+          text.replace(
+            'pub struct ' + dto + ' {',
+            'pub struct ' + dto + ' {\n    pub ' + field + ': Vec<u8>,',
+          ),
+        /raw identity cannot enter renderer-facing DTOs/,
+        'M5 DTO ' + field,
+      );
+    }
   }
   assert.equal(check().status, 0, 'All restored M4 fixtures must pass.');
   console.log(
