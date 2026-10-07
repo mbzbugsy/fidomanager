@@ -11,7 +11,10 @@ through a digest in the secured `Info.plist` (5.8). The authorization record is 
 independently conveyed digest and its attestation (7.6). Other changes: per-OS-version dynamic
 validation flags (5.2); a least-privilege immutable-release policy check (7.1); an acyclic
 `SHA256SUMS` (7.6); release eligibility bound to an exact, CI-green, human-approved commit (7.1);
-and a strict extraction contract at the signing boundary (6.5).
+and a strict extraction contract at the signing boundary (6.5). Revision 5: `publish-final` now
+requires the exact draft that `publish-draft` created, bound by the trusted job output
+`draft_release_id`, instead of repeating the "no release exists" check that only the pre-draft
+phase may make (7.6); the external-action allowlist names the pinned token action (6.4).
 Base: main `15ae91c71f1531b26ce3a1ce7367659018c8455d` (PR #33, M7.1 static native dependencies
 merged, on top of PR #31, M7.0 packaging foundation).
 
@@ -113,7 +116,7 @@ at `15ae91c` [REPO]:
 | D10 | Credentials are a Developer ID Application PKCS#12 and an App Store Connect API key. They live only in a protected GitHub Environment with a required reviewer and are imported into an ephemeral keychain that is destroyed in `always()`. | [GITHUB] + [POLICY] |
 | D11 | Any failure in signing, notarization, stapling, assessment or digest checks stops the run before anything is published. There is no unsigned, ad-hoc, unnotarized or unstapled fallback. | [POLICY] |
 | D12 | Each release ships a manifest, a release-authorization record, `SHA256SUMS`, a CycloneDX SBOM, both notarization logs and a GitHub build-provenance attestation. | [POLICY] |
-| D13 | A release becomes public only through a gated publication job, approved by a human after the clean-machine matrix passes. That job re-downloads the draft's actual assets and hard-fails on any digest mismatch with the **authenticated** authorization record (D16). | [POLICY] |
+| D13 | A release becomes public only through a gated publication job, approved by a human after the clean-machine matrix passes. That job publishes only the exact draft the draft job created (`draft_release_id`), re-downloads that draft's actual assets and hard-fails on any digest mismatch with the **authenticated** authorization record (D16). | [POLICY] |
 | D14 | **Exact app ↔ worker binding.** After the worker is signed and before the bundle is signed, a trusted driver writes `Contents/Resources/release-worker-identity.json` and puts the SHA-256 of its exact bytes into `Info.plist` as `FidoManagerReleaseWorkerIdentitySHA256`. The bundle signature then binds both. At startup the app reads the record once, hashes those exact bytes, compares the digest with the one in the **secured** `Info.plist` obtained from its own validated code object, and only then parses that same buffer into backend memory. Every spawn requires the exact recorded cdhash, so an older worker from the same publisher is rejected. | [POLICY], built on [APPLE] |
 | D15 | **Signing-environment independence.** The credential-bearing job runs only a minimal signing/notarization driver plus Apple OS tools. The driver is checked out from a separate, protected repository at a pinned full commit SHA, never from the candidate commit. The candidate app is handled as data only. | [POLICY] |
 | D16 | **Immutable publication.** Publication is bound to an explicit authorization tuple (section 7.6). The authorization record never vouches for itself: its digest `D7` travels through trusted job outputs and its provenance attestation is verified against the exact run before it is used. GitHub immutable releases are required and confirmed by a least-privilege policy check. Every byte-changing step has its own input and output digest (section 9.4). Tags are never moved or reused. | [GITHUB] + [POLICY] |
@@ -715,7 +718,7 @@ another release; the worker on disk does not match `BUF`.
 | --- | --- |
 | Older worker W_old (same Team ID, same identifier, valid Developer ID signature) put in `Contents/MacOS/` after startup | per-spawn step 3: cdhash and file SHA-256 ≠ `EXPECTED`; and if raced in after step 3, step 5: running cdhash ≠ `EXPECTED` and `WORKER_EXACT_REQ` fails. Contained before `ParentHello` |
 | W_old put in place before startup | S7: cdhash and file SHA-256 ≠ the authenticated record. No launcher. S3's nested-code check may also fail, but the design does not depend on it (E17) |
-| W_old plus a record edited to name W_old's cdhash | S5: the edited record does not hash to the `RID` in the signed `Info.plist`. No launcher. S3's resource seal check also fails |
+| W_old plus a record edited to name W_old's cdhash | Rejected at S3 (the resource seal is broken) or at S5 (the edited record does not hash to the `RID` in the signed `Info.plist`). Either is enough. No launcher, and no `EXPECTED` from the edited bytes |
 | W_old plus an edited record swapped in only while S4 reads it | S5 fails on the swapped bytes; the genuine file is never re-read (race model above) |
 | W_old plus its own release's record plus that release's seal (i.e. the whole old bundle's signature) | That is no longer a mixed bundle; it is the old **complete app** (below) |
 
@@ -923,8 +926,12 @@ review governs both.
 - Every external action is pinned to a full commit SHA. The repository setting "Require actions to
   be pinned to a full-length commit SHA" is turned on. [GITHUB] says that setting still allows
   reusable workflows by tag, so `preflight` also rejects any `uses:` in `release-macos.yml` that is
-  not `owner/repo/…@<40-hex>`. The release workflow uses only `actions/checkout`,
-  `actions/upload-artifact`, `actions/download-artifact` and `actions/attest-build-provenance`.
+  not `owner/repo/…@<40-hex>`. The release workflow uses only these external actions, each at a
+  full 40-hex commit SHA: `actions/checkout`, `actions/upload-artifact`,
+  `actions/download-artifact`, `actions/attest-build-provenance`, and
+  `actions/create-github-app-token`. The last is used **only** in `policy-check` (7.1), with
+  `permission-administration: read` and the token limited to this repository. Adding any other
+  action is a workflow change under CODEOWNERS review and changes `workflow.sha` in the tuple.
   It calls no reusable workflows except, under S2, the signer's own at a pinned SHA.
 - `attest` and the publication jobs also run no candidate code: no candidate checkout, only pinned
   actions, `gh`/`curl` and `shasum`.
@@ -1006,7 +1013,9 @@ Release eligibility, all required:
 - the ref is an **annotated** tag object (`git cat-file -t` → `tag`). It records the tag object
   SHA and the **peeled** commit SHA (`git rev-parse "$TAG^{commit}"`), and requires the peeled
   commit to equal `GITHUB_SHA`;
-- the tag has never been used: no release, draft or published, exists for it (releases API). The
+- the tag has never been used: no release exists for it (releases API). [GITHUB] Draft releases
+  are listed only to callers with push access, which `preflight`'s `contents: read` token does
+  not have, so the check that also covers drafts is `publish-draft` step 3 (7.6). The
   tag ruleset forbids updating or deleting tags, and every later job re-checks that the tag still
   peels to the same commit. With immutable releases [GITHUB], a deleted release's tag name cannot
   be reused either;
@@ -1045,8 +1054,8 @@ and granting the whole workflow more would be wrong. Instead:
 - it uses environment `macos-release-policy` (tag-only deployment). That environment holds the
   only credential the check needs: the private key of a dedicated GitHub App installed on this one
   repository with the single permission **Administration: read**. The job mints a short-lived
-  installation token limited to that repository and permission with a SHA-pinned token action,
-  makes the one API call with `curl`, and discards the token. A fine-grained personal access token
+  installation token limited to that repository and permission with
+  `actions/create-github-app-token` pinned to a full commit SHA (6.4), makes the one API call with `curl`, and discards the token. A fine-grained personal access token
   with only Administration: read on this repository is the fallback if an App is not wanted; it is
   long-lived, so it is second choice;
 - pass only on HTTP `200` with `enabled == true`. A `404`, any other status, a network error, a
@@ -1076,8 +1085,8 @@ policy-check ──────────────────────�
 | `sign-notarize` | **No candidate checkout.** Checks out the signer repo at the pinned SHA; downloads `build-output.tar` and verifies `D0` before extracting; runs the driver (6.4): data-only pre-checks, ephemeral keychain, sign worker, write the identity record, sign bundle, post-sign data checks, app notarization and staple, DMG build, sign, notarization and staple, digests `D1`–`D6` (9.4) | stapled app zip, stapled DMG, both notary logs, driver report with every digest | executes candidate binaries or scripts; runs pnpm/cargo/npm; uploads anything if any step failed |
 | `verify` | Fresh VM, checks out the peeled commit (`persist-credentials: false`), no secrets. Verifies `D3`, `D5` and `D6` against the driver report; quarantine-simulated assessment (validation plan, Part A); `stapler validate`; `spctl`; deep strict verify; publisher and exact requirements; record ↔ worker checks; `check-macos-bundle.py --signature developer-id --stapled`; builds and runs `packaged_worker` **with the enforcing verifier** against the signed worker (positive), plus an ad-hoc copy and, from the second release on, the previous release's worker (negatives); generates the SBOM, the manifest, then `SHA256SUMS`, then `release-authorization.json` last (7.6) | evidence, SBOM, manifest, `SHA256SUMS`, authorization record; **job output `D7`** = SHA-256 of the authorization record, plus `run_id`/`run_attempt` | has secrets |
 | `attest` | Checks the authorization record's SHA-256 equals `needs.verify.outputs.D7`, then `actions/attest-build-provenance` over the DMG, the app zip, the SBOM, the manifest, `SHA256SUMS` and the authorization record. [GITHUB] available for public repositories | Sigstore-backed provenance attestations; an attestation bundle file | runs without `verify` passing |
-| `publish-draft` | Reviewer approval; requires `policy-check`. Authenticates the authorization record first (7.6: SHA-256 = `D7` from job outputs, attestation verified against the exact run), then verifies every asset against it; creates a **draft** release on the tag; uploads; **downloads every asset back from the draft through the API and re-verifies** (7.6) | draft release, verified | publishes; overwrites an existing release or asset; takes an expected digest from a downloaded file |
-| `publish-final` | Separate reviewer approval, given after the Part B matrix passes on the draft's assets; requires `policy-check`. Re-downloads the draft, re-authenticates the authorization record against `D7` and its attestation, re-verifies every asset, publishes, then runs post-publication verification (7.6) | public, immutable release | publishes anything whose bytes differ from the authenticated authorization record by even one digest |
+| `publish-draft` | Reviewer approval; requires `policy-check`. Authenticates the authorization record first (7.6: SHA-256 = `D7` from job outputs, attestation verified against the exact run), then verifies every asset against it; requires that **no** release, draft or published, exists for the tag yet; creates a **draft** release on the tag; uploads; **downloads every asset back from that draft, by its ID, through the API and re-verifies** (7.6) | draft release, verified; **job output `draft_release_id`** (the created release's ID) | publishes; overwrites an existing release or asset; takes an expected digest from a downloaded file |
+| `publish-final` | Separate reviewer approval, given after the Part B matrix passes on the draft's assets; requires `policy-check` and `publish-draft`. Requires the **exact** draft `needs.publish-draft.outputs.draft_release_id` to exist, still be an unpublished draft on the exact tag, and match the approved tuple; re-authenticates the authorization record against `D7` and its attestation; re-verifies the exact asset set and every asset; publishes that draft; then runs post-publication verification (7.6) | public, immutable release | publishes any release other than `draft_release_id`; publishes anything whose bytes differ from the authenticated authorization record by even one digest |
 
 The handoff between jobs is digest-bound [POLICY]. Each producer writes the SHA-256 of its output to
 a job output and to the driver report. Each consumer recomputes it before using the bytes. A
@@ -1252,29 +1261,73 @@ each asset's SHA-256 and size against the record, and `SHA256SUMS` against the r
 **`publish-draft`** (reviewer-gated; `contents: write`; requires `policy-check`; no candidate
 code; checkout, if any, with `persist-credentials: false`):
 
-1. Download all assets plus the authorization record. Authenticate the record (root-of-trust
-   steps 1–4). Then verify every asset against it.
-2. Fail if any release already exists for the tag, or if the tag object or peeled commit differ
-   from `preflight`'s values. That catches a moved tag, even though the ruleset forbids it.
-   Require `policy-check`'s output `immutable_releases=true`.
-3. Create a **draft** release on the tag and upload exactly the final asset set.
-4. Download every asset **back from the draft release through the API** into a fresh directory.
-   Authenticate the downloaded authorization record again (steps 1–4), recompute SHA-256 and size
-   of every asset, and compare with it. Require that the draft has exactly the expected asset
-   names. Any mismatch fails hard, and the draft is left unpublished for a maintainer to delete. It
-   is never repaired in place.
+1. Download the `verify` outputs, including the authorization record. Authenticate the record
+   (root-of-trust steps 1–4).
+2. Verify the payload and evidence assets against the authenticated record: SHA-256 and size of
+   each, `SHA256SUMS` against the record's `sha256sums` digest and then line by line, and the
+   exact final asset set.
+3. Require that **no** release, draft or published, exists for the tag. The job lists the
+   repository's releases with its `contents: write` token, which [GITHUB] also lists drafts, and
+   requires that none has this `tag_name`. `GET /releases/tags/{tag}` is not enough, because
+   [GITHUB] it returns only a published release. This is the only publication step that requires
+   absence. It runs once, before the draft exists.
+4. Require that the tag object and peeled commit still equal `preflight`'s values. That catches a
+   moved tag, even though the ruleset forbids it.
+5. Require `policy-check`'s output `immutable_releases=true`.
+6. Create a **draft** release on the tag (`draft: true`) and upload exactly the final asset set.
+7. Set the job output **`draft_release_id`** to the `id` field of the create-release response.
+   It must be a decimal integer, or the job fails. This output is the only handle any later job
+   uses for the draft. Like `D7`, it reaches `publish-final` only through GitHub's run context
+   (`needs.publish-draft.outputs`), set by a job that runs no candidate code. It is never read from
+   a release asset, an artifact or a release listing. It only selects which release is checked
+   and published. It vouches for no content: every content check is still made against `D7` and
+   the attestation. If any later step of this job fails, the job fails, so `publish-final` (which
+   `needs: publish-draft`) never runs.
+8. Fetch the draft by that ID (`GET /releases/{draft_release_id}`). Require `draft` true and
+   `tag_name` equal to the tag. Download every asset of that release, by asset ID, through the API
+   into a fresh directory. Authenticate the downloaded authorization record again (steps 1–4),
+   recompute SHA-256 and size of every asset, and compare with it. Check `SHA256SUMS` against it,
+   check the tuple, and require exactly the expected asset names. Any mismatch fails hard, and the
+   draft is left unpublished for a maintainer to delete. It is never repaired in place.
 
 **Human gate.** A maintainer runs the Part B clean-machine matrix on the DMG and the app zip
 downloaded from that draft, checks them against `SHA256SUMS` and the authenticated record, and then
 approves `macos-release-public`.
 
-**`publish-final`** (separately reviewer-gated; `contents: write`; requires `policy-check`; no
-candidate code):
+**`publish-final`** (separately reviewer-gated; `contents: write`; requires `policy-check` and
+`publish-draft`; no candidate code):
 
-1. Download the draft's assets again and repeat `publish-draft` steps 1, 2 and 4 in full,
-   including authenticating the record against `D7` and its attestation. Nothing is trusted from
-   the earlier job.
-2. Publish the draft (draft → published).
+1. Take `draft_release_id` **only** from `needs.publish-draft.outputs.draft_release_id`. This job
+   does **not** require that no release exists for the tag: the draft it is about to publish must
+   exist. Instead, before anything is published, all of these must hold:
+   - `GET /releases/{draft_release_id}` returns a release, and its `id` equals
+     `draft_release_id`;
+   - it is still a draft (`draft` true) and has not been published (`published_at` is null);
+   - its `tag_name` is exactly the expected tag, and it is the only release for that tag (listed
+     as in `publish-draft` step 3, drafts included);
+   - the tag object and peeled commit still equal `preflight`'s values;
+   - its metadata matches the approved tuple and what `publish-draft` created: name, prerelease
+     flag and tag;
+   - `policy-check`'s output is still `immutable_releases=true`;
+   - the authorization record, downloaded from that draft by asset ID, has SHA-256 equal to `D7`
+     from `needs.verify.outputs`. Its attestation verifies for the repository, the workflow, the
+     workflow SHA, the exact source commit and tag, and the exact run ID and run attempt
+     (root-of-trust steps 1–4, including the tuple check);
+   - the draft's asset names are exactly the final asset set, with nothing missing and nothing
+     extra;
+   - every asset, downloaded from that draft by asset ID through the API into a fresh directory,
+     matches the authenticated record in SHA-256 and size;
+   - `SHA256SUMS` matches the record's `sha256sums` digest, and line by line the payload and
+     evidence assets.
+
+   Nothing else is trusted from the earlier job: only `draft_release_id` and `D7`, both through
+   the run context. Any failure stops the job before publication, and the draft is left for a
+   maintainer. If the release is already published, for example on a re-run after a failure
+   between steps 2 and 3, the job stops without changing anything. A maintainer then runs the step
+   3 checks by hand, and any failure is handled under section 11.
+2. Only then publish that draft: `PATCH /releases/{draft_release_id}` with `draft: false`, and no
+   other field changed (draft → published). Step 3 catches any change made between step 1 and
+   this call.
 3. After publication: download the **published** authorization record and authenticate it again
    (root-of-trust steps 1–4). Run `gh release verify <tag>`, which [GITHUB] says checks that the
    release exists and is immutable, and require the release object's `immutable` field to be
@@ -1500,7 +1553,7 @@ records, not through one file hash.
 | DMG stapling | signed DMG | `D5` = SHA-256 of the final DMG | DMG cdhash unchanged; ticket stapled |
 | checksums | `D3`, `D5`, `D6`, SBOM, manifest | `SHA256SUMS` over exactly those | listed in the authorization record |
 | authorization | all of the above and the `SHA256SUMS` digest | `release-authorization.json`; `D7` = its SHA-256, a `verify` job output | `D7` travels only through job outputs; the record's attestation is bound to this exact run (7.6) |
-| draft upload → download | `D7` (job output), the authenticated record | identical digests re-computed from the **downloaded** draft assets | hard fail on any mismatch; the downloaded record is re-authenticated, never trusted for its own digest |
+| draft upload → download | `D7` and `draft_release_id` (job outputs), the authenticated record | identical digests re-computed from the **downloaded** draft assets | hard fail on any mismatch; the downloaded record is re-authenticated, never trusted for its own digest |
 | publication → download | same | identical digests from the **published** assets; `gh release verify` / `verify-asset` | immutable release + release attestation |
 
 ## 10. Fail-closed behaviour (consolidated)
@@ -1529,9 +1582,11 @@ records, not through one file hash.
 | Stapling failed | driver (8.2) | one bounded retry, then fail |
 | Gatekeeper assessment failed | Verify (8.4) | release fails |
 | Artifact checksum mismatch at any job boundary | every consumer (9.4) | hard fail; download-tool warnings are never accepted instead |
-| Authorization record's SHA-256 ≠ `D7` from job outputs, or its attestation fails (wrong repository, commit, workflow, workflow SHA, run or attempt, or a self-hosted runner) | `attest`; `publish-draft` steps 1 and 4; `publish-final` steps 1 and 3 | before publication: stop, nothing trusted from the record; after publication: incident procedure (11) |
-| Draft or published asset differs from the authenticated authorization record or from `SHA256SUMS` | `publish-draft` step 4; `publish-final` steps 1 and 3 | before publication: stop, draft left unpublished; after publication: incident procedure (11) |
-| Tag moved, not annotated, not on `main`, reused, or release already exists | preflight; publish jobs | stop before building or publishing |
+| Authorization record's SHA-256 ≠ `D7` from job outputs, or its attestation fails (wrong repository, commit, workflow, workflow SHA, run or attempt, or a self-hosted runner) | `attest`; `publish-draft` steps 1 and 8; `publish-final` steps 1 and 3 | before publication: stop, nothing trusted from the record; after publication: incident procedure (11) |
+| Draft or published asset differs from the authenticated authorization record or from `SHA256SUMS` | `publish-draft` step 8; `publish-final` steps 1 and 3 | before publication: stop, draft left unpublished; after publication: incident procedure (11) |
+| Tag not annotated, not on `main` or reused, or a release already exists for the tag **before the draft is created** | preflight (releases its read-only token can see); `publish-draft` step 3 (drafts included) | stop before building, or before creating the draft |
+| Tag moved (tag object or peeled commit ≠ `preflight`) | preflight; `publish-draft` step 4; `publish-final` steps 1 and 3 | before publication: stop; after publication: incident procedure (11) |
+| At `publish-final`: no release with ID `draft_release_id`; it is no longer a draft or is already published; its tag or metadata differ from the approved tuple; or another release exists for the tag | `publish-final` step 1 | stop; nothing is published; the draft is left for a maintainer |
 | CI for the exact peeled commit missing, pending, skipped or failed | preflight | stop before building |
 | Immutable releases not enabled, or `policy-check` cannot confirm it (404, other status, network error, missing App key) | `policy-check`; publish jobs require its output | stop; nothing is published |
 | A `uses:` not pinned to a 40-hex SHA, or a checkout without `persist-credentials: false` | preflight | stop |
