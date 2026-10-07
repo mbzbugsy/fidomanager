@@ -8,3 +8,6 @@ dist/
 # Generated schemas and unrelated local checkouts
 src-tauri/gen/
 .claude/
+
+# Verbatim third-party license texts (byte-checked against the packaged copy)
+THIRD_PARTY_NOTICES.md

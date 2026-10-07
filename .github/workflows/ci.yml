@@ -89,8 +89,9 @@ jobs:
           persist-credentials: false
       - name: Private native build prerequisites
         run: |
-          # System libfido2 is installed ONLY for the negative linkage control.
-          brew install cmake pkg-config openssl@3 libcbor libfido2
+          # System libfido2 (and the Homebrew openssl@3/libcbor it pulls in) is installed ONLY for
+          # the negative linkage control; the private build must ignore all three.
+          brew install cmake pkg-config libfido2
           python3 scripts/build-libfido2.py fetch
       - name: Setup pinned Rust
         run: rustup toolchain install 1.98.1 --profile minimal --component clippy --component rustfmt
@@ -131,14 +132,25 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Renderer boundary check
         run: pnpm security:renderer-boundary
-      - name: Private native build prerequisites (no system libfido2)
+      - name: Native build prerequisites (no Homebrew openssl@3, libcbor or libfido2)
         run: |
-          brew install cmake pkg-config openssl@3 libcbor
+          # Build tools only. libcrypto/libcbor/libfido2 come from checksum-pinned source.
+          brew install cmake pkg-config
           python3 scripts/build-libfido2.py fetch
+      - name: Pinned native source locks, strict extraction and third-party notices
+        run: python3 scripts/test-native-deps.py
       - name: Setup pinned Rust
         run: rustup toolchain install 1.98.1 --profile minimal
       - name: Assemble and check unsigned Fido Manager.app and DMG
+        # Builds private static OpenSSL, libcbor and libfido2, the release worker, verifies link-map
+        # provenance, then the bundle, ad-hoc seal, structural checks and DMG.
         run: python3 scripts/package-macos.py --dmg
+      - name: Release worker static provenance and dynamic dependencies
+        run: |
+          triple="$(rustc -vV | sed -n 's/^host: //p')"
+          python3 scripts/verify-libfido2-linkage.py "target/$triple/release/fido-worker"
+          otool -L "target/macos-package/Fido Manager.app/Contents/MacOS/fido-worker"
+          test ! -e "target/macos-package/Fido Manager.app/Contents/Frameworks"
       - name: Bundle checker regression tests
         run: python3 scripts/test-macos-bundle-check.py "target/macos-package/Fido Manager.app"
       - name: Packaged worker handshake and health check (no authenticator access)
@@ -146,4 +158,6 @@ jobs:
           FIDOMANAGER_PACKAGED_WORKER: ${{ github.workspace }}/target/macos-package/Fido Manager.app/Contents/MacOS/fido-worker
         run: cargo test -p fido-worker --test packaged_worker --locked -- --ignored
       - name: Packaging leaves the reviewed tree unchanged
-        run: git diff --exit-code
+        run: |
+          git diff --exit-code
+          test -z "$(git status --porcelain)"

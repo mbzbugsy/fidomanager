@@ -20,11 +20,21 @@ MAIN_EXECUTABLE = "fidomanager-app"
 WORKER = "fido-worker"
 WORKER_IDENTIFIER = BUNDLE_ID + "." + WORKER
 IDENTITY_SYMBOL = "fidomanager_libfido2_1_17_0_credman_limit"
-# Exact reviewed set of relocated worker dependencies (see M7.0 validation document).
-PRIVATE_DYLIBS = (re.compile(r"^libcrypto\.3\.dylib$"), re.compile(r"^libcbor\.0\.\d+\.dylib$"))
-FRAMEWORK_PREFIX = "@executable_path/../Frameworks/"
+# M7.1: the bundle carries no third-party dylibs at all; libfido2, OpenSSL and libcbor are static.
+DEPLOYMENT_TARGET = "11.0"
+NOTICES = "THIRD_PARTY_NOTICES.md"
 SYSTEM_PREFIXES = ("/usr/lib/", "/System/Library/")
-FORBIDDEN_LINKAGE = re.compile(r"/opt/homebrew|/usr/local|libfido2|@rpath|@loader_path")
+FORBIDDEN_LINKAGE = re.compile(
+    r"/opt/homebrew|/usr/local|/opt/local|libfido2|libcrypto|libssl|libcbor|@rpath|@loader_path|@executable_path"
+)
+# Statically linked native symbols the worker must define and must never import at run time.
+NATIVE_IMPORT = re.compile(
+    r"^\s+U _(?:fido_|fidomanager_|cbor_|EVP_|OPENSSL_|OSSL_|OpenSSL_|CRYPTO_|ERR_|BN_|EC_|ECDSA_|ECDH_|RSA_|HMAC|RAND_)", re.M)
+WORKER_STATIC_SYMBOLS = (IDENTITY_SYMBOL, "fido_init", "fido_dev_get_puat", "cbor_load", "cbor_serialize_alloc",
+                         "EVP_sha256", "OPENSSL_init_crypto")
+# OpenSSL configuration locations that must never be compiled into the worker.
+FORBIDDEN_OPENSSLDIRS = (b"/opt/homebrew/etc/openssl", b"/usr/local/etc/openssl", b"/usr/local/ssl", b"/opt/local/etc/openssl")
+PRIVATE_OPENSSLDIR = b'OPENSSLDIR: "/var/empty/fidomanager-openssl"'
 # Never acceptable in this product, regardless of signing identity.
 FORBIDDEN_ENTITLEMENTS = (
     "com.apple.security.get-task-allow",
@@ -73,10 +83,6 @@ def minimum_os(binary):
     versions += re.findall(r"cmd LC_VERSION_MIN_MACOSX\n.*\n\s*version (\S+)", commands)
     require(versions, f"{binary.name}: no minimum macOS version load command")
     return max(versions, key=version_tuple)
-
-
-def load_commands(binary):
-    return re.findall(r"^\s*cmd (\S+)$", output(["otool", "-l", str(binary)]), re.M)
 
 
 def dependencies(binary):
@@ -130,12 +136,11 @@ def check_info(app, expected_version):
 
 def check_tree(app):
     contents = app / "Contents"
+    require(not (contents / "Frameworks").exists(), "Contents/Frameworks must not exist (no bundled dylibs)")
     allowed = {"Contents/Info.plist", "Contents/PkgInfo", f"Contents/MacOS/{MAIN_EXECUTABLE}",
-               f"Contents/MacOS/{WORKER}", "Contents/Resources/icon.icns",
+               f"Contents/MacOS/{WORKER}", "Contents/Resources/icon.icns", f"Contents/Resources/{NOTICES}",
                "Contents/_CodeSignature/CodeResources"}
-    directories = {"Contents", "Contents/MacOS", "Contents/Resources", "Contents/Frameworks",
-                   "Contents/_CodeSignature"}
-    frameworks = []
+    directories = {"Contents", "Contents/MacOS", "Contents/Resources", "Contents/_CodeSignature"}
     for path in sorted(app.rglob("*")):
         relative = path.relative_to(app).as_posix()
         require(not path.is_symlink(), f"symlink in bundle: {relative}")
@@ -143,10 +148,6 @@ def check_tree(app):
             raise CheckError(f"duplicate or misplaced worker: {relative}")
         if path.is_dir():
             require(relative in directories, f"unexpected directory: {relative}")
-        elif path.parent == contents / "Frameworks":
-            require(any(pattern.match(path.name) for pattern in PRIVATE_DYLIBS),
-                    f"unexpected bundled library: {relative}")
-            frameworks.append(path)
         else:
             require(relative in allowed, f"unexpected bundle entry: {relative}")
     worker = contents / "MacOS" / WORKER
@@ -157,53 +158,60 @@ def check_tree(app):
     require((contents / "MacOS" / MAIN_EXECUTABLE).is_file(), "main executable missing")
     require((contents / "Resources/icon.icns").read_bytes()
             == (ROOT / "src-tauri/icons/icon.icns").read_bytes(), "bundle icon is not the project icon")
+    notices = contents / "Resources" / NOTICES
+    require(notices.is_file(), "third-party notices missing from Contents/Resources")
+    require(notices.read_bytes() == (ROOT / NOTICES).read_bytes(),
+            "packaged third-party notices do not match the reviewed repository copy")
     code = sorted(path for path in app.rglob("*") if path.is_file() and is_mach_o(path))
-    require(code == sorted([contents / "MacOS" / MAIN_EXECUTABLE, worker, *frameworks]),
-            "unexpected Mach-O set in bundle")
-    return contents / "MacOS" / MAIN_EXECUTABLE, worker, frameworks
+    require(code == sorted([contents / "MacOS" / MAIN_EXECUTABLE, worker]),
+            "unexpected Mach-O set in bundle (exactly fidomanager-app and fido-worker allowed)")
+    return contents / "MacOS" / MAIN_EXECUTABLE, worker
 
 
-def check_linkage(main, worker, frameworks, info):
-    bundled = {path.name for path in frameworks}
-    used = set()
+def check_linkage(main, worker, info):
     archs = set()
     newest = "0"
-    for binary in (main, worker, *frameworks):
+    for binary in (main, worker):
         archs.add(output(["lipo", "-archs", str(binary)]).strip())
         newest = max(newest, minimum_os(binary), key=version_tuple)
-        commands = load_commands(binary)
+        text = output(["otool", "-l", str(binary)])
+        commands = re.findall(r"^\s*cmd (\S+)$", text, re.M)
         for forbidden in ("LC_RPATH", "LC_DYLD_ENVIRONMENT"):
             require(forbidden not in commands, f"{binary.name}: forbidden {forbidden}")
+        loaders = re.findall(r"cmd LC_LOAD_DYLINKER\n.*\n\s*name (\S+)", text)
+        require(loaders == ["/usr/lib/dyld"], f"{binary.name}: unexpected dynamic loader {loaders}")
         for dep in dependencies(binary):
             require(not FORBIDDEN_LINKAGE.search(dep), f"{binary.name}: forbidden dependency {dep}")
-            if dep.startswith(SYSTEM_PREFIXES):
-                continue
-            require(binary != main, f"main application must not load bundled native code: {dep}")
-            require(dep.startswith(FRAMEWORK_PREFIX) and dep[len(FRAMEWORK_PREFIX):] in bundled,
-                    f"{binary.name}: dependency is neither system nor bundled: {dep}")
-            used.add(dep[len(FRAMEWORK_PREFIX):])
+            require(dep.startswith(SYSTEM_PREFIXES), f"{binary.name}: non-system dependency {dep}")
         for line in output(["otool", "-D", str(binary)]).splitlines()[1:]:
             require(not FORBIDDEN_LINKAGE.search(line), f"{binary.name}: forbidden install name {line}")
     require(len(archs) == 1, f"mixed architectures in bundle: {sorted(archs)}")
-    require(used == bundled, "bundled libraries do not match the worker's dependencies")
-    system = {dep for dep in dependencies(worker) if dep.startswith(SYSTEM_PREFIXES)}
+    system = set(dependencies(worker))
     require(system == WORKER_SYSTEM_DEPENDENCIES, f"worker system linkage changed: {sorted(system)}")
     minimum = info.get("LSMinimumSystemVersion", "0")
     require(version_tuple(minimum) >= version_tuple(newest),
             f"LSMinimumSystemVersion {minimum} is below bundled code minimum {newest}")
+    # The declared floor is reviewed; a dependency must never silently raise it.
+    require(minimum == DEPLOYMENT_TARGET,
+            f"LSMinimumSystemVersion {minimum} is not the declared deployment target {DEPLOYMENT_TARGET}")
     return archs.pop(), newest
 
 
-def check_symbols(main, worker, frameworks):
+def check_symbols(main, worker):
     worker_symbols = output(["nm", "-g", str(worker)])
-    for symbol in (IDENTITY_SYMBOL, "fido_init", "fido_dev_get_puat"):
+    require(not NATIVE_IMPORT.search(worker_symbols),
+            "worker has unresolved FIDO/OpenSSL/libcbor symbols (must be statically linked)")
+    for symbol in WORKER_STATIC_SYMBOLS:
         require(re.search(r"\bT _" + symbol + r"$", worker_symbols, re.M),
                 f"worker does not statically define {symbol}")
-    require(not re.search(r"\bU _(?:fido_|fidomanager_libfido2_)", worker_symbols),
-            "worker has unresolved FIDO symbols")
-    for binary in (main, *frameworks):
-        require(not re.search(r"\b[TU] _(?:fido_|fidomanager_libfido2_)", output(["nm", "-g", str(binary)])),
-                f"{binary.name} must not define or import native FIDO symbols")
+    data = worker.read_bytes()
+    for forbidden in FORBIDDEN_OPENSSLDIRS:
+        require(forbidden not in data, f"worker embeds an external OpenSSL directory {forbidden.decode()}")
+    for found in re.findall(rb'(?:OPENSSLDIR|ENGINESDIR|MODULESDIR): "([^"]*)"', data):
+        require(found.startswith(b"/var/empty/fidomanager-openssl"),
+                f"worker embeds a non-private OpenSSL directory {found.decode(errors='replace')}")
+    require(not re.search(r"\b[TU] _(?:fido_|fidomanager_libfido2_)", output(["nm", "-g", str(main)])),
+            f"{main.name} must not define or import native FIDO symbols")
 
 
 def check_frontend(main, dist):
@@ -215,8 +223,8 @@ def check_frontend(main, dist):
     return len(assets)
 
 
-def check_signatures(app, main, worker, frameworks, mode):
-    for binary in (main, worker, *frameworks):
+def check_signatures(app, main, worker, mode):
+    for binary in (main, worker):
         fields = signature(binary)
         granted = entitlements(binary)
         for key in FORBIDDEN_ENTITLEMENTS:
@@ -238,7 +246,7 @@ def check_signatures(app, main, worker, frameworks, mode):
     require(signature(main).get("Identifier") == [BUNDLE_ID], "main executable signing identifier mismatch")
     require(signature(worker).get("Identifier") == [WORKER_IDENTIFIER], "worker signing identifier mismatch")
     if mode != "adhoc":
-        teams = {tuple(signature(binary)["TeamIdentifier"]) for binary in (main, worker, *frameworks)}
+        teams = {tuple(signature(binary)["TeamIdentifier"]) for binary in (main, worker)}
         require(len(teams) == 1, "bundled code is signed by more than one Team ID")
     bundle = run(["codesign", "-dvvv", str(app)]).stderr
     require(re.search(r"^Sealed Resources version=2 ", bundle, re.M), "bundle resources are not sealed")
@@ -248,8 +256,8 @@ def check_signatures(app, main, worker, frameworks, mode):
 
 
 def check_worker_runtime(worker):
-    # dyld resolves every load command before main(); these exit codes prove the relocated
-    # libraries load and the worker's startup policy is intact. No authenticator is touched.
+    # dyld resolves every load command before main(); these exit codes prove the worker loads with
+    # only system libraries and its startup policy is intact. No authenticator is touched.
     for arguments, environment, expected in (
         (["--anything"], {}, WORKER_EXIT_USAGE),
         ([], {"FIDO_DEBUG": "1"}, WORKER_EXIT_CONFIG),
@@ -264,18 +272,20 @@ def check(app, *, signature_mode, expected_version, frontend_dist=None, execute_
     app = app.resolve(strict=True)
     require(app.suffix == ".app" and app.is_dir(), "not an application bundle")
     info = check_info(app, expected_version)
-    main, worker, frameworks = check_tree(app)
-    arch, minimum = check_linkage(main, worker, frameworks, info)
-    check_symbols(main, worker, frameworks)
+    main, worker = check_tree(app)
+    arch, minimum = check_linkage(main, worker, info)
+    check_symbols(main, worker)
     assets = check_frontend(main, frontend_dist) if frontend_dist else 0
-    check_signatures(app, main, worker, frameworks, signature_mode)
+    check_signatures(app, main, worker, signature_mode)
     if execute_worker:
         check_worker_runtime(worker)
     return {
         "bundle_identifier": BUNDLE_ID, "version": expected_version, "architecture": arch,
         "minimum_system_version": info["LSMinimumSystemVersion"], "newest_code_minos": minimum,
         "main_executable": f"Contents/MacOS/{MAIN_EXECUTABLE}", "worker": f"Contents/MacOS/{WORKER}",
-        "bundled_libraries": [path.name for path in frameworks], "embedded_frontend_assets": assets,
+        "bundled_libraries": [], "frameworks_directory": False,
+        "worker_dynamic_dependencies": sorted(dependencies(worker)),
+        "third_party_notices": f"Contents/Resources/{NOTICES}", "embedded_frontend_assets": assets,
         "signature": signature_mode, "worker_executed": execute_worker,
     }
 

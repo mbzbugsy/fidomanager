@@ -38,6 +38,21 @@ def parser_source(credman, cbor, patched):
     return output
 
 
+def host_target():
+    return "aarch64-apple-darwin" if platform.machine() == "arm64" else "x86_64-apple-darwin"
+
+
+def harness_flags(work):
+    if platform.system() != "Darwin":
+        # Linux keeps its discovery-only system-library policy for this source-level harness.
+        return shlex.split(subprocess.check_output(["pkg-config", "--cflags", "--libs", "libcbor", "libcrypto"], text=True))
+    # macOS: the harness uses the same private pinned headers/archives as the production worker.
+    private = builder.dependencies.build(work / "private-deps", work / "private-deps", host_target())
+    return ["-I" + str(private["include"]),
+            *(str(work / "private-deps" / builder.dependencies.lock(name)["archive_name"])
+              for name in ("libcbor", "openssl"))]
+
+
 def source_tests():
     spec = builder.lock()
     with tempfile.TemporaryDirectory(prefix="fidomanager-native-tests-") as temporary:
@@ -48,7 +63,7 @@ def source_tests():
         cbor = (source / "src/cbor.c").read_text()
         with tarfile.open(builder.source_archive()) as archive:
             original = archive.extractfile("libfido2-" + spec["revision"] + "/src/credman.c").read().decode()
-        flags = shlex.split(subprocess.check_output(["pkg-config", "--cflags", "--libs", "libcbor", "libcrypto"], text=True))
+        flags = harness_flags(work)
         for is_patched in (True, False):
             (work / "reviewed-parser.inc").write_text(parser_source(patched if is_patched else original, cbor, is_patched))
             binary = work / ("patched" if is_patched else "unpatched")
@@ -69,7 +84,8 @@ def source_tests():
         removed_variables = ("CC", "CXX", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS",
                              "CMAKE_TOOLCHAIN_FILE", "CMAKE_GENERATOR", "CMAKE_PREFIX_PATH",
                              "CMAKE_C_COMPILER_LAUNCHER", "CMAKE_C_LINKER_LAUNCHER",
-                             "CPATH", "C_INCLUDE_PATH", "LIBRARY_PATH")
+                             "CPATH", "C_INCLUDE_PATH", "LIBRARY_PATH",
+                             "PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR", "OPENSSL_CONF", "MAKEFLAGS")
         inherited = dict.fromkeys(removed_variables, "untrusted override")
         host_variables = {"PATH": "/host/bin", "SDKROOT": "/host/sdk",
                           "DEVELOPER_DIR": "/host/Xcode", "HOME": "/host/home",
@@ -127,17 +143,16 @@ def source_tests():
         environment = dict(os.environ, CARGO_FEATURE_NATIVE_LIBFIDO2="1", CARGO_CFG_TARGET_OS="macos", LIBFIDO2_LIB_DIR="/unpatched/system/library")
         rejected = subprocess.run([str(script)], env=environment, capture_output=True, text=True)
         assert rejected.returncode != 0 and "forbids system libfido2 directory overrides" in rejected.stderr
-
-        # Compile tests from the production Cargo build script to exercise the exact validator.
-        script_tests = work / "cargo-build-script-tests"
-        subprocess.run(["rustc", str(ROOT / "crates/fido-libfido2/build.rs"), "--edition=2024", "--test", "-o", str(script_tests)], check=True)
-        fixture = work / "libdir-fixture"
-        fixture.mkdir()
-        subprocess.run([str(script_tests)], env=dict(os.environ, FIDOMANAGER_LIBDIR_TEST_ROOT=str(fixture)), check=True)
     print("PASS: corrupt/missing source, corrupt patch and changed patch context fail closed")
     print("PASS: production Cargo build script rejects a system-library override")
-    print("PASS: pkg-config libdir validation and explicit native build environment sanitization")
+    print("PASS: explicit native build environment allowlist (no compiler/pkg-config/OpenSSL overrides)")
     print("PASS: patched and unpatched harness builds reject NDEBUG")
+
+
+# openbsd-compat implementations whose upstream notices are reproduced in THIRD_PARTY_NOTICES.md.
+NOTICED_COMPAT = {"_freezero", "_recallocarray", "_explicit_bzero", "_getpagesize"}
+COMPAT_SYMBOLS = NOTICED_COMPAT | {"_asprintf", "_getline", "_clock_gettime", "_strlcat", "_strlcpy",
+                                   "_strsep", "_timingsafe_bcmp", "_readpassphrase", "_getopt_long"}
 
 
 def archive_tests(directory):
@@ -149,21 +164,37 @@ def archive_tests(directory):
     assert metadata["enumeration_limit"] == spec["enumeration_limit"] and metadata["fuzz"] is False
     assert metadata["patch_sha256"] == spec["patch_sha256"]
     assert metadata["source_archive_sha256"] == spec["archive_sha256"]
+    assert metadata["deployment_target"] == "11.0"
     assert not re.search(r"/(?:Users|home|private|opt)/", json.dumps(metadata)), "local path in build metadata"
+    private = []
+    for name in builder.dependencies.DEPENDENCIES:
+        lock = builder.dependencies.lock(name)
+        entry = metadata["dependencies"][name]
+        path = directory / lock["archive_name"]
+        assert entry["version"] == lock["version"] and entry["source_archive_sha256"] == lock["archive_sha256"]
+        assert entry["static_archive_sha256"] == builder.sha256(path) and entry["deployment_target"] == "11.0"
+        private.append(str(path))
+    assert set(builder.dependencies.OPENSSL_POLICY) <= set(metadata["dependencies"]["openssl"]["build_options"])
+    compat = {line.split()[-1] for line in subprocess.check_output(["nm", "-gU", str(archive)], text=True).splitlines()
+              if line.split() and line.split()[-1] in COMPAT_SYMBOLS}
+    assert compat <= NOTICED_COMPAT, f"compat code without a reviewed notice: {sorted(compat - NOTICED_COMPAT)}"
     with tempfile.TemporaryDirectory(prefix="fidomanager-link-test-") as temporary:
         work = Path(temporary)
         probe = work / "probe.c"
         symbol = spec["identity_symbol"]
         probe.write_text(f"#include <stdint.h>\nuint32_t {symbol}(void);\nint main(void) {{ return {symbol}() == {spec['enumeration_limit']} ? 0 : 1; }}\n")
         binary = work / "probe"
-        dependencies = shlex.split(subprocess.check_output(["pkg-config", "--libs", "libcrypto", "libcbor", "zlib"], text=True))
-        subprocess.run(["cc", str(probe), str(archive), *dependencies, "-framework", "IOKit", "-framework", "CoreFoundation", "-o", str(binary)], check=True)
+        # Only private archives and system frameworks/zlib: no pkg-config resolution at all.
+        subprocess.run(["cc", "-mmacosx-version-min=11.0", str(probe), str(archive), *private, "-lz",
+                        "-framework", "IOKit", "-framework", "CoreFoundation", "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
+        loads = subprocess.check_output(["otool", "-L", str(binary)], text=True)
+        assert not re.search(r"libcrypto|libcbor|libfido2|/opt/homebrew|/usr/local", loads), loads
         # The unpatched system ABI cannot resolve the private identity symbol.
         system_flags = shlex.split(subprocess.check_output(["pkg-config", "--libs", "libfido2"], text=True))
         rejected = subprocess.run(["cc", str(probe), *system_flags, "-o", str(work / "system")], capture_output=True, text=True)
         assert rejected.returncode != 0 and symbol in rejected.stderr, "system library satisfied private identity probe"
-    print("PASS: private archive identity and baseline; system libfido2 fails linkage")
+    print("PASS: private archive identity and baseline; probe links only private static archives; system libfido2 fails linkage")
 
 
 if __name__ == "__main__":
@@ -173,7 +204,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     source_tests()
     if args.rebuild:
-        target = "aarch64-apple-darwin" if platform.machine() == "arm64" else "x86_64-apple-darwin"
+        target = host_target()
+        names = [builder.lock()["archive_name"], *(builder.dependencies.lock(name)["archive_name"]
+                                                    for name in builder.dependencies.DEPENDENCIES)]
         with tempfile.TemporaryDirectory(prefix="fidomanager-reproducibility-") as temporary:
             digests = []
             for name in ("first", "second"):
@@ -182,8 +215,8 @@ if __name__ == "__main__":
                 if result.returncode != 0:
                     raise RuntimeError(result.stdout + result.stderr)
                 archive_tests(directory)
-                digests.append(builder.sha256(directory / builder.lock()["archive_name"]))
+                digests.append([builder.sha256(directory / archive) for archive in names])
             assert digests[0] == digests[1], "separate-path native builds are not reproducible"
-        print("PASS: separate-path static archive rebuilds are byte-identical")
+        print("PASS: separate-path libfido2, libcrypto and libcbor static archive rebuilds are byte-identical")
     if args.build_dir:
         archive_tests(args.build_dir.resolve())

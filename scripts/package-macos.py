@@ -3,14 +3,15 @@
 
 Pipeline (macOS host-native only, no credentials):
 
-  release fido-worker (explicit --target dir) -> verify private libfido2 link map
+  release fido-worker (explicit --target dir; private static libfido2 + OpenSSL + libcbor built
+  from pinned source) -> verify link map provenance and system-only linkage at macOS 11.0
   -> stage worker as Tauri externalBin -> tauri build (production frontend, app bundle only)
-  -> copy reviewed worker dylibs into Contents/Frameworks and rewrite them to
-     @executable_path/../Frameworks (no rpath, no search paths)
-  -> ad-hoc inside-out signing -> structural checks -> optional DMG (hdiutil) + re-check
+  -> add reviewed THIRD_PARTY_NOTICES.md -> ad-hoc inside-out signing -> structural checks
+  -> optional DMG (hdiutil) + re-check
 
-The output is a development/CI artifact. It is not Developer ID signed, not notarized, not
-stapled, and must not be published.
+The bundle contains no third-party dylibs and no Contents/Frameworks directory. The output is a
+development/CI artifact. It is not Developer ID signed, not notarized, not stapled, and must not
+be published.
 """
 
 import argparse
@@ -29,8 +30,6 @@ import importlib.util
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "target/macos-package"
 OVERLAY = ROOT / "src-tauri/tauri.macos-bundle.conf.json"
-SYSTEM_PREFIXES = ("/usr/lib/", "/System/Library/")
-FRAMEWORK_PREFIX = "@executable_path/../Frameworks/"
 # Credential-bearing variables that would make Tauri sign or notarize. This path refuses them.
 SIGNING_ENVIRONMENT = (
     "APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "APPLE_SIGNING_IDENTITY", "APPLE_ID",
@@ -49,6 +48,8 @@ def load(name, file):
 
 checker = load("check_macos_bundle", "check-macos-bundle.py")
 signer = load("sign_macos_bundle", "sign-macos-bundle.py")
+linkage = load("verify_libfido2_linkage", "verify-libfido2-linkage.py")
+DEPLOYMENT_TARGET = checker.DEPLOYMENT_TARGET
 
 
 def run(command, **options):
@@ -72,7 +73,8 @@ def clean_environment():
     present = [name for name in SIGNING_ENVIRONMENT if name in os.environ]
     if present:
         raise RuntimeError("Unsigned packaging refuses signing/notarization/override variables: " + ", ".join(present))
-    return dict(os.environ)
+    # The reviewed floor applies to Rust code too (rustc's x86_64 default would be older).
+    return dict(os.environ, MACOSX_DEPLOYMENT_TARGET=DEPLOYMENT_TARGET)
 
 
 def build_worker(triple, environment):
@@ -80,35 +82,15 @@ def build_worker(triple, environment):
     run(["cargo", "clean", "--release", "--target", triple, "-p", "fido-worker"], cwd=ROOT, env=environment)
     run(["cargo", "build", "--release", "--locked", "--target", triple, "-p", "fido-worker"], cwd=ROOT, env=environment)
     worker = ROOT / "target" / triple / "release/fido-worker"
-    run(["python3", ROOT / "scripts/verify-libfido2-linkage.py", worker], cwd=ROOT, env=environment)
-    return worker
-
-
-def private_dependencies(worker):
-    """Return {absolute origin: bundled name} for the worker's non-system dylibs."""
-    found = {}
+    # Link-map provenance: libfido2, OpenSSL and libcbor objects all from the private archives.
+    identity = linkage.verify(worker)
     for dep in checker.dependencies(worker):
-        if dep.startswith(SYSTEM_PREFIXES):
-            continue
-        name = Path(dep).name
-        if not dep.startswith("/") or not any(pattern.match(name) for pattern in checker.PRIVATE_DYLIBS):
-            raise RuntimeError(f"Worker has an unreviewed non-system dependency: {dep}")
-        found[dep] = name
-    for origin in list(found):
-        for dep in checker.dependencies(Path(origin)):
-            if not dep.startswith(SYSTEM_PREFIXES):
-                raise RuntimeError(f"{origin} has a transitive non-system dependency: {dep}")
-    return found
-
-
-def provenance(origin):
-    resolved = Path(origin).resolve(strict=True)
-    return {
-        "load_command": origin, "resolved_origin": str(resolved), "origin_sha256": sha256(resolved),
-        "origin_minos": checker.minimum_os(resolved),
-        "origin_signature": "adhoc" if "Signature=adhoc" in subprocess.run(
-            ["codesign", "-dv", str(resolved)], capture_output=True, text=True).stderr else "other",
-    }
+        if not dep.startswith(checker.SYSTEM_PREFIXES) or checker.FORBIDDEN_LINKAGE.search(dep):
+            raise RuntimeError(f"Release worker has a non-system dynamic dependency: {dep}")
+    minimum = checker.minimum_os(worker)
+    if checker.version_tuple(minimum) > checker.version_tuple(DEPLOYMENT_TARGET):
+        raise RuntimeError(f"Release worker requires macOS {minimum}, above the reviewed floor {DEPLOYMENT_TARGET}")
+    return worker, identity
 
 
 def tauri_build(minimum, environment):
@@ -127,23 +109,15 @@ def tauri_build(minimum, environment):
     return app
 
 
-def relocate(app, worker_source, dependencies):
+def install_notices(app, worker_source):
     contents = app / "Contents"
-    worker = contents / "MacOS/fido-worker"
-    if sha256(worker) != sha256(worker_source):
+    if sha256(contents / "MacOS/fido-worker") != sha256(worker_source):
         raise RuntimeError("Bundled worker is not the verified release worker")
-    frameworks = contents / "Frameworks"
-    frameworks.mkdir()
-    changes = []
-    for origin, name in sorted(dependencies.items()):
-        target = frameworks / name
-        shutil.copyfile(Path(origin).resolve(strict=True), target)
-        target.chmod(0o644)
-        run(["install_name_tool", "-id", FRAMEWORK_PREFIX + name, target])
-        changes += ["-change", origin, FRAMEWORK_PREFIX + name]
-    if changes:
-        run(["install_name_tool", *changes, worker])
-    worker.chmod(0o755)
+    if (contents / "Frameworks").exists():
+        raise RuntimeError("Tauri produced Contents/Frameworks; the reviewed bundle has no dylibs")
+    notices = contents / "Resources" / checker.NOTICES
+    shutil.copyfile(ROOT / checker.NOTICES, notices)
+    notices.chmod(0o644)
 
 
 def hdiutil(*arguments):
@@ -192,24 +166,26 @@ def main():
 
     shutil.rmtree(PACKAGE, ignore_errors=True)
     (PACKAGE / "sidecar").mkdir(parents=True)
-    worker = build_worker(triple, environment)
-    dependencies = private_dependencies(worker)
+    worker, identity = build_worker(triple, environment)
     sidecar = PACKAGE / "sidecar" / f"fido-worker-{triple}"
     shutil.copyfile(worker, sidecar)
     sidecar.chmod(0o755)
 
-    minimum = max(["11.0", checker.minimum_os(worker), *(checker.minimum_os(Path(d)) for d in dependencies)],
-                  key=checker.version_tuple)
-    built = tauri_build(minimum, environment)
+    built = tauri_build(DEPLOYMENT_TARGET, environment)
     app = PACKAGE / built.name
     shutil.move(built, app)
-    relocate(app, worker, dependencies)
+    install_notices(app, worker)
     signer.sign(app, "-")
     frontend = ROOT / "dist"
     summary = checker.check(app, signature_mode="adhoc", expected_version=version,
                             frontend_dist=frontend, execute_worker=True)
-    summary["release_worker_sha256_before_relocation"] = sha256(worker)
-    summary["native_dependencies"] = {name: provenance(origin) for origin, name in dependencies.items()}
+    summary["release_worker_sha256_before_signing"] = sha256(worker)
+    summary["native_dependencies"] = {
+        "libfido2": {key: identity[key] for key in ("version", "revision", "source_archive_sha256",
+                                                    "patch_sha256", "static_archive_sha256", "deployment_target")},
+        **identity["dependencies"],
+    }
+    summary["third_party_notices_sha256"] = sha256(ROOT / checker.NOTICES)
     summary["bundled_sha256"] = {
         path.relative_to(app).as_posix(): sha256(path)
         for path in sorted(app.rglob("*")) if path.is_file() and checker.is_mach_o(path)
