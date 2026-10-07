@@ -9,7 +9,10 @@
 //! 3. the crate's resolved dependency graph (Cargo.lock) is exactly the reviewed set, so no
 //!    production mutation crate can arrive transitively;
 //! 4. the built executable's symbol table contains no destructive libfido2 symbol (and, on macOS,
-//!    does contain the read-only ones, so the absence check is not vacuous);
+//!    does contain the read-only ones, so the absence check is not vacuous). The executable does
+//!    import `IOHIDDeviceSetReport`: it is libfido2's own HID write path (`hid_osx.c`), which every
+//!    GetInfo uses. H0 code cannot call it (check 1), and the only libfido2 entry points that
+//!    reach it are the allowlisted ones (check 2), none of which emits the destructive command;
 //! 5. on macOS, the linker map of the final executable shows libfido2's `reset.c` object was not
 //!    linked, and the archive is the pinned private build.
 //!
@@ -345,7 +348,6 @@ fn executable_has_no_destructive_native_symbol() -> TestResult {
         "fido_dev_largeblob",
         "fido_dev_enable_entattest",
         "fido_dev_toggle_always_uv",
-        "IOHIDDeviceSetReport",
     ] {
         assert!(
             !symbols.contains(forbidden),
@@ -379,7 +381,8 @@ fn executable_has_no_destructive_native_symbol() -> TestResult {
 #[test]
 fn link_map_excludes_the_reset_object_and_binds_the_pinned_archive() -> TestResult {
     let map_path = PathBuf::from(env!("FIDO_H0_LINK_MAP"));
-    let map = fs::read_to_string(&map_path)?;
+    // ld64 maps can contain non-UTF-8 bytes (e.g. in string-literal section listings).
+    let map = String::from_utf8_lossy(&fs::read(&map_path)?).into_owned();
     let linked = map
         .lines()
         .find_map(|line| line.strip_prefix("# Path: "))
