@@ -1,0 +1,28 @@
+[package]
+name = "fido-h0-timing"
+description = "M6.0 H0 spike only, never shipped: non-destructive Option A pre-send timing measurement. Structurally has no authenticator-erasing capability."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+build = "build.rs"
+
+# Deliberately NOT a dependency of, or dependent on, any production crate that can mutate an
+# authenticator (fido-libfido2, fido-worker, fido-service). `tests/no_destructive_capability.rs`
+# enforces this dependency allowlist, the native-symbol allowlist and the final link map.
+[dependencies]
+fido-platform = { path = "../fido-platform" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.189"
+
+[[bin]]
+name = "fido-h0-timing"
+path = "src/bin/fido-h0-timing.rs"
+
+[lints]
+workspace = true
