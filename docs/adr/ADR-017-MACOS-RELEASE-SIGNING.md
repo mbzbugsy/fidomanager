@@ -3,19 +3,22 @@
 Status: **Proposed for independent review** (M7.2 design only). Revision 2: amended after an
 independent red-team review. The amendment adds the exact app ↔ worker release binding (D14,
 5.8), the signing environment that executes no candidate code (D15, 6.4), and immutable
-publication with final asset verification (D16, 7.5–7.6, 9.4).
-Base: main `d32dcd60fd37cd0bae4702a92447251b709d91dc` (PR #31, M7.0 packaging foundation merged).
+publication with final asset verification (D16, 7.5–7.6, 9.4). Revision 3: rebased on merged
+M7.1. Every statement that earlier revisions made about M7.1's expected output is now checked
+against the merged code and labelled [REPO] (section 1.1).
+Base: main `15ae91c71f1531b26ce3a1ce7367659018c8455d` (PR #33, M7.1 static native dependencies
+merged, on top of PR #31, M7.0 packaging foundation).
 
 This ADR changes no code, script or workflow. It creates no certificate, uses no Apple
 credential, notarizes nothing and publishes nothing. It does not touch M6/Reset. It is written
-against the M7.0 bundle (`docs/validation/M7.0-macos-packaging-foundation.md`) and **assumes M7.1
-lands first**: OpenSSL and libcbor become checksum-pinned private static archives linked into the
-worker like libfido2, `Contents/Frameworks/` disappears, and `LSMinimumSystemVersion` returns to
-11.0. Where M7.1's result is assumed rather than known, it is labelled [ASSUMPTION-M7.1].
+against the bundle that merged M7.1 produces (`docs/validation/M7.1-static-native-deps.md`):
+libfido2, OpenSSL and libcbor are checksum-pinned private static archives linked into the worker,
+the bundle has no third-party dylibs, and `LSMinimumSystemVersion` is 11.0.
 
 ADR-013 to ADR-016 are already reserved by the architecture plan (section 43), so this is
 ADR-017. It elaborates plan sections 36 (release pipeline), 37 (macOS signing), 39 (provenance)
-and M7.0 section 9, gates 3 and 4.
+and M7.0 section 9, gates 3 and 4. M7.1 section 12 carries those forward as its remaining gates
+1–3, which this ADR designs.
 
 The companion validation plan is
 [`docs/validation/M7.2-macos-release-validation-plan.md`](../validation/M7.2-macos-release-validation-plan.md).
@@ -25,12 +28,11 @@ The companion validation plan is
 - [APPLE] Behaviour stated in current Apple developer documentation, read for this ADR (the
   sources are listed at the end). It is quoted or closely paraphrased, never extrapolated.
 - [GITHUB] Behaviour stated in current GitHub documentation.
-- [REPO] Inspected source at the base commit.
+- [REPO] Inspected source at the base commit `15ae91c`, which includes M7.1.
 - [POLICY] A project decision. It may be stricter than Apple requires.
 - [INFERENCE] Reasoning from the above that no document states directly.
 - [EMPIRICAL] An assumption that must be proven on real hardware or with a real identity before
   M7.2 can be called done. Each one is listed in section 13.
-- [ASSUMPTION-M7.1] Depends on M7.1's final shape.
 
 ## 1. Context
 
@@ -53,22 +55,47 @@ What exists at the base commit [REPO]:
   entitlements, and the identifiers `eu.fidomanager.desktop` and
   `eu.fidomanager.desktop.fido-worker`. It does **not** assert a specific expected Team ID or a
   designated requirement. Its exact-tree allowlist also rejects a stapled bundle (see 8.3).
+  Since M7.1 the checker also rejects `Contents/Frameworks/`, requires exactly two Mach-O files
+  and a byte-identical `Contents/Resources/THIRD_PARTY_NOTICES.md`, and **executes the worker**
+  by default (exit-code checks, plus a hostile-OpenSSL start that first compiles a test dylib
+  with `xcrun clang`). It has a `--no-execute-worker` switch.
 - `scripts/package-macos.py` refuses to run when `APPLE_*`, `TAURI_SIGNING_*` or
   `LIBFIDO2_LIB_DIR` is set.
-- CI (`.github/workflows/ci.yml`) builds an ad-hoc bundle and DMG on `pull_request` with no
-  secrets and uploads nothing.
+- CI (`.github/workflows/ci.yml`, job `macos-packaging`) builds an ad-hoc bundle and DMG on
+  `pull_request` with no secrets and uploads nothing.
 - The repository is **public** (checked through the GitHub API). That matters for environment
   secrets, required reviewers and artifact attestations (section 6).
 
 M7.0 recorded this as an open gate: "Today authenticity rests on the bundle seal and Gatekeeper at
 app launch. A per-spawn requirement check needs a real Team ID and must land before a signed
-release."
+release." M7.1 keeps it open as its remaining gate 2.
+
+### 1.1 What merged M7.1 established
+
+Earlier revisions of this ADR had to guess these points. Each is now taken from the merged code
+at `15ae91c` [REPO]:
+
+| Point | Merged M7.1 fact | Where |
+| --- | --- | --- |
+| Bundle tree | `Contents/Info.plist`, `MacOS/fidomanager-app`, `MacOS/fido-worker`, `Resources/icon.icns`, `Resources/THIRD_PARTY_NOTICES.md`, `_CodeSignature/CodeResources`. The checker's allowlist also tolerates an optional `Contents/PkgInfo`; the M7.1 evidence bundle lists none, and this design does not rely on one | `check-macos-bundle.py` `check_tree`; M7.1 doc section 9 |
+| Nested code | exactly two Mach-O files; no `Contents/Frameworks/`; no symlinks; any other file name containing `fido-worker` is rejected | `check_tree`; `sign-macos-bundle.py` refuses Frameworks and any Mach-O outside `Contents/MacOS/` |
+| Worker linkage | static libfido2 1.17.0 (patched), OpenSSL 3.5.9 and libcbor 0.14.0 from `libfidomanager_{fido2_bounded,crypto,cbor}.a`; dynamic dependencies exactly `/usr/lib/libz.1.dylib`, CoreFoundation, IOKit, `/usr/lib/libiconv.2.dylib`, `/usr/lib/libSystem.B.dylib`; loader `/usr/lib/dyld`; no `LC_RPATH` or `LC_DYLD_ENVIRONMENT` | `crates/fido-libfido2/build.rs`; `check_linkage` (`WORKER_SYSTEM_DEPENDENCIES`) |
+| Link provenance | proven from the linker map on the unsigned release worker before it is bundled (every live libfido2, OpenSSL and libcbor definition attributed to the private archives; allowlisted linker inputs) | `verify-libfido2-linkage.py`, called by `package-macos.py` and again by CI |
+| Deployment floor | worker built with `MACOSX_DEPLOYMENT_TARGET=11.0`; `LSMinimumSystemVersion` must equal 11.0 and no code may need more | `package-macos.py`; `check_linkage` |
+| OpenSSL runtime policy | `OPENSSLDIR` compiled to root-owned `/var/empty/fidomanager-openssl`; no shared, module, engine, DSO or autoload-config | `build-native-deps.py` `OPENSSL_POLICY`; checker `PRIVATE_OPENSSLDIR` |
+| Source pins | `native/{libfido2,openssl,libcbor}/source.lock.json` (URL, tag, commit, archive SHA-256, license SPDX and SHA-256, archive name); upstream licences in `native/<name>/LICENSE.upstream` | lock files |
+| Build identity | path-free `build-identity.json` beside the private archives in Cargo's `OUT_DIR/private-libfido2/`, carrying each dependency's version, tag, commit, source and archive SHA-256, licence, compiler, SDK, options and deterministic controls; read back by the linkage verifier | `build-libfido2.py`; `build-native-deps.py` |
+| Package summary | `target/macos-package/package-summary.json`: native identities, notices SHA-256, SHA-256 of each bundled Mach-O after the ad-hoc seal, `developer_id_signed: false`, `notarized: false` | `package-macos.py` |
+| Notices | `THIRD_PARTY_NOTICES.md` covers libfido2 (with its openbsd-compat notices), OpenSSL and libcbor only; it states that Rust crate and frontend notices are out of its scope | the file; M7.1 gate 5 |
+| Architectures | the packager builds for the host only and refuses universal builds; CI packages arm64. x86_64 archives build, but no x86_64 worker is linked or packaged | `package-macos.py` `host_triple`; M7.1 gate 4 |
+| Reproducibility | byte-identical archives across separate paths on the same host and toolchain only; not claimed across machines | M7.1 doc section 11, criterion 5 |
+| Not yet proven | actual launch on macOS 11; clean-machine runs; Developer ID and Hardened Runtime; OpenSSL PGP signature check (the SHA-256 pin is the gate) | M7.1 gates 1, 3 and 6 |
 
 ## 2. Decisions (summary)
 
 | # | Decision | Kind |
 | --- | --- | --- |
-| D1 | The shipped code set is exactly two Mach-O executables: the main app and `Contents/MacOS/fido-worker`. Tauri adds no other nested code in this configuration. Anything else fails the release. | [POLICY], [ASSUMPTION-M7.1] |
+| D1 | The shipped code set is exactly two Mach-O executables: the main app and `Contents/MacOS/fido-worker`. Tauri adds no other nested code in this configuration. Anything else fails the release. | [POLICY]; matches [REPO] M7.1 checker and signer |
 | D2 | Sign inside-out: worker, then the release-worker identity record (D14), then bundle, then DMG. Never sign with `--deep`. | [APPLE] + [POLICY] |
 | D3 | Hardened Runtime on both executables. **Zero entitlements** on both. No exception entitlement may be added without its own ADR. | [APPLE] requirement + [POLICY] |
 | D4 | Every signature carries a secure timestamp from `timestamp.apple.com`. Without one, signing fails; there is no unsigned fallback. | [APPLE] + [POLICY] |
@@ -89,23 +116,32 @@ release."
 
 ### 3.1 What gets signed
 
-After M7.1 [ASSUMPTION-M7.1]:
+The merged M7.1 bundle [REPO], plus the two files this design adds (marked "M7.2"):
 
 ```text
 Fido Manager.app/
   Contents/
-    Info.plist                     bound to the bundle signature
-    PkgInfo
+    Info.plist                     bound to the bundle signature; LSMinimumSystemVersion 11.0
     MacOS/fidomanager-app          main executable  (signing id eu.fidomanager.desktop)
-    MacOS/fido-worker              helper tool      (signing id eu.fidomanager.desktop.fido-worker)
-    Resources/icon.icns            sealed resource
+    MacOS/fido-worker              helper tool      (signing id eu.fidomanager.desktop.fido-worker);
+                                   static libfido2 + OpenSSL + libcbor, system libraries only
+    Resources/icon.icns            sealed resource (byte-identical to src-tauri/icons/icon.icns)
+    Resources/THIRD_PARTY_NOTICES.md
+                                   sealed resource (byte-identical to the repository copy)
     Resources/release-worker-identity.json
-                                   sealed resource; written by the signing driver after the worker
-                                   is signed and before the bundle is signed (section 5.8)
-    Resources/<third-party notices> sealed resource (M7.0 gate 2; exact names decided with M7.1)
+                                   M7.2: sealed resource; written by the signing driver after the
+                                   worker is signed and before the bundle is signed (section 5.8)
     _CodeSignature/CodeResources   bundle seal
-    CodeResources                  notarization ticket, added only by `stapler` (section 8.3)
+    CodeResources                  M7.2: notarization ticket, added only by `stapler` (section 8.3)
 ```
+
+- [REPO] There is no `Contents/Frameworks/`. The M7.1 checker's allowlist also accepts an
+  optional `Contents/PkgInfo`, which is non-code. The M7.1 evidence bundle has none and this
+  design neither adds nor needs one. The driver's tree check uses the same allowlist as the
+  checker (PkgInfo optional), so the two cannot disagree about a valid bundle.
+- [REPO] Today's checker rejects both M7.2 files as unexpected bundle entries. That is correct for
+  the ad-hoc Build output (neither may exist yet). The `--signature developer-id` mode needs an
+  explicit allowlist entry for the record, and `--stapled` for the ticket (section 12, step 7).
 
 - [APPLE] Helper tools belong in `Contents/MacOS/` or `Contents/Helpers/` ("Placing content in a
   bundle"). `Contents/MacOS/fido-worker` is a documented location, so no non-standard layout is
@@ -118,8 +154,9 @@ Fido Manager.app/
   `targets: ["app"]` and a single `externalBin`. `macOS.frameworks`, `resources`, `plugins` and
   updater artifacts are forbidden by `check-renderer-boundary.mjs`. WKWebView is a system
   framework and runs its content in Apple's own XPC processes, which are not part of our bundle.
-  The checker already requires the bundle's Mach-O set to be exactly {main, worker, allowlisted
-  dylibs}. After M7.1 the allowlist is empty.
+  [REPO] Since M7.1 the checker requires the Mach-O set to be exactly {fidomanager-app,
+  fido-worker}, and `sign-macos-bundle.py` refuses to sign if `Contents/Frameworks/` exists or
+  any Mach-O sits outside `Contents/MacOS/`.
 - [POLICY] The release checks require the Mach-O set to be **exactly** {main, worker}. Every
   regular file is checked for Mach-O magic, including fat headers. Any extra code (a framework,
   `.dylib`, `.so`, XPC service or plug-in) fails the release. It is never signed "to make it pass".
@@ -180,6 +217,12 @@ scripts.
   build. It stays the **build-job** (ad-hoc) signer. Developer ID signing moves to the separate
   pinned driver (D15). The candidate's `sign-macos-bundle.py` never runs where the identity is
   available.
+- [REPO] The topology fits M7.1's signer: it signs every helper in `Contents/MacOS/` with the
+  identifier `<CFBundleIdentifier>.<file name>` (which yields `eu.fidomanager.desktop.fido-worker`),
+  then the bundle, then runs `codesign --verify --strict --deep`. The driver keeps that order and
+  those identifiers. The one difference is step 2: the record is written between the helper and
+  the bundle, so the bundle seal covers it. Re-signing with `--force` replaces the Build job's
+  ad-hoc signatures.
 
 ### 3.3 Entitlement policy
 
@@ -206,11 +249,13 @@ scripts.
 "Driver" means the pinned signing driver in the credential-bearing job. It runs only Apple OS
 tools and treats the candidate as data (D15). "Verify" is the fresh, secret-free job after signing.
 "Build" is the secret-free job before signing. Candidate scripts, including
-`check-macos-bundle.py`, run only in Build and Verify.
+`check-macos-bundle.py`, run only in Build and Verify. That matters concretely for M7.1's checker:
+by default it executes the worker and compiles and loads a test dylib (section 1).
 
 | Check | Command | Runs in | Pass criterion |
 | --- | --- | --- | --- |
-| Exact tree and Mach-O set | driver's own allowlist walk (no symlinks, regular files, Mach-O magic incl. fat headers) | Driver (pre-sign) and Verify | exactly {main, worker} as code; no `Frameworks/` [ASSUMPTION-M7.1]; no pre-existing identity record |
+| Exact tree and Mach-O set | driver's own allowlist walk (no symlinks, regular files, Mach-O magic incl. fat headers), using the M7.1 checker's allowlist (section 3.1) | Driver (pre-sign) and Verify; the M7.1 checker enforces the same in Build | exactly {main, worker} as code; no `Frameworks/`; no pre-existing identity record |
+| Build-output consistency | compare each Mach-O's and the notices file's SHA-256 with `package-summary.json` (`bundled_sha256`, `third_party_notices_sha256`) inside the same `build-output.tar` | Driver (pre-sign, data only) | equal; `developer_id_signed` and `notarized` are `false` |
 | Enforcing-build marker | byte search of the main binary for the marker (5.6) | Driver (pre-sign, data only) and Verify | present; its Team ID and release ID equal the driver's pinned Team ID and the tag's version/commit |
 | Deep strict verify | `codesign --verify --strict --deep --verbose=4 "Fido Manager.app"` | Driver (post-sign) and Verify | exit 0 [APPLE: `--strict` matches notarization's restrictiveness] |
 | Signature details | `codesign -dvvv "…/fidomanager-app"` and `"…/fido-worker"` | Driver and Verify | `Authority=Developer ID Application: … (TEAMID)`, then `Developer ID Certification Authority`, then `Apple Root CA`; `TeamIdentifier=$EXPECTED_TEAM_ID`; `Timestamp=` present, **not** `Signed Time=` [APPLE]; `flags=0x10000(runtime)`; expected `Identifier=` |
@@ -221,7 +266,8 @@ tools and treats the candidate as data (D15). "Verify" is the fresh, secret-free
 | App requirement | same, with the app requirement | Driver and Verify | satisfied |
 | Default DR shape | `codesign -d -r- <exe>` | Verify | equivalent to the 5.1 requirement plus the default Mac App Store branch codesign adds; the identifier and Team ID match |
 | Structural and linkage checks | `check-macos-bundle.py --signature developer-id --stapled --expected-team-id …` | **Verify only** (and the ad-hoc mode in Build) | passes |
-| Executing the worker or app | `packaged_worker` test, launch checks | **Build (ad-hoc) and Verify only** | never in the Driver |
+| Executing the worker or app | `packaged_worker` test, launch checks, the M7.1 checker's worker-runtime and hostile-OpenSSL checks | **Build (ad-hoc) and Verify only** | never in the Driver |
+| Signed worker is the linked worker | on copies, `codesign --remove-signature` of the Build-output worker and of the signed worker, then compare SHA-256 | **Verify** | equal, so the link provenance proven in Build carries over to the signed worker [INFERENCE, EMPIRICAL E19] |
 | Gatekeeper | `spctl --assess …` (8.4) | **Verify** | `accepted`, `source=Notarized Developer ID` |
 
 ## 5. Worker authenticity before spawn
@@ -518,6 +564,9 @@ strict schema (unknown fields rejected, fixed hex lengths):
   [APPLE] TN3126: for code targeting macOS 10.12 or later there is one SHA-256 code directory, and
   `CDHash` is that hash truncated to 20 bytes. `cdhash_sha256` (`CandidateCDHashFull`) is recorded
   for provenance and is compared in Verify.
+- [REPO] M7.1 packages a single host architecture (arm64 in CI) and refuses universal builds, so
+  today `slices` has exactly one entry. The list form is kept so that an x86_64 or universal
+  release (M7.1 gate 4) needs no schema change; the verifier still requires every slice to match.
 - `build_id` is the worker's compiled-in build identity (version + source commit). The build job
   compiles it in, and the worker reports it in `ChildHello`. It is a consistency check, not the
   authority.
@@ -698,9 +747,14 @@ Developer ID key, the notary key and the keychain must not execute any of the fo
 
 - `fido-worker` or `fidomanager-app`, in any mode;
 - any script from the candidate commit: `sign-macos-bundle.py`, `check-macos-bundle.py`,
-  `package-macos.py`, test scripts, `.mjs` checkers;
+  `package-macos.py`, and M7.1's `build-libfido2.py`, `build-native-deps.py`,
+  `verify-libfido2-linkage.py`, `test-native-deps.py`, `test-credman-linkage.py` and
+  `test-macos-bundle-check.py`, test scripts, `.mjs` checkers;
 - Cargo, rustc or build scripts, proc macros, `pnpm`/`npm`/`npx` or any lifecycle hook,
-  package-manager installs of any kind;
+  package-manager installs of any kind (including `brew`). [REPO] Since M7.1,
+  `crates/fido-libfido2/build.rs` runs `python3 scripts/build-libfido2.py build`, which configures
+  and compiles OpenSSL, libcbor and libfido2 and runs a compiled OpenSSL probe. Any `cargo build`
+  therefore executes candidate Python and native build code;
 - repository test tooling;
 - local or reusable workflows or composite actions taken from the candidate commit
   (`uses: ./…`);
@@ -839,7 +893,7 @@ preflight ─► build ─► sign-notarize ─► verify ─► attest ─► p
 
 | Job | Runs | Produces | Never |
 | --- | --- | --- | --- |
-| `build` | Checks out the peeled commit. Pinned toolchains (Rust from `rust-toolchain.toml`, Node 24.21.0, pnpm 10.17.1); `pnpm install --frozen-lockfile`; M7.1 native builds from pinned sources; `package-macos.py` release flavor (enforcing build, ad-hoc seal); `check-macos-bundle.py` (ad-hoc + enforcing marker); bundle-checker regressions; packaged worker handshake (ad-hoc, non-enforcing path); SBOM inputs | `build-output.tar` (the ad-hoc `.app` via `ditto` plus build-identity JSON and SBOM inputs) and its SHA-256 `D0` as a job output; `upload-artifact` retention 1 day | sees secrets; signs with Developer ID; uses caches |
+| `build` | Checks out the peeled commit. Mirrors the M7.1 `macos-packaging` CI job [REPO] with release additions: Node 24.21.0, pnpm 10.17.1, `pnpm install --frozen-lockfile`; `brew install cmake pkg-config` (build tools only; versions recorded); `scripts/build-libfido2.py fetch` (the three locked source archives into `target/native-sources/`, SHA-256-checked); `scripts/test-native-deps.py`; Rust 1.98.1 from `rust-toolchain.toml`; `package-macos.py --dmg` in its release flavor (native builds through `build.rs`, link-map provenance, `minos` 11.0, notices, ad-hoc seal, checker with worker execution, mounted-DMG re-check); `verify-libfido2-linkage.py` on the release worker; `test-macos-bundle-check.py`; `packaged_worker` (ad-hoc, non-enforcing path); clean-tree check; SBOM inputs | `build-output.tar` and its SHA-256 `D0` as a job output; `upload-artifact` retention 1 day. The tar holds the ad-hoc `.app` (via `ditto`), `package-summary.json`, the `build-identity.json` that the linkage verifier read, and the SBOM inputs. The ad-hoc DMG is a Build check only and is not handed off | sees secrets; signs with Developer ID; uses caches |
 | `sign-notarize` | **No candidate checkout.** Checks out the signer repo at the pinned SHA; downloads `build-output.tar` and verifies `D0` before extracting; runs the driver (6.4): data-only pre-checks, ephemeral keychain, sign worker, write the identity record, sign bundle, post-sign data checks, app notarization and staple, DMG build, sign, notarization and staple, digests `D1`–`D7` (9.4) | stapled app zip, stapled DMG, both notary logs, driver report with every digest | executes candidate binaries or scripts; runs pnpm/cargo/npm; uploads anything if any step failed |
 | `verify` | Fresh VM, checks out the peeled commit, no secrets. Verifies `D5` and `D7`; quarantine-simulated assessment (validation plan, Part A); `stapler validate`; `spctl`; deep strict verify; publisher and exact requirements; record ↔ worker checks; `check-macos-bundle.py --signature developer-id --stapled`; builds and runs `packaged_worker` **with the enforcing verifier** against the signed worker (positive), plus an ad-hoc copy and, from the second release on, the previous release's worker (negatives); generates the SBOM, the manifest and `release-authorization.json` (7.6) | evidence, SBOM, manifest, authorization record, `SHA256SUMS` | has secrets |
 | `attest` | `actions/attest-build-provenance` over the DMG, the app zip, the SBOM, the manifest and the authorization record. [GITHUB] available for public repositories | Sigstore-backed provenance attestations | runs without `verify` passing |
@@ -869,8 +923,10 @@ release scripts. The digest stops anything other than the build job's own output
 sign-notarize   (driver @ pinned SHA; candidate = data; OS tools by absolute path)
   1  assert secrets non-empty; assert MACOS_TEAM_ID == driver-config Team ID
   2  verify build-output.tar SHA-256 == D0 (needs.build); ditto -x into $RUNNER_TEMP/candidate
-  3  data-only pre-checks: exact tree, Mach-O set, no symlinks, no identity record yet,
-     Info.plist fields (plistlib), enforcing marker bytes: Team ID + version + commit match
+  3  data-only pre-checks: exact tree (M7.1 allowlist), Mach-O set, no symlinks, no identity
+     record yet, no Frameworks/, Info.plist fields (plistlib; LSMinimumSystemVersion 11.0),
+     notices file present, digests equal package-summary.json, enforcing marker bytes:
+     Team ID + version + commit match
   4  ephemeral keychain; assert exactly one identity == MACOS_DEVID_APP_SHA1, OU == Team ID
   5  codesign worker (3.2 step 1); publisher requirement satisfied; record D1 = worker file SHA-256
      and per-arch CDHash/CandidateCDHashFull
@@ -897,6 +953,7 @@ verify (fresh VM, no secrets)
      copy app out with ditto
   B  stapler validate, spctl (8.4), codesign deep strict, publisher + exact requirements,
      record ↔ worker (CDHash and CandidateCDHashFull), checker --stapled
+  B2 remove-signature comparison of the signed worker with the Build-output worker (section 4)
   C  cargo test -p fido-worker --test packaged_worker -- --ignored with the enforcing verifier:
      positive (the signed worker); negatives (ad-hoc copy; previous release's signed worker,
      from release 2 on)
@@ -1083,11 +1140,35 @@ against the worker's `CDHash`; Verify repeats both checks. The record is a seale
     "target": "aarch64-apple-darwin", "deployment_target": "11.0",
     "reproducibility": "traceable"            // not claimed bit-reproducible (plan §39)
   },
-  "native": {                                   // from source.lock.json + build-identity.json
-    "libfido2": { "version": "1.17.0", "revision": "…", "source_sha256": "…", "patch_sha256": "…", "static_archive_sha256": "…" },
-    "openssl":  { "version": "…", "source_sha256": "…", "configure": ["no-shared", "…"] },  // [ASSUMPTION-M7.1]
-    "libcbor":  { "version": "…", "source_sha256": "…" }                                   // [ASSUMPTION-M7.1]
+  "build_tools": { "cmake": "<cmake --version>", "pkg-config": "<pkg-config --version>" },
+                                                // Homebrew, unpinned; recorded, not reproduced
+  "native": {
+    // Pinned values: native/<name>/source.lock.json. Build-time values ("…"):
+    // build-identity.json and package-summary.json from the build job (section 1.1).
+    "libfido2": { "version": "1.17.0", "revision": "b974e7cf2ee7392134cc12c08b76a068cf250dd8",
+                  "source_sha256": "a7c340900cb58b6905e12855944069024f39707f9573d52d4830a4561a50819a",
+                  "patch_sha256": "8b416da841fca9268d45aa1f10236270be0983400dc471d2920ff09fc5ce0465",
+                  "license": "BSD-2-Clause", "openssl_api_compat": "0x10100000L",
+                  "static_archive": "libfidomanager_fido2_bounded.a", "static_archive_sha256": "…" },
+    "openssl":  { "version": "3.5.9", "tag": "openssl-3.5.9",
+                  "commit": "45e844fa2a14ec92d146bd8f5778ac130b6625fb",
+                  "source_sha256": "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a",
+                  "license": "Apache-2.0", "openssldir": "/var/empty/fidomanager-openssl",
+                  "build_options": ["no-shared", "no-module", "no-engine", "no-dso", "no-autoload-config",
+                                    "no-legacy", "no-apps", "no-tests", "no-docs", "no-ui-console",
+                                    "-mmacosx-version-min=11.0"],
+                  "static_archive": "libfidomanager_crypto.a", "static_archive_sha256": "…" },
+    "libcbor":  { "version": "0.14.0", "tag": "v0.14.0",
+                  "commit": "6730c20ab487c0b4dc5fb3fea918937085355bac",
+                  "source_sha256": "82e82efe92a77eb92d290276f627c5cc52e84463981ab695013196b63b7e2f47",
+                  "license": "MIT", "lto": false,
+                  "static_archive": "libfidomanager_cbor.a", "static_archive_sha256": "…" },
+    "compiler": "…", "sdk_version": "…",
+    "deterministic_controls": { "SOURCE_DATE_EPOCH": "1781654400", "ZERO_AR_DATE": "1" },
+    "build_identity_sha256": "…", "package_summary_sha256": "…"
   },
+  "third_party_notices": { "path": "Contents/Resources/THIRD_PARTY_NOTICES.md", "sha256": "…",
+                           "scope": "native libraries only (libfido2, OpenSSL, libcbor)" },
   "signing": {
     "team_id": "XXXXXXXXXX", "identity_sha1": "…", "authority": "Developer ID Application: …",
     "hardened_runtime": true, "entitlements": {},
@@ -1121,8 +1202,14 @@ against the worker's `CDHash`; Verify repeats both checks. The record is a seale
 | `notary-app.json`, `notary-dmg.json` | Apple notarization logs (no secrets; they contain job IDs and cdhashes) |
 | GitHub attestations | `gh attestation verify FidoManager-….dmg -R mbzbugsy/fidomanager` binds the digest to this workflow, commit and run; the immutable release adds GitHub's release attestation [GITHUB] |
 
-Inside the bundle: third-party notices for libfido2, OpenSSL and libcbor (M7.0 gate 2), and
-`release-worker-identity.json` (5.8), both as sealed resources.
+Inside the bundle, as sealed resources: `Contents/Resources/THIRD_PARTY_NOTICES.md` [REPO, M7.1]
+and `release-worker-identity.json` (5.8).
+
+[REPO] The notices file covers only the statically linked native libraries: libfido2 (BSD-2-Clause,
+with its openbsd-compat notices), OpenSSL (Apache-2.0) and libcbor (MIT). It says itself that Rust
+crate and frontend package notices are outside its scope. This ADR does **not** claim licence
+coverage for Rust crates or npm packages. That is M7.1's remaining gate 5 and must be decided
+before the first public release (section 12, step 1).
 
 ### 9.3 SBOM scope
 
@@ -1135,6 +1222,9 @@ Inside the bundle: third-party notices for libfido2, OpenSSL and libcbor (M7.0 g
 - `fido-worker`: its Rust crate closure, plus the statically linked libfido2, OpenSSL and libcbor
   with their versions, source digests and patch digests.
 - System frameworks are listed as external, unversioned dependencies.
+- The native components' licences come from the lock files (`license_spdx`, `license_sha256`).
+  Listing a Rust or npm component's licence in the SBOM is an inventory, not a redistribution
+  notice; it does not close M7.1 gate 5.
 
 [POLICY] It is generated by a small in-repo, reviewed script from `cargo metadata`/`cargo tree`,
 the pnpm lockfile and the native lock files. This avoids adding an SBOM tool to the release
@@ -1174,6 +1264,9 @@ records, not through one file hash.
 | Wrong Team ID | app (requirement + `kSecCodeInfoTeamIdentifier`); driver (certificate vs pinned Team ID vs marker); Verify | app: terminal rejection; release: job fails before signing |
 | Wrong worker identifier | app (requirement + dynamic info); driver; Verify | same as above |
 | Unsigned or extra nested code | driver exact code set; `codesign --verify --strict --deep`; Verify | release fails; never "fixed" by signing the extra code |
+| Bundled dylib, `Contents/Frameworks/`, non-system or Homebrew linkage, `minos` above 11.0, or link-map provenance not proven | Build (M7.1 `package-macos.py`, `verify-libfido2-linkage.py`, checker) [REPO]; driver tree check; Verify checker | release fails in Build, before anything reaches the signing job |
+| Notices file missing or not byte-identical to the repository copy | Build and Verify (M7.1 checker) [REPO]; driver (presence and digest vs `package-summary.json`) | release fails |
+| Signed worker's code differs from the Build-output worker after removing signatures | Verify (section 4) | release fails |
 | Hardened Runtime missing | app (`runtime` flag, static and dynamic); driver; Verify | app: rejection; release: fails |
 | Entitlements present | app (static info); driver; Verify | app: rejection; release: fails |
 | Missing secure timestamp | driver (`Timestamp=` required, `Signed Time=` rejected); Verify | release fails; no retry without a timestamp |
@@ -1219,13 +1312,15 @@ unstapled, publisher-only worker matching, or "publish and fix later".
 - Rotation is an environment change plus a reviewed variable change. The fingerprint pin makes a
   silent certificate swap fail the release.
 
-## 12. What M7.2 implementation should do after M7.1 merges
+## 12. Implementation order (M7.1 has merged)
 
-In order, each step reviewable on its own:
+The M7.1 shape check that earlier revisions listed as step 0 is done (section 1.1). In order,
+each step reviewable on its own:
 
-1. Rebase on the M7.1 merge. Confirm that the Mach-O set is {main, worker}, `Contents/Frameworks/`
-   is absent, `LSMinimumSystemVersion` is 11.0, and the OpenSSL/libcbor lock and identity files
-   exist. Update this ADR's [ASSUMPTION-M7.1] items if anything differs.
+1. **Carried-over M7.1 gates that are decisions, not code**: decide whether Rust crate and frontend
+   package notices are required for distribution (M7.1 gate 5) and, if so, how they ship; and add
+   PGP verification of the OpenSSL release signature as a manual review step whenever
+   `native/openssl/source.lock.json` changes (M7.1 gate 6; the SHA-256 pin stays the gate).
 2. **Worker verifier** (`fido-platform`, macOS): FFI to `SecStaticCodeCreateWithPath`,
    `SecStaticCodeCheckValidityWithErrors`, `SecCodeCopyGuestWithAttributes`,
    `SecCodeCheckValidity`, `SecCodeCopySigningInformation`, `SecRequirementCreateWithString`,
@@ -1250,9 +1345,13 @@ In order, each step reviewable on its own:
    own repository.
 7. **Candidate-side checker** (`check-macos-bundle.py`, Build/Verify only): `--expected-team-id`,
    requirement and authority-chain assertions, timestamp wording, enforcing marker, `--stapled`,
-   the identity-record allowlist entry and record ↔ worker checks, DMG checks, notices, and new
-   mutation cases (wrong Team ID marker, edited record, worker cdhash ≠ record, stapled extra
-   file, `Signed Time` only, missing chain).
+   record ↔ worker checks, DMG checks, and new mutation cases (wrong Team ID marker, edited
+   record, worker cdhash ≠ record, stapled extra file, `Signed Time` only, missing chain). Its
+   `check_tree` allowlist gains `Contents/Resources/release-worker-identity.json` **only** in
+   `--signature developer-id` mode and `Contents/CodeResources` only with `--stapled`; ad-hoc mode
+   keeps rejecting both, which is what makes "no pre-existing record" hold in Build. The existing
+   M7.1 checks (no Frameworks, exact Mach-O set, system-only linkage, `OPENSSLDIR`, `minos`
+   11.0, byte-identical notices, worker execution) stay unchanged.
 8. **Provenance**: `scripts/release-provenance.py` (manifest, SBOM, `SHA256SUMS`, authorization
    record), run in Verify.
 9. **Workflow**: `.github/workflows/release-macos.yml` per section 7, and the documented one-time
@@ -1291,6 +1390,8 @@ The existing `ci.yml` stays ad-hoc and secret-free. The release workflow is a ne
 | E16 | Is there a documented API that returns the sealed hash of one bundle resource, so the record's in-memory bytes can be compared with the seal directly instead of the S3–S5 re-read pattern? | Apple documentation / DTS; prototype |
 | E17 | Does `SecCodeCopyStaticCode(self)` give the whole bundle, and does S4 with `kSecCSCheckNestedCode` reject (a) an edited record, (b) a different validly signed worker, (c) both swapped together? | Signed bundle, mutated copies |
 | E18 | Can `preflight` confirm through the API that immutable releases are enabled, and does the release object report immutability after publication? | First rehearsal |
+| E19 | Does `codesign --remove-signature` give byte-identical files for the Build-output (ad-hoc) worker and the Developer ID-signed worker, so the M7.1 link-map provenance demonstrably carries over? If not, which bytes differ, and is an equivalent comparison (for example of `__TEXT`/`__DATA` segments) needed? | First signing run, in Verify |
+| E20 | Do the signed app and worker actually launch and pass the per-spawn checks on macOS 11 (the declared floor)? M7.1 checked `minos` and `LSMinimumSystemVersion` statically but launched nothing on macOS 11 (its gate 3) | Validation plan machine M1 on macOS 11 |
 
 ## 14. Alternatives rejected
 
@@ -1340,3 +1441,7 @@ The existing `ci.yml` stays ad-hoc and secret-free. The release workflow is a ne
 - GitHub, *Immutable releases*; *Verifying the integrity of a release*
 - GitHub, *OpenID Connect* reference (`job_workflow_ref`, `job_workflow_sha`, `workflow_sha`)
 - GitHub, *Managing GitHub Actions settings for a repository* (full-length SHA pinning)
+- Repository at `15ae91c`: `docs/validation/M7.1-static-native-deps.md`,
+  `scripts/{package-macos,check-macos-bundle,sign-macos-bundle,build-libfido2,build-native-deps,verify-libfido2-linkage}.py`,
+  `crates/fido-libfido2/build.rs`, `native/*/source.lock.json`, `THIRD_PARTY_NOTICES.md`,
+  `.github/workflows/ci.yml` (`macos-packaging`)
