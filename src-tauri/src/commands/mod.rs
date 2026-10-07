@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use fido_service::discovery_presentation::DiscoveryPresentation;
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
 
 use crate::AppState;
 
@@ -255,6 +254,14 @@ fn deserialize_device_generation<'de, D: serde::Deserializer<'de>>(
     d.deserialize_any(Visitor)
 }
 
+#[cfg(any(
+    test,
+    all(
+        feature = "native-pin",
+        not(feature = "native-ui-spike"),
+        target_os = "macos"
+    )
+))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeleteOutcome {
@@ -272,6 +279,20 @@ pub enum DeleteOutcome {
     NotDispatched,
     OutcomeUnknown,
     Cancelled,
+}
+
+#[cfg(not(any(
+    test,
+    all(
+        feature = "native-pin",
+        not(feature = "native-ui-spike"),
+        target_os = "macos"
+    )
+)))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteOutcome {
+    NotDispatched,
 }
 
 #[derive(Debug, Serialize)]
@@ -302,6 +323,8 @@ pub async fn delete_credential(
         target_os = "macos"
     ))]
     {
+        use tauri::Manager;
+
         let discovery = Arc::clone(&state.discovery);
         let inspection_store = Arc::clone(&state.inspection);
         let authority = Arc::clone(&state.authentication);
@@ -454,7 +477,14 @@ pub async fn delete_credential(
         target_os = "macos"
     )))]
     {
-        let _ = (app, state, request);
+        let _ = (
+            app,
+            state,
+            request.display_device_handle,
+            request.device_generation,
+            request.enumeration_epoch,
+            request.credential_handle,
+        );
         claim.finish(fido_service::activity::ActivityOutcome::Issue(
             "Credential deletion is only supported on macOS with native-pin.",
         ));
@@ -466,6 +496,14 @@ pub async fn delete_credential(
     }
 }
 
+#[cfg(any(
+    test,
+    all(
+        feature = "native-pin",
+        not(feature = "native-ui-spike"),
+        target_os = "macos"
+    )
+))]
 pub(crate) fn map_workflow_result(
     workflow_result: Result<
         fido_service::deletion::DeleteCredentialWorkflowResult,
