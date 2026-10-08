@@ -1460,6 +1460,116 @@ mod tests {
         Ok(())
     }
 
+    /// ADR-017 §5.7 / §12 step 4(b): once a deletion may have been dispatched (durable
+    /// DispatchCapable, outcome unknown), a replacement worker that fails authentication must not
+    /// rewrite that evidence: no NotDispatched, journal and barrier kept, no automatic retry.
+    #[test]
+    fn identity_rejected_replacement_never_erases_unknown_deletion_evidence() -> TestResult {
+        use crate::recovery::{JournalPhase, RecoverableOperation};
+        use crate::{DiscoveryPolicy, RestartPolicy, SupervisorError, SupervisorState};
+
+        let disk = MemoryStorage::default();
+        let authority = AuthenticationAuthority::awaiting_recovery_startup();
+        authority
+            .initialize_recovery(Box::new(disk.clone()))
+            .map_err(|_| "journal")?;
+        let mut r = reserve(&authority, target(vec![1, 2], Some(vec![3]))?)?;
+        native_teardown(&authority, r.intent.binding(), true);
+        let permit = authority.approve_delete_credential(&mut r)?;
+        authority.write_delete_pending(&mut r, &permit)?;
+        let (native_target, worker) = (r.intent.native_target, r.intent.worker);
+        let _dispatch = authority.consume_delete_at(
+            &mut r,
+            permit,
+            Some(native_target),
+            Some(worker),
+            true,
+            Instant::now(),
+        )?;
+        // From here the native delete may have been sent: the outcome is OutcomeUnknown.
+        let durable = || {
+            disk.0
+                .lock()
+                .map(|d| d.bytes.clone())
+                .unwrap_or_default()
+                .unwrap_or_default()
+        };
+        let evidence = durable();
+        let journal_state = |a: &AuthenticationAuthority| {
+            a.recovery.lock().ok().and_then(|slot| {
+                slot.as_ref()
+                    .map(|j| (j.phase(), j.has_unresolved_credential_deletion()))
+            })
+        };
+        assert_eq!(
+            journal_state(&authority),
+            Some((Some(JournalPhase::DispatchCapable), true))
+        );
+
+        // The replacement worker fails authentication, repeatedly asked for.
+        let mut supervisor = DiscoverySupervisor::new(
+            ProcessWorkerLauncher::startup_rejected_for_test(),
+            DiscoveryPolicy::default(),
+            RestartPolicy::default(),
+        )
+        .map_err(|_| "supervisor")?;
+        for _ in 0..3 {
+            assert!(matches!(
+                supervisor.refresh(),
+                Err(SupervisorError::WorkerIdentityRejected { .. })
+            ));
+        }
+        assert_eq!(supervisor.status().state, SupervisorState::IntegrityFailure);
+        assert_eq!(supervisor.status().launches, 0, "no worker, so no retry");
+        assert_eq!(
+            supervisor.retire_authentication(),
+            ExecutionQuiescence::Quiescent
+        );
+
+        // The durable evidence is byte-for-byte unchanged and still unknown.
+        assert_eq!(durable(), evidence);
+        assert_eq!(
+            journal_state(&authority),
+            Some((Some(JournalPhase::DispatchCapable), true))
+        );
+        assert_eq!(authority.recovery_admission(), RecoveryAdmission::Barrier);
+        // It can never be reclassified as NotDispatched.
+        assert!(
+            authority
+                .resolve_delete_result(&r, Resolution::NotDispatched)
+                .is_err()
+        );
+        assert_eq!(durable(), evidence);
+
+        // Releasing the workflow keeps the barrier; ordinary work, including another deletion,
+        // stays blocked until the deliberate deletion-recovery acknowledgement.
+        authority.finish_delete_foundation(
+            r,
+            WorkflowCompletion::Rejected,
+            ExecutionQuiescence::Quiescent,
+        )?;
+        assert_eq!(
+            authority.recoverable_operation(),
+            Some(RecoverableOperation::DeleteCredential)
+        );
+        assert!(matches!(
+            authority.reserve_sensitive(SensitiveWorkflowKind::DeleteCredential),
+            Err(AdmissionError::RecoveryBarrier)
+        ));
+
+        // A restart with the same journal still sees the unknown incident.
+        let restarted = AuthenticationAuthority::awaiting_recovery_startup();
+        restarted
+            .initialize_recovery(Box::new(disk.clone()))
+            .map_err(|_| "journal")?;
+        assert_eq!(restarted.recovery_admission(), RecoveryAdmission::Barrier);
+        assert_eq!(
+            restarted.recoverable_operation(),
+            Some(RecoverableOperation::DeleteCredential)
+        );
+        Ok(())
+    }
+
     #[test]
     fn intent_digest_binds_exact_credential_and_presentation() -> TestResult {
         let a = test_authority();

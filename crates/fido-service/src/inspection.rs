@@ -293,7 +293,11 @@ impl InspectionStore {
         error: crate::SupervisorError,
     ) -> crate::discovery_presentation::DiscoveryPresentation<T> {
         use crate::discovery_presentation::DiscoveryPresentation;
-        if self.awaiting_retired_worker()
+        if error.is_terminal_integrity_failure() {
+            // ADR-017 §5.7: one safe category; no identity detail crosses to the renderer.
+            self.clear();
+            DiscoveryPresentation::IntegrityFailure {}
+        } else if self.awaiting_retired_worker()
             && matches!(error, crate::SupervisorError::RestartBackoff { .. })
         {
             DiscoveryPresentation::Settling {}
@@ -1174,6 +1178,35 @@ mod tests {
             assert_eq!(
                 store.discovery_problem::<()>(error),
                 DiscoveryPresentation::Unavailable {}
+            );
+            assert!(store.entries.is_empty() && store.connected.is_empty());
+            assert!(!store.awaiting_retired_worker());
+        }
+        Ok(())
+    }
+    #[test]
+    fn integrity_failures_clear_everything_and_present_only_the_category()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{SupervisorError, discovery_presentation::DiscoveryPresentation};
+        for error in [
+            SupervisorError::WorkerIdentityRejected {
+                quiescence: fido_core::ExecutionQuiescence::Quiescent,
+            },
+            SupervisorError::WorkerIdentityRejected {
+                quiescence: fido_core::ExecutionQuiescence::Active,
+            },
+            SupervisorError::WorkerExecutableRejected,
+        ] {
+            let mut store = InspectionStore::default();
+            let ids = store
+                .reconcile_connected(&[device(1, 1, 1)], WorkerGeneration(1))
+                .map_err(|_| "reconcile")?;
+            replace(&mut store, ids[0]);
+            // Even an orderly retirement cannot turn an integrity failure into "settling".
+            store.proven_retirement(WorkerGeneration(1));
+            assert_eq!(
+                store.discovery_problem::<()>(error),
+                DiscoveryPresentation::IntegrityFailure {}
             );
             assert!(store.entries.is_empty() && store.connected.is_empty());
             assert!(!store.awaiting_retired_worker());

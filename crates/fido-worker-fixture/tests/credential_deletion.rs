@@ -5,7 +5,8 @@ use common::{TestResult, launcher};
 use fido_core::{ExecutionQuiescence, MutationOutcome, RecoveryAdmission};
 use fido_native_ui::{PinCompletion, PromptOutcome};
 use fido_service::{
-    DiscoveryPolicy, DiscoverySupervisor, ProcessWorkerLauncher, RestartPolicy,
+    DiscoveryPolicy, DiscoverySupervisor, ProcessWorkerLauncher, RestartPolicy, SupervisorError,
+    SupervisorState,
     authentication::{AuthenticationAuthority, NativeController},
     deletion::{DeleteCredentialWorkflowResult, DeletionRecoveryCompletion},
     inspection::{ExactCredentialTarget, InspectionStore, InventoryDevice},
@@ -120,20 +121,29 @@ impl Drop for Harness {
 }
 impl Harness {
     fn inspected(mode: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::inspected_with(mode, false)
+    }
+    /// `substitute_replacement`: workers started after the native delete was entered report a
+    /// different build identity (a substituted binary).
+    fn inspected_with(
+        mode: &str,
+        substitute_replacement: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let log = std::env::temp_dir().join(format!(
             "fido-deletion-{}-{}.log",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::SeqCst)
         ));
-        let args: &'static [&'static str] = Box::leak(
-            vec![
-                "--authentication",
-                Box::leak(format!("--deletion={mode}").into_boxed_str()),
-                Box::leak(format!("--deletion-log={}", log.display()).into_boxed_str()),
-            ]
-            .into_boxed_slice(),
-        );
+        let mut args = vec![
+            "--authentication",
+            Box::leak(format!("--deletion={mode}").into_boxed_str()),
+            Box::leak(format!("--deletion-log={}", log.display()).into_boxed_str()),
+        ];
+        if substitute_replacement {
+            args.push("--bad-build-id-after-dispatch");
+        }
+        let args: &'static [&'static str] = Box::leak(args.into_boxed_slice());
         let storage = Storage::default();
         let a = AuthenticationAuthority::default();
         a.initialize_recovery(Box::new(storage.clone()))?;
@@ -694,5 +704,66 @@ fn serialized_m4_compatibility_pending_restart_and_corrupt_storage() -> TestResu
         .is_err()
     );
     assert_eq!(a.recovery_admission(), RecoveryAdmission::Barrier);
+    Ok(())
+}
+
+/// ADR-017 §5.7 and §12 step 4(b), end to end through the production service, endpoint, runtime
+/// and engine: the native delete was entered and its result lost (OutcomeUnknown). The worker
+/// that replaces it reports another build identity. That is a terminal integrity failure, and it
+/// must not rewrite the earlier uncertain deletion: no NotDispatched, journal and barrier kept,
+/// no automatic retry, and the user still reaches the deliberate deletion recovery.
+#[test]
+fn identity_rejected_replacement_keeps_unknown_deletion_outcome_journal_and_barrier() -> TestResult
+{
+    for mode in ["lost-response", "crash", "unknown"] {
+        let mut h = Harness::inspected_with(mode, true)?;
+        let r = h.run(false)?;
+        assert_eq!(r.outcome, MutationOutcome::OutcomeUnknown, "{mode}");
+        assert!(r.worker_quiescent && r.recovery_required, "{mode}");
+        assert_eq!(h.journal()["phase"], "dispatch_capable", "{mode}");
+        let evidence = h.storage.0.lock().map_err(|_| "disk")?.bytes.clone();
+
+        std::thread::sleep(Duration::from_millis(1_020));
+        let rejected = h.s.refresh();
+        assert!(
+            matches!(
+                rejected,
+                Err(SupervisorError::WorkerIdentityRejected {
+                    quiescence: ExecutionQuiescence::Quiescent
+                })
+            ),
+            "{mode}: {rejected:?}"
+        );
+        // Terminal: asking again launches nothing.
+        for _ in 0..3 {
+            assert!(matches!(
+                h.s.refresh(),
+                Err(SupervisorError::WorkerIdentityRejected { .. })
+            ));
+        }
+        assert_eq!(h.s.status().state, SupervisorState::IntegrityFailure);
+        assert_eq!(
+            h.events(),
+            [
+                "prepared",
+                "proof",
+                "proof-ok",
+                "entered",
+                "replacement-started"
+            ],
+            "{mode}: exactly one replacement was started and the delete was never retried"
+        );
+
+        // The uncertain deletion is unchanged: same bytes, still unknown, still a barrier.
+        assert_eq!(h.storage.0.lock().map_err(|_| "disk")?.bytes, evidence);
+        assert_eq!(h.journal()["phase"], "dispatch_capable");
+        assert!(h.journal()["resolution"].is_null());
+        assert_eq!(h.a.recovery_admission(), RecoveryAdmission::Barrier);
+        assert_eq!(
+            h.a.recoverable_operation(),
+            Some(RecoverableOperation::DeleteCredential)
+        );
+        assert!(h.a.reserve().is_err());
+    }
     Ok(())
 }

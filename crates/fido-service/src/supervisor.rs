@@ -13,6 +13,11 @@
 //! long cooldown; after it, exactly one probe launch is allowed, and a failed probe re-opens the
 //! circuit immediately. The result is a bounded respawn *rate* with no tight loop, that heals by
 //! itself, and that never needs the renderer to ask for a restart.
+//!
+//! Integrity failures are the exception (ADR-017 §5.7): a worker that fails its identity checks,
+//! or an executable that fails its integrity checks, is not transient. The supervisor latches the
+//! failure before anything else and from then on refuses every launch for the app session, with no
+//! backoff, no probe and no fallback. No error conversion clears the latch.
 
 use std::collections::VecDeque;
 
@@ -106,6 +111,22 @@ pub enum SupervisorError {
     InvalidDiscoveryPolicy,
     #[error("the native worker was shut down")]
     Stopped,
+    /// Terminal (ADR-017 §5.7). Never reported as `Launch(..)`, never retried.
+    #[error("the native worker failed its integrity verification")]
+    WorkerIdentityRejected { quiescence: ExecutionQuiescence },
+    /// Terminal (ADR-017 §5.7): the worker executable failed its per-spawn integrity checks.
+    #[error("the native worker executable failed its integrity checks")]
+    WorkerExecutableRejected,
+}
+
+impl SupervisorError {
+    /// Integrity failures that end FIDO functionality for this app session.
+    pub const fn is_terminal_integrity_failure(self) -> bool {
+        matches!(
+            self,
+            Self::WorkerIdentityRejected { .. } | Self::WorkerExecutableRejected
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +258,8 @@ pub enum SupervisorState {
         retry_after_ms: u64,
     },
     Stopped,
+    /// Terminal integrity failure latched (ADR-017 §5.7): no worker will be launched again.
+    IntegrityFailure,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,6 +279,8 @@ pub struct DiscoverySupervisor<L: WorkerLauncher, C = SystemMonotonicClock> {
     next_generation: u64,
     launches: u64,
     stopped: bool,
+    /// Set once, never cleared (ADR-017 §5.7).
+    integrity_failure: Option<SupervisorError>,
 }
 
 impl<L: WorkerLauncher> DiscoverySupervisor<L, SystemMonotonicClock> {
@@ -293,6 +318,7 @@ where
             next_generation: 1,
             launches: 0,
             stopped: false,
+            integrity_failure: None,
         })
     }
 
@@ -360,6 +386,8 @@ where
             .is_some_and(|coordinator| !coordinator.is_quarantined());
         let state = if self.stopped {
             SupervisorState::Stopped
+        } else if self.integrity_failure.is_some() {
+            SupervisorState::IntegrityFailure
         } else if worker_usable {
             SupervisorState::Running
         } else {
@@ -388,6 +416,9 @@ where
     }
 
     fn ensure_worker(&mut self) -> Result<(), SupervisorError> {
+        if let Some(latched) = self.integrity_failure {
+            return Err(latched);
+        }
         let needs_worker = self
             .coordinator
             .as_ref()
@@ -422,8 +453,23 @@ where
         let endpoint = match self.launcher.launch(generation) {
             Ok(endpoint) => endpoint,
             Err(error) => {
+                // Latch integrity failures first; whatever happens next cannot clear them.
+                let terminal = match error {
+                    LaunchError::WorkerIdentityRejected { quiescence } => {
+                        Some(SupervisorError::WorkerIdentityRejected { quiescence })
+                    }
+                    LaunchError::ExecutableRejected => {
+                        Some(SupervisorError::WorkerExecutableRejected)
+                    }
+                    _ => None,
+                };
+                if let Some(terminal) = terminal {
+                    self.integrity_failure.get_or_insert(terminal);
+                }
                 self.ledger.record_failure(now_ms);
-                return Err(SupervisorError::Launch(error));
+                return Err(self
+                    .integrity_failure
+                    .unwrap_or(SupervisorError::Launch(error)));
             }
         };
         self.launches += 1;
@@ -876,6 +922,127 @@ mod tests {
         assert_eq!(supervisor.status().state, SupervisorState::Stopped);
         assert_eq!(supervisor.refresh().err(), Some(SupervisorError::Stopped));
         assert_eq!(world.borrow().launch_attempts, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn identity_rejection_is_terminal_and_never_relaunched()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut supervisor, world, clock) = supervisor(policy(100))?;
+        let rejected = LaunchError::WorkerIdentityRejected {
+            quiescence: ExecutionQuiescence::Quiescent,
+        };
+        world.borrow_mut().launch_failure = Some(rejected);
+        let expected = SupervisorError::WorkerIdentityRejected {
+            quiescence: ExecutionQuiescence::Quiescent,
+        };
+        assert_eq!(supervisor.refresh().err(), Some(expected));
+        assert_eq!(supervisor.status().state, SupervisorState::IntegrityFailure);
+
+        // Even if a later launch would succeed, and long after any backoff or breaker cooldown,
+        // nothing is launched again in this app session.
+        world.borrow_mut().launch_failure = None;
+        for _ in 0..5 {
+            clock.advance(3_600_000);
+            assert_eq!(supervisor.refresh().err(), Some(expected));
+        }
+        assert_eq!(world.borrow().launch_attempts, 1);
+        assert_eq!(supervisor.status().state, SupervisorState::IntegrityFailure);
+        assert!(expected.is_terminal_integrity_failure());
+        assert!(!matches!(
+            supervisor.refresh(),
+            Err(SupervisorError::Launch(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn not_contained_identity_rejection_keeps_the_terminal_latch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (mut supervisor, world, clock) = supervisor(policy(100))?;
+        supervisor.refresh()?;
+        world.borrow_mut().fail_exchanges = true;
+        assert!(is_endpoint_failure(&supervisor.refresh()));
+
+        // The replacement fails identity and its containment cannot be proven.
+        world.borrow_mut().launch_failure = Some(LaunchError::WorkerIdentityRejected {
+            quiescence: ExecutionQuiescence::Active,
+        });
+        clock.advance(250);
+        let expected = SupervisorError::WorkerIdentityRejected {
+            quiescence: ExecutionQuiescence::Active,
+        };
+        assert_eq!(supervisor.refresh().err(), Some(expected));
+        assert_ne!(
+            supervisor.refresh().err(),
+            Some(SupervisorError::WorkerNotContained)
+        );
+        assert_ne!(
+            supervisor.refresh().err(),
+            Some(SupervisorError::Launch(LaunchError::NotContained))
+        );
+
+        // A later launch that would succeed, or a "contained" result, cannot clear the latch.
+        {
+            let mut world = world.borrow_mut();
+            world.launch_failure = Some(LaunchError::WorkerIdentityRejected {
+                quiescence: ExecutionQuiescence::Quiescent,
+            });
+        }
+        clock.advance(120_000);
+        assert_eq!(supervisor.refresh().err(), Some(expected));
+        world.borrow_mut().launch_failure = None;
+        clock.advance(120_000);
+        assert_eq!(supervisor.refresh().err(), Some(expected));
+        assert_eq!(world.borrow().launch_attempts, 2);
+
+        // Shutdown still contains whatever worker the coordinator owns.
+        assert_eq!(supervisor.shutdown(), ExecutionQuiescence::Quiescent);
+        assert_eq!(supervisor.status().state, SupervisorState::Stopped);
+        Ok(())
+    }
+
+    #[test]
+    fn executable_integrity_rejection_is_terminal_too() -> Result<(), Box<dyn std::error::Error>> {
+        let (mut supervisor, world, clock) = supervisor(policy(100))?;
+        world.borrow_mut().launch_failure = Some(LaunchError::ExecutableRejected);
+        assert_eq!(
+            supervisor.refresh().err(),
+            Some(SupervisorError::WorkerExecutableRejected)
+        );
+        world.borrow_mut().launch_failure = None;
+        clock.advance(3_600_000);
+        assert_eq!(
+            supervisor.refresh().err(),
+            Some(SupervisorError::WorkerExecutableRejected)
+        );
+        assert_eq!(world.borrow().launch_attempts, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn ordinary_launch_failures_are_not_integrity_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for error in [
+            LaunchError::SpawnFailed,
+            LaunchError::HandshakeTimeout,
+            LaunchError::HandshakeMalformed,
+            LaunchError::HandshakeMismatch,
+            LaunchError::HealthCheckFailed,
+            LaunchError::NotContained,
+        ] {
+            assert!(!error.is_terminal_integrity_failure());
+            let (mut supervisor, world, clock) = supervisor(policy(100))?;
+            world.borrow_mut().launch_failure = Some(error);
+            assert_eq!(
+                supervisor.refresh().err(),
+                Some(SupervisorError::Launch(error))
+            );
+            world.borrow_mut().launch_failure = None;
+            clock.advance(250);
+            supervisor.refresh()?;
+            assert_eq!(supervisor.status().state, SupervisorState::Running);
+        }
         Ok(())
     }
 

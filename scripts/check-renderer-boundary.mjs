@@ -254,7 +254,10 @@ const discoveryDto = readFileSync(
 const discoveryShape = discoveryDto
   .match(/pub enum DiscoveryPresentation<T> \{([\s\S]*?)^\}/m)?.[1]
   ?.replace(/\s/g, '');
-if (discoveryShape !== 'Fresh{list:T},Settling{},Unavailable{},') {
+if (
+  discoveryShape !==
+  'Fresh{list:T},Settling{},Unavailable{},IntegrityFailure{},'
+) {
   throw new Error(
     'DiscoveryPresentation contains an unreviewed renderer field or state.',
   );
@@ -879,3 +882,107 @@ for (const [name, fields] of [
   if (/DeletionIdentity|ExactCredentialTarget|Vec<u8>|\[u8;/.test(body))
     throw new Error('M5 raw identity cannot enter renderer-facing DTOs.');
 }
+
+// ADR-017 (M7.2a): worker authenticity and release identity stay backend-owned. The renderer and
+// the Tauri adapter can neither see nor influence the Team ID, the requirement, the expected
+// worker identity, the record, the worker path or the verification mode.
+const crateRustFiles = listFiles('crates', (path) => path.endsWith('.rs'));
+const authenticityFile = 'crates/fido-service/src/worker_authenticity.rs';
+const releaseIdentityFile = 'crates/fido-service/src/release_identity.rs';
+const securityBindingFile = 'crates/fido-platform/src/macos_code_signing.rs';
+const teamIdDefinitions = [];
+const enforcedConstructions = [];
+for (const file of [...crateRustFiles, ...rustFiles]) {
+  const source = readFileSync(file, 'utf8');
+  for (const match of source.matchAll(
+    /\b(?:const|static)\s+([A-Z0-9_]*TEAM_ID[A-Z0-9_]*)\s*:/g,
+  )) {
+    teamIdDefinitions.push(`${file}:${match[1]}`);
+  }
+  if (/WorkerAuthenticity::Enforced\(/.test(source)) {
+    enforcedConstructions.push(file);
+  }
+  if (
+    file !== securityBindingFile &&
+    /#\[link\(name\s*=\s*"Security"|\bfn\s+Sec(?:Code|StaticCode|Requirement)\w*\s*\(/.test(
+      source,
+    )
+  ) {
+    throw new Error(
+      `Security.framework FFI must stay in ${securityBindingFile}: ${file}`,
+    );
+  }
+  if (
+    file !== releaseIdentityFile &&
+    /FidoManagerReleaseWorkerIdentitySHA256|release-worker-identity\.json/.test(
+      source,
+    )
+  ) {
+    throw new Error(
+      `Only the release-identity module may name the record or its digest key: ${file}`,
+    );
+  }
+}
+assertExactArray(
+  teamIdDefinitions,
+  [`${authenticityFile}:MACOS_RELEASE_TEAM_ID`],
+  'ADR-017 requires exactly one reviewed Team ID constant.',
+);
+assertExactArray(
+  enforcedConstructions,
+  [authenticityFile],
+  'ADR-017 requires a single enforcing WorkerAuthenticity construction site.',
+);
+const processWorkerSource = readFileSync(
+  'crates/fido-service/src/process_worker.rs',
+  'utf8',
+);
+if (
+  (processWorkerSource.match(/worker_authenticity::release_startup\(\)/g) ?? [])
+    .length !== 1 ||
+  !/pub fn beside_current_exe\(\) -> Result<Self, LaunchError> \{\s*#\[cfg\(feature = "macos-release-signing"\)\]\s*\{\s*let authenticity = crate::worker_authenticity::release_startup\(\);/.test(
+    processWorkerSource,
+  )
+) {
+  throw new Error(
+    'Release startup authentication must run only in ProcessWorkerLauncher::beside_current_exe().',
+  );
+}
+const forbiddenAuthenticity =
+  /\b(?:WorkerAuthenticity|WorkerIdentityCheck|WorkerCodeVerifier|MACOS_RELEASE_TEAM_ID|IdentityLatch|ReleaseWorkerIdentity|macos_code_signing|release_identity|worker_authenticity|cdhash|build_id|buildId|teamId|team_id|SecCode|SecStaticCode|SecRequirement|FidoManagerReleaseWorkerIdentitySHA256|verification_mode|verificationMode)\b|release-worker-identity|macos-release-signing/;
+for (const file of [...rendererFiles, ...rustFiles]) {
+  const hit = readFileSync(file, 'utf8').match(forbiddenAuthenticity);
+  if (hit) {
+    throw new Error(
+      `Worker authenticity internals must not reach the renderer or Tauri adapter (${hit[0]}): ${file}`,
+    );
+  }
+}
+const appManifest = readFileSync('src-tauri/Cargo.toml', 'utf8');
+const defaultFeatures =
+  appManifest.match(/^default\s*=\s*\[([^\]]*)\]/m)?.[1] ?? '';
+if (/macos-release-signing/.test(defaultFeatures)) {
+  throw new Error(
+    'The macos-release-signing flavor must never be a default feature.',
+  );
+}
+for (const file of listFiles('crates', (path) => path.endsWith('Cargo.toml'))) {
+  const manifest = readFileSync(file, 'utf8');
+  const defaults = manifest.match(/^default\s*=\s*\[([^\]]*)\]/m)?.[1] ?? '';
+  if (/macos-release-signing/.test(defaults)) {
+    throw new Error(
+      `The macos-release-signing flavor must never be a default feature: ${file}`,
+    );
+  }
+}
+// The worker never links Security.framework (M7.1 pins its dynamic dependencies).
+if (
+  /macos-code-signing/.test(
+    readFileSync('crates/fido-worker/Cargo.toml', 'utf8'),
+  )
+) {
+  throw new Error('The worker must not enable the Security.framework binding.');
+}
+console.log(
+  'Renderer boundary check passed; worker authenticity is backend-only.',
+);

@@ -12,6 +12,10 @@ repository.workspace = true
 default = []
 native-pin = ["fido-native-ui/native-pin"]
 native-ui-spike = ["fido-native-ui/modality-spike"]
+# ADR-017 §5.6 compile-time release-enforcement flavor (macOS). Enables release startup
+# authentication (S1–S8) and per-spawn exact worker validation in the single launcher
+# construction site. There is no runtime, environment, argument or renderer switch.
+macos-release-signing = ["fido-platform/macos-release-signing"]
 
 [dependencies]
 serde.workspace = true
@@ -19,7 +23,7 @@ serde_json.workspace = true
 sha2 = "=0.10.9"
 fido-auth = { path = "../fido-auth" }
 getrandom = "=0.3.4"
-fido-platform = { path = "../fido-platform" }
+fido-platform = { path = "../fido-platform", features = ["macos-code-signing"] }
 fido-native-ui = { path = "../fido-native-ui" }
 fido-core = { path = "../fido-core" }
 fido-worker-protocol = { path = "../fido-worker-protocol" }

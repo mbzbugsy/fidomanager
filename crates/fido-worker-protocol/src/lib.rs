@@ -11,7 +11,7 @@ pub use framing::{
     FRAME_HEADER_BYTES, FrameError, decode_message, encode_message, read_frame, read_message,
     write_frame, write_message,
 };
-pub use handshake::{ChildHello, HandshakeError, ParentHello};
+pub use handshake::{ChildHello, HandshakeError, MAX_WORKER_BUILD_ID_BYTES, ParentHello};
 
 pub use fido_core::inventory::InspectionError;
 
@@ -19,7 +19,8 @@ use fido_auth::{AcquisitionBinding, AuthenticationEvidence, GrantKind};
 use fido_core::{Aaguid, DeviceGeneration, ExecutionQuiescence, MutationOutcome};
 use serde::{Deserialize, Serialize};
 
-pub const WORKER_PROTOCOL_VERSION: u16 = 8;
+/// Version 9 (M7.2a): `ChildHello` carries the worker `build_id` (ADR-017 §5.8).
+pub const WORKER_PROTOCOL_VERSION: u16 = 9;
 /// Largest frame the service accepts from a worker (responses). Transport implementations must
 /// reject larger frames before deserialization, and before allocating their payload.
 pub const MAX_WORKER_FRAME_BYTES: usize = 1_048_576;

@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import ts from 'typescript';
 import {
   applyDiscovery,
+  INTEGRITY_FAILURE_MESSAGE,
   type DiscoveryResult,
   type DiscoveryView,
 } from '../src/discovery';
@@ -88,7 +89,8 @@ const appHtml = (
   inspections: InspectionDisplay[],
   boogoocypher?: 'checking' | 'online' | 'offline',
   activity?: Partial<InspectionActivity>,
-  discoveryState: 'fresh' | 'settling' | 'unavailable' = 'fresh',
+  discoveryState:
+    'fresh' | 'settling' | 'unavailable' | 'integrity_failure' = 'fresh',
   generations: string[] = [],
 ) =>
   render(App, {
@@ -686,6 +688,48 @@ describe('typed discovery continuity', () => {
     expect(poll.view()).toEqual({ state: 'unavailable', list: null });
     await callbacks.shift()?.();
     expect(poll.view()).toEqual({ state: 'fresh', list: ['new'] });
+  });
+  it('integrity failure shows only the fixed category and offers no retry or controls', () => {
+    const result = flat(
+      appHtml([inspected(1)], undefined, undefined, 'integrity_failure'),
+    );
+    expect(result).toContain(INTEGRITY_FAILURE_MESSAGE);
+    expect(INTEGRITY_FAILURE_MESSAGE).toBe(
+      'Fido Manager could not verify its own components. Reinstall it from the official release.',
+    );
+    expect(result).toContain('Security key functions are disabled.');
+    expect(result).toMatch(/Native service <strong>disabled</);
+    expect(result).toContain('role="alert"');
+    expect(result).not.toContain('class="device-card"');
+    expect(result).not.toContain('example.com');
+    expect(result).not.toContain('Use Scan now to retry.');
+    expect(result).toMatch(
+      /<button[^>]*disabled[^>]*>[^<]*<svg[\s\S]*?Scan now/,
+    );
+    expect(result).not.toMatch(forbidden);
+    expect(result).not.toMatch(
+      /team|cdhash|requirement|certificate|signature|release-worker|build.?id|osstatus|developer id|verification mode/i,
+    );
+  });
+  it('actual polling keeps an integrity failure and drops every card', async () => {
+    const { poll, callbacks } = harness([
+      { state: 'fresh', list: ['old'] },
+      { state: 'integrity_failure' },
+      new Error('IPC failure'),
+    ]);
+    await poll.refresh();
+    await callbacks.shift()?.();
+    expect(poll.view()).toEqual({ state: 'integrity_failure', list: null });
+    await callbacks.shift()?.();
+    expect(poll.view()).toEqual({ state: 'integrity_failure', list: null });
+    expect(
+      applyDiscovery(
+        { state: 'fresh', list: ['x'] },
+        {
+          state: 'integrity_failure',
+        },
+      ),
+    ).toEqual({ state: 'integrity_failure', list: null });
   });
   it('IPC errors containing implementation text never become settling or UI text', async () => {
     const { poll, callbacks } = harness([

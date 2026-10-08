@@ -5,6 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+build = "build.rs"
+
+[features]
+default = []
+# ADR-017 §5.6: compile-time release build flavor. Only the reviewed release packaging enables it
+# (through `fidomanager-app`, `fido-service` and `fido-worker`). It compiles the release source
+# commit into the build identity. There is no runtime, environment, argument or renderer switch.
+macos-release-signing = []
+# The Security.framework binding (ADR-017). Only the trusted service enables it. The worker must
+# never link Security.framework: its dynamic dependencies are pinned by the M7.1 bundle checker.
+macos-code-signing = []
 
 [lints]
 workspace = true

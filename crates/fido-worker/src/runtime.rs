@@ -39,6 +39,10 @@ pub struct RuntimeConfig {
     pub handshake_timeout: Duration,
     /// How often the watchdog compares the current parent pid with the one the service declared.
     pub parent_poll_interval: Duration,
+    /// Build identity reported in `ChildHello` (ADR-017 §5.8). Production always uses the
+    /// compiled-in [`fido_platform::build_identity::WORKER_BUILD_ID`]; it is never read from the
+    /// environment, arguments or the service.
+    pub build_id: &'static str,
 }
 
 impl Default for RuntimeConfig {
@@ -46,6 +50,7 @@ impl Default for RuntimeConfig {
         Self {
             handshake_timeout: Duration::from_secs(5),
             parent_poll_interval: Duration::from_millis(100),
+            build_id: fido_platform::build_identity::WORKER_BUILD_ID,
         }
     }
 }
@@ -96,7 +101,7 @@ where
         exit_immediately(exit::HANDSHAKE);
     }
 
-    let reply = ChildHello::new(hello.worker_generation, std::process::id());
+    let reply = ChildHello::new(hello.worker_generation, std::process::id(), config.build_id);
     if write_message(&mut output, &reply, MAX_WORKER_HANDSHAKE_FRAME_BYTES).is_err() {
         exit_immediately(exit::PARENT_GONE);
     }

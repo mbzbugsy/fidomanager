@@ -79,6 +79,14 @@ launch_failure_case!(
     LaunchError::HandshakeMismatch
 );
 launch_failure_case!(
+    handshake_with_another_build_id_is_a_terminal_identity_rejection,
+    "bad-build-id",
+    "hs-build-id",
+    LaunchError::WorkerIdentityRejected {
+        quiescence: ExecutionQuiescence::Quiescent
+    }
+);
+launch_failure_case!(
     garbage_handshake_frame_is_rejected,
     "garbage-hello",
     "hs-garbage",
