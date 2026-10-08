@@ -17,6 +17,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Release verification and provenance policy tests (synthetic, no signing claim)
+        run: |
+          python3 scripts/test-release-verification.py
+          python3 scripts/test-release-provenance.py
+
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -121,6 +126,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Release verification and provenance policy tests (synthetic, no signing claim)
+        run: |
+          python3 scripts/test-release-verification.py
+          python3 scripts/test-release-provenance.py
+
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -145,6 +155,13 @@ jobs:
         # Builds private static OpenSSL, libcbor and libfido2, the release worker, verifies link-map
         # provenance, then the bundle, ad-hoc seal, structural checks and DMG.
         run: python3 scripts/package-macos.py --dmg
+      - name: Collect target-specific SBOM build inputs (no signing credentials)
+        run: |
+          triple="$(rustc -vV | sed -n 's/^host: //p')"
+          python3 scripts/release-provenance.py collect-sbom --target "$triple" \
+            --frontend target/macos-package/frontend-sbom-inputs.json \
+            --output target/macos-package/sbom-inputs.json
+          python3 scripts/test-release-provenance.py
       - name: Release worker static provenance and dynamic dependencies
         run: |
           triple="$(rustc -vV | sed -n 's/^host: //p')"
