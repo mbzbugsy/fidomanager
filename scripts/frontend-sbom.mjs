@@ -17,8 +17,14 @@ export function frontendSbom() {
           output.type === 'chunk' ? output.code : output.source,
         );
         if (output.type !== 'chunk') continue;
+        // Vite emits stylesheets as CSS assets, while their Rollup modules can
+        // contribute zero rendered JavaScript bytes. Track a stylesheet only
+        // when this chunk actually imports emitted CSS.
+        const emittedCss = output.viteMetadata?.importedCss?.size > 0;
         for (const [id, module] of Object.entries(output.modules)) {
-          if (!id.includes('/node_modules/') || module.renderedLength === 0)
+          if (!id.includes('/node_modules/')) continue;
+          const stylesheet = /\.(?:css|scss|sass|less|styl|stylus)(?:\?.*)?$/.test(id);
+          if (module.renderedLength === 0 && !(stylesheet && emittedCss))
             continue;
           let directory = dirname(id.split('?')[0]);
           while (!existsSync(join(directory, 'package.json'))) {

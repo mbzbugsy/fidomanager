@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from release_metadata import canonical, digest, CheckError, parse_json, publisher_requirement, read_regular
 
@@ -313,6 +314,26 @@ class ProvenanceTests(unittest.TestCase):
         attestation.unlink()
         with self.assertRaises(CheckError):
             p.verify(self.directory, self.d7, self.args[0], *self.args[2:], with_attestation=True)
+
+    def test_generation_rolls_back_after_partial_promotion(self):
+        staging_input = self.directory / "rollback"
+        staging_input.mkdir()
+        arguments = fixture(staging_input)
+        initial = {path.name for path in staging_input.iterdir()}
+        actual_link = os.link
+        calls = 0
+
+        def fail_second_link(source, destination):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("synthetic second artifact failure")
+            return actual_link(source, destination)
+
+        with patch.object(p.os, "link", side_effect=fail_second_link):
+            with self.assertRaisesRegex(OSError, "synthetic second artifact failure"):
+                p.generate(staging_input, *arguments)
+        self.assertEqual({path.name for path in staging_input.iterdir()}, initial)
 
     def test_no_overwrite(self):
         before = (self.directory / "release-authorization.json").read_bytes()

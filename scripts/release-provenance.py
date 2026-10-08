@@ -7,9 +7,11 @@ attestation/certificate run binding; a successful local verification is not publ
 """
 import argparse
 import copy
+import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 
 from release_metadata import (CheckError, canonical, digest, file_record, hex_value, keys,
                               parse_json, publisher_requirement, read_regular, require)
@@ -370,10 +372,26 @@ def generate(directory, context, manifest_input, inputs, identity, summary, code
     dmg, app_zip, _ = names(context)
     check_asset_set(directory, (dmg, app_zip, "notary-app.json", "notary-dmg.json"))
     outputs = expected_outputs(directory, context, manifest_input, inputs, identity, summary, code)
-    # All checks finish before the first write; exclusive creation refuses pre-existing outputs.
-    for name, data in outputs.items():
-        with (directory / name).open("xb") as output:
-            output.write(data)
+    # Stage complete bytes before exposing any output. Hard-link promotion is
+    # exclusive (never replaces an existing file) and atomic per artifact.
+    # On an ordinary I/O failure, remove all artifacts promoted in this call.
+    # Verify still requires the complete set and an independent D7.
+    for name in outputs:
+        require(not os.path.lexists(directory / name), f"output already exists: {name}")
+    with tempfile.TemporaryDirectory(prefix=".fidomanager-release-", dir=directory) as temp:
+        staging = Path(temp)
+        for name, data in outputs.items():
+            (staging / name).write_bytes(data)
+        promoted = []
+        try:
+            for name in outputs:
+                destination = directory / name
+                os.link(staging / name, destination)
+                promoted.append(destination)
+        except BaseException:
+            for destination in reversed(promoted):
+                destination.unlink(missing_ok=True)
+            raise
     return digest(outputs["release-authorization.json"])
 
 
