@@ -23,7 +23,8 @@ export function frontendSbom() {
         const emittedCss = output.viteMetadata?.importedCss?.size > 0;
         for (const [id, module] of Object.entries(output.modules)) {
           if (!id.includes('/node_modules/')) continue;
-          const stylesheet = /\.(?:css|scss|sass|less|styl|stylus)(?:\?.*)?$/.test(id);
+          const stylesheet =
+            /\.(?:css|scss|sass|less|styl|stylus)(?:\?.*)?$/.test(id);
           if (module.renderedLength === 0 && !(stylesheet && emittedCss))
             continue;
           let directory = dirname(id.split('?')[0]);
