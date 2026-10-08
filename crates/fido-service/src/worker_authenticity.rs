@@ -855,7 +855,9 @@ mod tests {
         use std::path::{Path, PathBuf};
         use std::process::{Command, Stdio};
 
-        use fido_platform::macos_code_signing::{RunningCode, StaticCode};
+        use fido_platform::macos_code_signing::{
+            RunningCode, STATUS_KILL, STATUS_VALID, StaticCode,
+        };
         use fido_platform::os_version::DynamicNetworkPolicy;
 
         use super::super::macos::{WorkerCodeVerifier, file_sha256};
@@ -955,18 +957,35 @@ mod tests {
 
         /// ADR-017 §12 step 2: two ad-hoc binaries with the SAME identifier; a TEST-ONLY exact
         /// requirement pinning A's cdhash accepts A and rejects B, statically and dynamically.
+        ///
+        /// Both request `kill` explicitly: the kernel only implies CS_KILL for runtime-only
+        /// ad-hoc code when SIP is enabled, and `check_running` requires it. This says nothing
+        /// about Developer ID signatures (ADR-017 E4 stays open).
         #[test]
         fn exact_cdhash_pin_accepts_a_and_rejects_b_with_the_same_identifier() -> TestResult {
             let dir = workspace("pin")?;
-            let runtime = ["--identifier", TEST_IDENTIFIER, "--options", "runtime"];
-            let a = build(&dir.0, "worker-a", "A", &runtime)?;
-            let b = build(&dir.0, "worker-b", "B", &runtime)?;
+            let policy = ["--identifier", TEST_IDENTIFIER, "--options", "runtime,kill"];
+            let a = build(&dir.0, "worker-a", "A", &policy)?;
+            let b = build(&dir.0, "worker-b", "B", &policy)?;
             assert_ne!(cdhash(&a)?, cdhash(&b)?);
-            let identifier_of = |p: &Path| -> Result<Option<String>, Box<dyn std::error::Error>> {
-                Ok(StaticCode::at_path(p)?.signing_information()?.identifier)
+            let info_a = StaticCode::at_path(&a)?.signing_information()?;
+            let info_b = StaticCode::at_path(&b)?.signing_information()?;
+            assert_eq!(info_a.identifier.as_deref(), Some(TEST_IDENTIFIER));
+            assert_eq!(info_b.identifier.as_deref(), Some(TEST_IDENTIFIER));
+            assert_eq!(info_a.team_id, info_b.team_id);
+            assert_eq!(info_a.signature_flags, info_b.signature_flags);
+            assert!(!info_a.has_entitlements && !info_b.has_entitlements);
+            let running_status = |p: &Path| {
+                with_child(p, |pid| {
+                    RunningCode::child_process(pid)
+                        .and_then(|guest| guest.signing_information())
+                        .map(|info| info.dynamic_status)
+                })
             };
-            assert_eq!(identifier_of(&a)?.as_deref(), Some(TEST_IDENTIFIER));
-            assert_eq!(identifier_of(&b)?.as_deref(), Some(TEST_IDENTIFIER));
+            let required = Some(STATUS_VALID | STATUS_KILL);
+            let masked = |s: Option<u32>| s.map(|s| s & (STATUS_VALID | STATUS_KILL));
+            assert_eq!(masked(running_status(&a)??), required);
+            assert_eq!(masked(running_status(&b)??), required);
 
             let verifier = pinned(&a)?;
             assert_eq!(verifier.check_static(&a), Ok(()));
