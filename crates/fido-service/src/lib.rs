@@ -14,9 +14,21 @@ pub mod recovery;
 
 mod discovery;
 mod process_worker;
+// ADR-017 release-identity code is exercised by tests everywhere but only *used* by the macOS
+// `macos-release-signing` flavor.
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "macos-release-signing")),
+    allow(dead_code)
+)]
+mod release_identity;
 mod supervisor;
 #[cfg(test)]
 mod test_support;
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "macos-release-signing")),
+    allow(dead_code)
+)]
+mod worker_authenticity;
 
 pub use discovery::{
     DiscoveryCoordinator, DiscoveryError, DiscoveryPolicy, DiscoveryPolicyError,

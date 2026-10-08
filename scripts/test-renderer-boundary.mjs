@@ -655,6 +655,91 @@ try {
     /delete_credential must accept only AppHandle, AppState and DeleteCredentialRequest/,
     'delete_credential with pin parameter',
   );
+  // ADR-017 (M7.2a) worker authenticity stays backend-only.
+  mutate(
+    'crates/fido-service/src/discovery_presentation.rs',
+    (text) =>
+      text.replace(
+        'IntegrityFailure {},',
+        'IntegrityFailure { team_id: String },',
+      ),
+    /unreviewed renderer field or state/,
+    'identity detail inside the integrity category',
+  );
+  mutate(
+    'crates/fido-service/src/process_worker.rs',
+    (text) => `${text}\nconst OVERRIDE_TEAM_ID: &str = "ABCDE12345";\n`,
+    /exactly one reviewed Team ID constant/,
+    'a second Team ID constant',
+  );
+  mutate(
+    'crates/fido-service/src/supervisor.rs',
+    (text) =>
+      `${text}\nfn weaker() { let _ = crate::worker_authenticity::WorkerAuthenticity::Enforced(todo!()); }\n`,
+    /single enforcing WorkerAuthenticity construction site/,
+    'a second enforcing construction site',
+  );
+  mutate(
+    'crates/fido-service/src/process_worker.rs',
+    (text) =>
+      text.replace(
+        'let authenticity = crate::worker_authenticity::release_startup();',
+        'let authenticity = WorkerAuthenticity::UnsignedDevelopment;',
+      ),
+    /Release startup authentication must run only/,
+    'a release flavor that skips startup authentication',
+  );
+  mutate(
+    'crates/fido-service/src/process_worker.rs',
+    (text) =>
+      `${text}\n#[link(name = "Security", kind = "framework")]\nunsafe extern "C" {}\n`,
+    /Security.framework FFI must stay in/,
+    'Security.framework FFI outside the reviewed binding',
+  );
+  mutate(
+    'crates/fido-service/src/inspection.rs',
+    (text) => `${text}\n// reads release-worker-identity.json\n`,
+    /Only the release-identity module may name the record/,
+    'the record read outside the release-identity module',
+  );
+  for (const [path, leak] of [
+    ['src/discovery.ts', '\nexport const cdhash = "";\n'],
+    ['src/App.svelte', '\n<p>{teamId}</p>\n'],
+    ['src/discovery.ts', '\nexport const verificationMode = "weak";\n'],
+    [
+      'src-tauri/src/commands/mod.rs',
+      '\n// fido_service::WorkerAuthenticity\n',
+    ],
+    ['src-tauri/src/lib.rs', '\n// build_id override\n'],
+    ['src-tauri/src/lib.rs', '\n// release-worker-identity path\n'],
+  ]) {
+    mutate(
+      path,
+      (text) => `${text}${leak}`,
+      /Worker authenticity internals must not reach the renderer or Tauri adapter/,
+      `authenticity internals in ${path}`,
+    );
+  }
+  mutate(
+    'src-tauri/Cargo.toml',
+    (text) =>
+      text.replace(
+        'default = ["native-pin"]',
+        'default = ["native-pin", "macos-release-signing"]',
+      ),
+    /must never be a default feature/,
+    'release flavor as a default feature',
+  );
+  mutate(
+    'crates/fido-worker/Cargo.toml',
+    (text) =>
+      text.replace(
+        'fido-platform = { path = "../fido-platform" }',
+        'fido-platform = { path = "../fido-platform", features = ["macos-code-signing"] }',
+      ),
+    /worker must not enable the Security.framework binding/,
+    'the worker linking the Security.framework binding',
+  );
   assert.equal(check().status, 0, 'All restored M4 fixtures must pass.');
   console.log(
     `Renderer boundary regression checks passed (${checks} checker executions; 8 denied crates, command/permission allowlists, service separation and M4 controls).`,

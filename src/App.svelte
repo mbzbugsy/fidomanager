@@ -3,6 +3,7 @@
   import { onMount } from 'svelte';
   import {
     applyDiscovery,
+    INTEGRITY_FAILURE_MESSAGE,
     type DiscoveryResult,
     type DiscoveryView,
   } from './discovery';
@@ -117,6 +118,7 @@
   };
   $: snapshot = discovery.list;
   $: discoveryUnavailable = discovery.state === 'unavailable';
+  $: integrityFailure = discovery.state === 'integrity_failure';
   let refreshing = false;
   let manualScanning = false;
   let lastScan: string | null = null;
@@ -239,8 +241,9 @@
           second: '2-digit',
         });
     } catch {
-      // An IPC failure is never a proven settling response.
-      discovery = applyDiscovery(discovery, { state: 'unavailable' });
+      // An IPC failure is never a proven settling response, and never clears an integrity failure.
+      if (discovery.state !== 'integrity_failure')
+        discovery = applyDiscovery(discovery, { state: 'unavailable' });
     } finally {
       refreshing = false;
       if (manual) {
@@ -293,7 +296,7 @@
         class="tool-button"
         type="button"
         onclick={() => refreshNow()}
-        disabled={manualScanning}
+        disabled={manualScanning || integrityFailure}
       >
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M20 7v5h-5M4 17v-5h5" />
@@ -315,9 +318,18 @@
 
       <div class="status-line-inline" aria-label="System status">
         <span class="status-item">
-          <i aria-hidden="true" class:warning={discoveryUnavailable}></i>
+          <i
+            aria-hidden="true"
+            class:warning={discoveryUnavailable || integrityFailure}
+          ></i>
           Native service
-          <strong>{discoveryUnavailable ? 'attention' : 'online'}</strong>
+          <strong
+            >{integrityFailure
+              ? 'disabled'
+              : discoveryUnavailable
+                ? 'attention'
+                : 'online'}</strong
+          >
         </span>
         <span
           class="status-item"
@@ -340,7 +352,11 @@
       </div>
     </section>
 
-    {#if discoveryUnavailable}
+    {#if integrityFailure}
+      <div class="error-banner" role="alert">
+        <strong>{INTEGRITY_FAILURE_MESSAGE}</strong>
+      </div>
+    {:else if discoveryUnavailable}
       <div class="error-banner" role="alert">
         <strong>Security key scanning is temporarily unavailable.</strong>
         {#if lastScan}<span>Last successful scan {lastScan}.</span>{/if}
@@ -348,7 +364,13 @@
     {/if}
 
     <section class="devices" aria-label="Connected authenticators">
-      {#if discoveryUnavailable}
+      {#if integrityFailure}
+        <div class="empty-state">
+          <div class="empty-key" aria-hidden="true"></div>
+          <h3>Security key functions are disabled.</h3>
+          <p>{INTEGRITY_FAILURE_MESSAGE}</p>
+        </div>
+      {:else if discoveryUnavailable}
         <div class="empty-state">
           <div class="empty-key" aria-hidden="true"></div>
           <h3>Security key scanning is temporarily unavailable.</h3>

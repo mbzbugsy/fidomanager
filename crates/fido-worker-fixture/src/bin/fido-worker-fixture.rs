@@ -10,6 +10,10 @@
 //!   the deadline), `crash` (die abruptly mid-call), `slow<ms>` (sleep ignoring the deadline, then succeed).
 //! * `--raw=MODE` speaks the wire protocol by hand to misbehave on purpose; see `raw`.
 //!
+//! `--bad-build-id-after-dispatch` (authentication mode, with `--deletion-log=`) makes a worker
+//! started after the logged native delete report another `ChildHello.build_id`, standing in for a
+//! substituted replacement worker.
+//!
 //! `--tag=NAME` is ignored by the fixture. Tests put a unique tag on the command line so they can
 //! find *their* worker processes with `pgrep -f` even when other tests run in parallel.
 //!
@@ -399,6 +403,7 @@ fn main() {
     let mut script = None;
     let mut info = None;
     let mut raw_mode = None;
+    let mut bad_build_id_after_dispatch = false;
     for argument in std::env::args().skip(1) {
         if argument == "--authentication" {
             authentication = true;
@@ -420,6 +425,8 @@ fn main() {
             info = Some(value.to_owned());
         } else if let Some(value) = argument.strip_prefix("--raw=") {
             raw_mode = Some(value.to_owned());
+        } else if argument == "--bad-build-id-after-dispatch" {
+            bad_build_id_after_dispatch = true;
         } else if argument.starts_with("--tag=") {
             // Only there to make the command line unique.
         } else {
@@ -444,6 +451,25 @@ fn main() {
         }
         let channel = fido_platform::process::secret_channel::receive()
             .unwrap_or_else(|_| exit_immediately(exit::CONFIG));
+        // A replacement started after the native delete was entered reports another build: it
+        // stands in for a substituted worker binary (ADR-017 §5.7 recovery regression).
+        let mut config = RuntimeConfig::default();
+        if bad_build_id_after_dispatch
+            && deletion_log.as_ref().is_some_and(|log| {
+                std::fs::read_to_string(log)
+                    .unwrap_or_default()
+                    .lines()
+                    .any(|line| line == "entered")
+            })
+        {
+            if let Some(log) = &deletion_log {
+                let _ = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(log)
+                    .and_then(|mut file| writeln!(file, "replacement-started"));
+            }
+            config.build_id = "0.0.0+0000000000000000000000000000000000000000";
+        }
         fido_worker::runtime::run_with_secret(
             stdin(),
             stdout(),
@@ -457,7 +483,7 @@ fn main() {
                 deletion_mode,
                 deletion_log,
             },
-            RuntimeConfig::default(),
+            config,
             Some(Box::new(channel)),
         );
     }
@@ -518,25 +544,36 @@ fn raw(mode: &str) -> ! {
         Err(_) => exit_immediately(exit::HANDSHAKE),
     };
     let pid = std::process::id();
-    let good_reply = ChildHello::new(hello.worker_generation, pid);
+    let good_reply = ChildHello::new(
+        hello.worker_generation,
+        pid,
+        fido_platform::build_identity::WORKER_BUILD_ID,
+    );
 
     match mode {
         "silent" => park_forever(),
         "bad-version" => {
-            let mut reply = good_reply;
+            let mut reply = good_reply.clone();
             reply.protocol_version = reply.protocol_version.wrapping_add(1);
             let _ = write_message(&mut output, &reply, MAX_WORKER_HANDSHAKE_FRAME_BYTES);
             park_forever()
         }
         "bad-generation" => {
-            let mut reply = good_reply;
+            let mut reply = good_reply.clone();
             reply.worker_generation.0 = reply.worker_generation.0.wrapping_add(1);
             let _ = write_message(&mut output, &reply, MAX_WORKER_HANDSHAKE_FRAME_BYTES);
             park_forever()
         }
         "bad-pid" => {
-            let mut reply = good_reply;
+            let mut reply = good_reply.clone();
             reply.worker_pid = pid.wrapping_add(1);
+            let _ = write_message(&mut output, &reply, MAX_WORKER_HANDSHAKE_FRAME_BYTES);
+            park_forever()
+        }
+        "bad-build-id" => {
+            // Correct protocol, generation and pid, but another build: an integrity failure.
+            let mut reply = good_reply.clone();
+            reply.build_id = "0.0.0+0000000000000000000000000000000000000000".to_owned();
             let _ = write_message(&mut output, &reply, MAX_WORKER_HANDSHAKE_FRAME_BYTES);
             park_forever()
         }

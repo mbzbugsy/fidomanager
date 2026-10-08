@@ -25,7 +25,7 @@ pub struct ParentHello {
 }
 
 /// Second frame, worker to service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChildHello {
     pub protocol_version: u16,
@@ -34,7 +34,15 @@ pub struct ChildHello {
     /// pid it spawned: if they differ (for example a wrapper script that forked the real worker),
     /// killing the spawned process would not stop native execution, so containment is unsound.
     pub worker_pid: u32,
+    /// The worker's compiled-in build identity (`<version>+<source commit>` in release builds,
+    /// ADR-017 §5.8). The service compares it with the identity it expects; the renderer never
+    /// supplies or sees it. It is a release/build identity, never a session or runtime id. A
+    /// mismatch is an integrity failure, not an ordinary handshake mismatch.
+    pub build_id: String,
 }
+
+/// Upper bound on `ChildHello::build_id` (`X.Y.Z+<40 hex>` is far shorter).
+pub const MAX_WORKER_BUILD_ID_BYTES: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandshakeError {
@@ -42,6 +50,8 @@ pub enum HandshakeError {
     ZeroGeneration,
     GenerationMismatch,
     PidMismatch,
+    /// The worker reported a different (or malformed) build identity. Integrity failure.
+    BuildIdMismatch,
 }
 
 impl ParentHello {
@@ -70,11 +80,14 @@ impl ParentHello {
     }
 
     /// Service-side validation of the worker's reply. `spawned_pid` is the pid the service
-    /// obtained from the OS when it spawned the child.
+    /// obtained from the OS when it spawned the child; `expected_build_id` is the backend-owned
+    /// build identity (never a value from the worker or the renderer). Protocol, generation and
+    /// pid are checked first; a build-identity difference is reported last and separately.
     pub fn validate_reply(
         &self,
         reply: &ChildHello,
         spawned_pid: u32,
+        expected_build_id: &str,
     ) -> Result<(), HandshakeError> {
         if reply.protocol_version != self.protocol_version {
             return Err(HandshakeError::ProtocolMismatch);
@@ -85,16 +98,27 @@ impl ParentHello {
         if reply.worker_pid != spawned_pid {
             return Err(HandshakeError::PidMismatch);
         }
+        if reply.build_id.len() > MAX_WORKER_BUILD_ID_BYTES
+            || expected_build_id.is_empty()
+            || reply.build_id != expected_build_id
+        {
+            return Err(HandshakeError::BuildIdMismatch);
+        }
         Ok(())
     }
 }
 
 impl ChildHello {
-    pub const fn new(worker_generation: WorkerGeneration, worker_pid: u32) -> Self {
+    pub fn new(
+        worker_generation: WorkerGeneration,
+        worker_pid: u32,
+        build_id: impl Into<String>,
+    ) -> Self {
         Self {
             protocol_version: WORKER_PROTOCOL_VERSION,
             worker_generation,
             worker_pid,
+            build_id: build_id.into(),
         }
     }
 }
@@ -104,36 +128,101 @@ mod tests {
     use super::*;
 
     const GENERATION: WorkerGeneration = WorkerGeneration(4);
+    const BUILD: &str = "0.1.0+0123456789abcdef0123456789abcdef01234567";
 
     #[test]
     fn matching_reply_is_accepted() {
         let parent = ParentHello::new(GENERATION, 100);
-        let reply = ChildHello::new(GENERATION, 200);
-        assert_eq!(parent.validate_reply(&reply, 200), Ok(()));
+        let reply = ChildHello::new(GENERATION, 200, BUILD);
+        assert_eq!(parent.validate_reply(&reply, 200, BUILD), Ok(()));
     }
 
     #[test]
     fn reply_with_other_protocol_generation_or_pid_is_rejected() {
         let parent = ParentHello::new(GENERATION, 100);
 
-        let mut reply = ChildHello::new(GENERATION, 200);
+        let mut reply = ChildHello::new(GENERATION, 200, BUILD);
         reply.protocol_version += 1;
         assert_eq!(
-            parent.validate_reply(&reply, 200),
+            parent.validate_reply(&reply, 200, BUILD),
             Err(HandshakeError::ProtocolMismatch)
         );
 
-        let reply = ChildHello::new(WorkerGeneration(5), 200);
+        let reply = ChildHello::new(WorkerGeneration(5), 200, BUILD);
         assert_eq!(
-            parent.validate_reply(&reply, 200),
+            parent.validate_reply(&reply, 200, BUILD),
             Err(HandshakeError::GenerationMismatch)
         );
 
-        let reply = ChildHello::new(GENERATION, 201);
+        let reply = ChildHello::new(GENERATION, 201, BUILD);
         assert_eq!(
-            parent.validate_reply(&reply, 200),
+            parent.validate_reply(&reply, 200, BUILD),
             Err(HandshakeError::PidMismatch)
         );
+    }
+
+    #[test]
+    fn reply_with_another_build_id_is_an_integrity_mismatch() {
+        let parent = ParentHello::new(GENERATION, 100);
+        for build in [
+            "",
+            "0.1.0+development",
+            "0.1.1+0123456789abcdef0123456789abcdef01234567",
+            "0.1.0+0123456789abcdef0123456789abcdef01234568",
+            "0.1.0+0123456789ABCDEF0123456789ABCDEF01234567",
+            " 0.1.0+0123456789abcdef0123456789abcdef01234567",
+        ] {
+            let reply = ChildHello::new(GENERATION, 200, build);
+            assert_eq!(
+                parent.validate_reply(&reply, 200, BUILD),
+                Err(HandshakeError::BuildIdMismatch),
+                "{build:?}"
+            );
+        }
+        let oversized = "x".repeat(MAX_WORKER_BUILD_ID_BYTES + 1);
+        assert_eq!(
+            parent.validate_reply(
+                &ChildHello::new(GENERATION, 200, oversized.clone()),
+                200,
+                &oversized
+            ),
+            Err(HandshakeError::BuildIdMismatch)
+        );
+        // The expected value is backend-owned; an empty expectation never matches anything.
+        assert_eq!(
+            parent.validate_reply(&ChildHello::new(GENERATION, 200, ""), 200, ""),
+            Err(HandshakeError::BuildIdMismatch)
+        );
+        // Protocol, generation and pid problems are reported before the build identity.
+        assert_eq!(
+            parent.validate_reply(&ChildHello::new(GENERATION, 201, "other"), 200, BUILD),
+            Err(HandshakeError::PidMismatch)
+        );
+    }
+
+    #[test]
+    fn child_hello_wire_shape_requires_build_id_and_round_trips() -> Result<(), serde_json::Error> {
+        let reply = ChildHello::new(GENERATION, 200, BUILD);
+        let value = serde_json::to_value(&reply)?;
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "protocol_version": crate::WORKER_PROTOCOL_VERSION,
+                "worker_generation": 4,
+                "worker_pid": 200,
+                "build_id": BUILD,
+            })
+        );
+        assert_eq!(serde_json::from_value::<ChildHello>(value)?, reply);
+        // A pre-M7.2 hello without build_id is malformed, never a silent default.
+        let legacy = r#"{"protocol_version":8,"worker_generation":4,"worker_pid":200}"#;
+        assert!(serde_json::from_str::<ChildHello>(legacy).is_err());
+        let wrong_type =
+            r#"{"protocol_version":9,"worker_generation":4,"worker_pid":200,"build_id":7}"#;
+        assert!(serde_json::from_str::<ChildHello>(wrong_type).is_err());
+        let duplicated = r#"{"protocol_version":9,"worker_generation":4,"worker_pid":200,"build_id":"a","build_id":"b"}"#;
+        assert!(serde_json::from_str::<ChildHello>(duplicated).is_err());
+        Ok(())
     }
 
     #[test]
@@ -160,7 +249,8 @@ mod tests {
 
     #[test]
     fn hello_frames_reject_unknown_fields() {
-        let encoded = r#"{"protocol_version":1,"worker_generation":1,"worker_pid":2,"x":1}"#;
+        let encoded =
+            r#"{"protocol_version":1,"worker_generation":1,"worker_pid":2,"build_id":"b","x":1}"#;
         assert!(serde_json::from_str::<ChildHello>(encoded).is_err());
     }
 }

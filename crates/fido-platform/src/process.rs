@@ -81,6 +81,35 @@ pub use unix::{
     parent_process_id,
 };
 
+/// Whether this process's child `pid` has already exited, **without reaping it**.
+///
+/// Uses `waitid(P_PID, pid, WEXITED | WNOHANG | WNOWAIT)`: the exit status stays collectable, so
+/// the pid cannot be recycled and the owner of the `Child` handle still reaps it exactly once.
+/// ADR-017 §5.3 relies on this: dynamic code validation addresses the child by pid, which is only
+/// sound while the child is unreaped.
+#[cfg(unix)]
+pub fn child_exited_unreaped(pid: u32) -> std::io::Result<bool> {
+    let pid = libc::id_t::from(pid);
+    // SAFETY: an all-zero `siginfo_t` is a valid value; it is only written by `waitid`.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a valid, writable `siginfo_t` for the duration of the call. `WNOWAIT`
+    // leaves the child in a waitable state, so nothing is reaped here.
+    let status = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // With WNOHANG and no state change, `waitid` succeeds and leaves `si_pid` zero.
+    // SAFETY: `info` was initialised above and possibly filled by `waitid`.
+    Ok(unsafe { info.si_pid() } != 0)
+}
+
 #[cfg(unix)]
 pub mod secret_channel {
     use std::io;
@@ -167,4 +196,31 @@ pub fn close_inherited_descriptors() -> std::io::Result<usize> {
         std::io::ErrorKind::Unsupported,
         "worker process hygiene is only implemented for Unix platforms",
     ))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_is_observed_without_reaping_the_child() -> std::io::Result<()> {
+        let mut child = std::process::Command::new("/bin/sleep").arg("30").spawn()?;
+        let pid = child.id();
+        assert!(!child_exited_unreaped(pid)?);
+        child.kill()?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !child_exited_unreaped(pid)? {
+            assert!(std::time::Instant::now() < deadline, "child never exited");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // Peeking twice still reports the exit: nothing was consumed.
+        assert!(child_exited_unreaped(pid)?);
+        // The owner still collects the exit status exactly once.
+        assert!(child.try_wait()?.is_some());
+        assert!(
+            child_exited_unreaped(pid).is_err(),
+            "a reaped child is gone"
+        );
+        Ok(())
+    }
 }

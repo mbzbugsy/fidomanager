@@ -26,6 +26,23 @@
 //! environment, or any value the renderer can influence. The worker's argument list is a
 //! `&'static [&'static str]`, so no runtime-derived value can reach it, and its environment is
 //! cleared.
+//!
+//! # Per-spawn worker authenticity (ADR-017 §5.3)
+//!
+//! Every `launch()` (first start, replacement after a crash or timeout, breaker probe) runs, in
+//! this order, with nothing cached between spawns:
+//!
+//! ```text
+//!   1-2  re-resolve the canonical packaged worker; regular file, executable, not world-writable
+//!        (release: expected .app/Contents/MacOS layout, no symlink, not group-writable)
+//!   3    static validation against the exact requirement + EXPECTED (release builds)
+//!   4    spawn exactly that path; the endpoint takes exclusive ownership of the Child
+//!   5    dynamic validation of THAT child by pid while it is unreaped (release builds)
+//!   6    only then: ParentHello, handshake timeout, ChildHello (incl. build_id), health check
+//! ```
+//!
+//! Any identity failure latches the terminal authenticity state *before* containment, never
+//! sends anything to the child, and never falls back to another executable or a weaker mode.
 
 use std::fs;
 use std::io::{self, Write};
@@ -37,14 +54,17 @@ use std::time::{Duration, Instant};
 
 use fido_core::ExecutionQuiescence;
 use fido_worker_protocol::{
-    CancellationId, ChildHello, ENDPOINT_CONTROL_REQUEST_ID, FrameError, MAX_WORKER_FRAME_BYTES,
-    MAX_WORKER_HANDSHAKE_FRAME_BYTES, MAX_WORKER_REQUEST_FRAME_BYTES, ParentHello, RequestBudgetMs,
-    WORKER_PROTOCOL_VERSION, WorkerGeneration, WorkerOperationClass, WorkerRequest,
-    WorkerRequestEnvelope, WorkerResponse, WorkerResponseEnvelope, decode_message, encode_message,
-    read_frame, write_frame,
+    CancellationId, ChildHello, ENDPOINT_CONTROL_REQUEST_ID, FrameError, HandshakeError,
+    MAX_WORKER_FRAME_BYTES, MAX_WORKER_HANDSHAKE_FRAME_BYTES, MAX_WORKER_REQUEST_FRAME_BYTES,
+    ParentHello, RequestBudgetMs, WORKER_PROTOCOL_VERSION, WorkerGeneration, WorkerOperationClass,
+    WorkerRequest, WorkerRequestEnvelope, WorkerResponse, WorkerResponseEnvelope, decode_message,
+    encode_message, read_frame, write_frame,
 };
 use thiserror::Error;
 
+use crate::worker_authenticity::{
+    ChildVerification, IdentityLatch, WorkerAuthenticity, WorkerIdentityCheck,
+};
 use crate::{WorkerEndpoint, WorkerEndpointError, WorkerLauncher};
 
 const REAP_POLL_INTERVAL: Duration = Duration::from_millis(2);
@@ -69,6 +89,21 @@ pub enum LaunchError {
     HealthCheckFailed,
     #[error("worker could not be proven stopped after a failed launch")]
     NotContained,
+    /// ADR-017 §5.7: the worker failed its code identity, release identity or build identity
+    /// checks. Terminal for the app session. `quiescence` records whether the rejected child (if
+    /// one was spawned) was proven stopped; the rejection itself stays latched either way.
+    #[error("worker identity could not be verified")]
+    WorkerIdentityRejected { quiescence: ExecutionQuiescence },
+}
+
+impl LaunchError {
+    /// Integrity failures that must never be retried in this app session (ADR-017 §5.7).
+    pub const fn is_terminal_integrity_failure(self) -> bool {
+        matches!(
+            self,
+            Self::WorkerIdentityRejected { .. } | Self::ExecutableRejected
+        )
+    }
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -115,10 +150,28 @@ impl Default for ProcessWorkerConfig {
     }
 }
 
-/// A worker executable that passed resolution and safety checks.
+/// A worker executable that passed resolution and safety checks. The checks are repeated on every
+/// launch ([`Self::revalidate`]); construction-time success alone never authorizes a spawn.
 #[derive(Debug, Clone)]
 pub struct ResolvedWorkerExecutable {
     path: PathBuf,
+    origin: ExecutableOrigin,
+}
+
+#[derive(Debug, Clone)]
+enum ExecutableOrigin {
+    BesideCurrentExe(&'static str),
+    Absolute(PathBuf),
+}
+
+fn current_exe_directory() -> Result<PathBuf, LaunchError> {
+    let current = std::env::current_exe()
+        .and_then(|path| path.canonicalize())
+        .map_err(|_| LaunchError::ExecutableRejected)?;
+    current
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or(LaunchError::ExecutableRejected)
 }
 
 impl ResolvedWorkerExecutable {
@@ -133,11 +186,11 @@ impl ResolvedWorkerExecutable {
         {
             return Err(LaunchError::ExecutableRejected);
         }
-        let current = std::env::current_exe()
-            .and_then(|path| path.canonicalize())
-            .map_err(|_| LaunchError::ExecutableRejected)?;
-        let directory = current.parent().ok_or(LaunchError::ExecutableRejected)?;
-        Self::checked(directory.join(file_name))
+        let directory = current_exe_directory()?;
+        Ok(Self {
+            path: Self::checked(&directory.join(file_name), false)?,
+            origin: ExecutableOrigin::BesideCurrentExe(file_name),
+        })
     }
 
     /// Explicit absolute path, for developer tools and tests. Application code uses
@@ -146,14 +199,57 @@ impl ResolvedWorkerExecutable {
         if !path.is_absolute() {
             return Err(LaunchError::ExecutableRejected);
         }
-        Self::checked(path)
+        Ok(Self {
+            path: Self::checked(&path, false)?,
+            origin: ExecutableOrigin::Absolute(path),
+        })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    fn checked(path: PathBuf) -> Result<Self, LaunchError> {
+    /// Re-resolves and re-checks the executable for one spawn (ADR-017 §5.3 steps 1–2) and returns
+    /// the exact canonical path to execute. The resolved location must not have moved since
+    /// construction. With `release_layout` the worker must be the packaged
+    /// `<App>.app/Contents/MacOS/<name>` beside the canonical main executable, must not be a
+    /// symlink and must not be group-writable.
+    pub(crate) fn revalidate(&self, release_layout: bool) -> Result<PathBuf, LaunchError> {
+        let requested = match &self.origin {
+            ExecutableOrigin::BesideCurrentExe(file_name) => {
+                let directory = current_exe_directory()?;
+                if release_layout {
+                    let in_bundle = directory.file_name() == Some("MacOS".as_ref())
+                        && directory.parent().is_some_and(|contents| {
+                            contents.file_name() == Some("Contents".as_ref())
+                        });
+                    if !in_bundle {
+                        return Err(LaunchError::ExecutableRejected);
+                    }
+                }
+                directory.join(file_name)
+            }
+            // Release enforcement accepts only the packaged worker beside the application.
+            ExecutableOrigin::Absolute(_) if release_layout => {
+                return Err(LaunchError::ExecutableRejected);
+            }
+            ExecutableOrigin::Absolute(path) => path.clone(),
+        };
+        if release_layout {
+            let link =
+                fs::symlink_metadata(&requested).map_err(|_| LaunchError::ExecutableRejected)?;
+            if !link.file_type().is_file() {
+                return Err(LaunchError::ExecutableRejected);
+            }
+        }
+        let canonical = Self::checked(&requested, release_layout)?;
+        if canonical != self.path || (release_layout && canonical.parent() != requested.parent()) {
+            return Err(LaunchError::ExecutableRejected);
+        }
+        Ok(canonical)
+    }
+
+    fn checked(path: &Path, strict: bool) -> Result<PathBuf, LaunchError> {
         let path = path
             .canonicalize()
             .map_err(|_| LaunchError::ExecutableRejected)?;
@@ -167,24 +263,32 @@ impl ResolvedWorkerExecutable {
             use std::os::unix::fs::PermissionsExt;
             let mode = metadata.permissions().mode();
             // Must be executable and must not be world-writable. This is basic tamper hygiene, not
-            // a substitute for code signing. (Group-writable is tolerated: a user-private group is
-            // the default on many Linux setups, so build outputs are routinely 0775.)
-            if mode & 0o111 == 0 || mode & 0o002 != 0 {
+            // a substitute for code signing. (Group-writable is tolerated in development: a
+            // user-private group is the default on many Linux setups, so build outputs are
+            // routinely 0775. Release enforcement refuses it.)
+            let forbidden = if strict { 0o022 } else { 0o002 };
+            if mode & 0o111 == 0 || mode & forbidden != 0 {
                 return Err(LaunchError::ExecutableRejected);
             }
         }
+        #[cfg(not(unix))]
+        let _ = strict;
 
-        Ok(Self { path })
+        Ok(path)
     }
 }
 
 /// Spawns [`ProcessWorkerEndpoint`]s for the supervisor.
 #[derive(Debug, Clone)]
 pub struct ProcessWorkerLauncher {
-    executable: ResolvedWorkerExecutable,
+    /// `None` only when release startup authentication failed before a worker path existed; such
+    /// a launcher can never spawn.
+    executable: Option<ResolvedWorkerExecutable>,
     fixed_args: &'static [&'static str],
     config: ProcessWorkerConfig,
     verification_display_scope: Option<[u8; 32]>,
+    authenticity: WorkerAuthenticity,
+    identity_latch: IdentityLatch,
 }
 
 impl ProcessWorkerLauncher {
@@ -207,28 +311,78 @@ impl ProcessWorkerLauncher {
         "fido-worker"
     };
 
-    /// The production launcher: the worker binary next to the running application.
+    /// The production launcher: the worker binary next to the running application. This is the
+    /// single construction site of the release worker-authenticity mode (ADR-017 §5.6).
+    ///
+    /// Development and ad-hoc builds fail with `ExecutableRejected` if the worker is missing, as
+    /// before. The `macos-release-signing` flavor always returns a launcher: when release startup
+    /// authentication (S1–S8) fails, the launcher is permanently unable to spawn and every launch
+    /// reports the terminal `WorkerIdentityRejected`, so the application runs without FIDO
+    /// functionality and shows the integrity error. It never downgrades to development behavior.
     pub fn beside_current_exe() -> Result<Self, LaunchError> {
-        let executable =
-            ResolvedWorkerExecutable::beside_current_exe(Self::DEFAULT_WORKER_FILE_NAME)?;
-        Ok(Self {
-            executable,
-            fixed_args: &[],
-            config: ProcessWorkerConfig::default(),
-            verification_display_scope: Self::display_scope(),
-        })
+        #[cfg(feature = "macos-release-signing")]
+        {
+            let authenticity = crate::worker_authenticity::release_startup();
+            let executable =
+                ResolvedWorkerExecutable::beside_current_exe(Self::DEFAULT_WORKER_FILE_NAME).ok();
+            let authenticity = match (&executable, authenticity) {
+                (Some(_), authenticity) => authenticity,
+                (None, _) => WorkerAuthenticity::StartupRejected,
+            };
+            Ok(Self::with_authenticity(
+                executable,
+                ProcessWorkerConfig::default(),
+                authenticity,
+            ))
+        }
+        #[cfg(not(feature = "macos-release-signing"))]
+        {
+            let executable =
+                ResolvedWorkerExecutable::beside_current_exe(Self::DEFAULT_WORKER_FILE_NAME)?;
+            Ok(Self::with_authenticity(
+                Some(executable),
+                ProcessWorkerConfig::default(),
+                WorkerAuthenticity::UnsignedDevelopment,
+            ))
+        }
     }
 
+    /// Developer tools and tests: an explicit executable in development (non-enforcing) mode.
+    /// The application itself may use only [`Self::beside_current_exe`] (renderer-boundary check).
     pub fn new(
         executable: ResolvedWorkerExecutable,
         config: ProcessWorkerConfig,
     ) -> Result<Self, ProcessWorkerConfigError> {
-        Ok(Self {
+        Ok(Self::with_authenticity(
+            Some(executable),
+            config.validate()?,
+            WorkerAuthenticity::UnsignedDevelopment,
+        ))
+    }
+
+    fn with_authenticity(
+        executable: Option<ResolvedWorkerExecutable>,
+        config: ProcessWorkerConfig,
+        authenticity: WorkerAuthenticity,
+    ) -> Self {
+        Self {
             executable,
             fixed_args: &[],
-            config: config.validate()?,
+            config,
             verification_display_scope: Self::display_scope(),
-        })
+            authenticity,
+            identity_latch: IdentityLatch::default(),
+        }
+    }
+
+    /// TEST-ONLY: a launcher whose release startup authentication failed.
+    #[cfg(test)]
+    pub(crate) fn startup_rejected_for_test() -> Self {
+        Self::with_authenticity(
+            None,
+            ProcessWorkerConfig::default(),
+            WorkerAuthenticity::StartupRejected,
+        )
     }
 
     /// Arguments are compile-time constants by construction (`'static`), so nothing a renderer or
@@ -248,8 +402,22 @@ impl WorkerLauncher for ProcessWorkerLauncher {
     type Endpoint = ProcessWorkerEndpoint;
 
     fn launch(&mut self, generation: WorkerGeneration) -> Result<Self::Endpoint, LaunchError> {
+        // A latched rejection is terminal: nothing is resolved, validated or spawned again.
+        if self.identity_latch.is_set() {
+            return Err(LaunchError::WorkerIdentityRejected {
+                quiescence: ExecutionQuiescence::Quiescent,
+            });
+        }
+        let Some(executable) = self.executable.as_ref() else {
+            self.identity_latch.set();
+            return Err(LaunchError::WorkerIdentityRejected {
+                quiescence: ExecutionQuiescence::Quiescent,
+            });
+        };
         ProcessWorkerEndpoint::launch(
-            &self.executable,
+            executable,
+            &self.authenticity,
+            &self.identity_latch,
             self.fixed_args,
             generation,
             self.config,
@@ -299,6 +467,10 @@ trait WorkerProcess: Send {
     /// `Ok(true)` only once the exit status has been *collected* (the process is reaped). A
     /// process that was signalled but has not been reaped yet answers `Ok(false)`.
     fn try_reap(&mut self) -> io::Result<bool>;
+
+    /// Whether the process has exited, **without** collecting its exit status, so its pid stays
+    /// reserved for it. Used only while its identity is being validated by pid.
+    fn exited_without_reaping(&mut self) -> io::Result<bool>;
 }
 
 impl WorkerProcess for Child {
@@ -308,6 +480,29 @@ impl WorkerProcess for Child {
 
     fn try_reap(&mut self) -> io::Result<bool> {
         self.try_wait().map(|status| status.is_some())
+    }
+
+    fn exited_without_reaping(&mut self) -> io::Result<bool> {
+        #[cfg(unix)]
+        {
+            fido_platform::process::child_exited_unreaped(self.id())
+        }
+        #[cfg(not(unix))]
+        {
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        }
+    }
+}
+
+/// Why a handshake failed: an ordinary launch failure, or a build-identity integrity failure.
+enum HandshakeFailure {
+    Launch(LaunchError),
+    Identity,
+}
+
+impl From<LaunchError> for HandshakeFailure {
+    fn from(error: LaunchError) -> Self {
+        Self::Launch(error)
     }
 }
 
@@ -332,14 +527,28 @@ pub struct ProcessWorkerEndpoint {
 }
 
 impl ProcessWorkerEndpoint {
+    #[allow(clippy::too_many_arguments)]
     fn launch(
         executable: &ResolvedWorkerExecutable,
+        authenticity: &dyn WorkerIdentityCheck,
+        latch: &IdentityLatch,
         fixed_args: &'static [&'static str],
         generation: WorkerGeneration,
         config: ProcessWorkerConfig,
         verification_display_scope: Option<[u8; 32]>,
     ) -> Result<Self, LaunchError> {
-        let mut command = Command::new(executable.path());
+        // Steps 1-2, repeated on every spawn.
+        let path = executable.revalidate(authenticity.enforces_release_layout())?;
+        // Step 3: static validation of exactly this file, before exec. Nothing was spawned, so
+        // the rejection is latched and trivially contained.
+        if authenticity.verify_before_spawn(&path).is_err() {
+            latch.set();
+            return Err(LaunchError::WorkerIdentityRejected {
+                quiescence: ExecutionQuiescence::Quiescent,
+            });
+        }
+
+        let mut command = Command::new(&path);
         command
             .args(fixed_args)
             // Nothing from the service's environment reaches native code.
@@ -372,7 +581,7 @@ impl ProcessWorkerEndpoint {
         };
 
         let (events_tx, events) = mpsc::sync_channel(READER_QUEUE_FRAMES);
-        let mut endpoint = Self {
+        let endpoint = Self {
             process: ProcessState::Running(Box::new(child)),
             stdin: Some(Box::new(stdin)),
             events,
@@ -386,14 +595,69 @@ impl ProcessWorkerEndpoint {
         };
         // From here on every early return drops or explicitly fails `endpoint`, which kills and
         // reaps the child: a failed launch never leaves a process behind.
-        if spawn_reader(stdout, events_tx).is_err() {
-            return Err(endpoint.fail_launch(LaunchError::SpawnFailed));
-        }
+        endpoint.establish(authenticity, latch, move || spawn_reader(stdout, events_tx))
+    }
 
-        match endpoint.handshake() {
-            Ok(()) => Ok(endpoint),
-            Err(error) => Err(endpoint.fail_launch(error)),
+    /// Everything after the spawn, in the ADR-017 §5.3 order: dynamic identity of the running
+    /// child (step 5) strictly before the stdout reader starts and before the first byte —
+    /// `ParentHello` — is written; then the handshake (whose timeout starts at that write), the
+    /// build-identity check (step 7) and the health check.
+    ///
+    /// # PID ownership invariant
+    ///
+    /// Dynamic validation names the child by pid. That is sound only because this endpoint holds
+    /// the one `Child` handle and has not reaped it: until its exit status is collected the kernel
+    /// keeps the process (at worst as a zombie) and cannot hand the pid to another process.
+    /// Nothing else waits on this child — there is no global reaper and no concurrent
+    /// `try_wait`/`wait` task — and the only paths that reap are `terminate`/`has_exited` on this
+    /// endpoint, none of which runs before step 5 completes. The exit check during validation uses
+    /// `waitid(WNOWAIT)`, which does not reap. A child that exited before or during validation is
+    /// rejected.
+    fn establish(
+        mut self,
+        authenticity: &dyn WorkerIdentityCheck,
+        latch: &IdentityLatch,
+        start_reader: impl FnOnce() -> io::Result<()>,
+    ) -> Result<Self, LaunchError> {
+        self.authenticate_running_child(authenticity, latch)?;
+        if start_reader().is_err() {
+            return Err(self.fail_launch(LaunchError::SpawnFailed));
         }
+        match self.handshake(authenticity.expected_build_id()) {
+            Ok(()) => Ok(self),
+            Err(HandshakeFailure::Identity) => Err(self.reject_identity(latch)),
+            Err(HandshakeFailure::Launch(error)) => Err(self.fail_launch(error)),
+        }
+    }
+
+    /// ADR-017 §5.3 step 5. Nothing has been written to the child yet.
+    fn authenticate_running_child(
+        &mut self,
+        authenticity: &dyn WorkerIdentityCheck,
+        latch: &IdentityLatch,
+    ) -> Result<(), LaunchError> {
+        let verified = match authenticity.verify_running_child(self.pid) {
+            Ok(ChildVerification::NotRequired) => return Ok(()),
+            Ok(ChildVerification::Verified) => true,
+            Err(_) => false,
+        };
+        let still_running = match &mut self.process {
+            ProcessState::Running(process) => process.exited_without_reaping().ok() == Some(false),
+            ProcessState::Reaped => false,
+        };
+        if verified && still_running {
+            Ok(())
+        } else {
+            Err(self.reject_identity(latch))
+        }
+    }
+
+    /// ADR-017 §5.7: latch first, then contain. The latch survives whatever containment reports;
+    /// `NotContained` is carried alongside as `quiescence: Active`, never instead of the rejection.
+    fn reject_identity(&mut self, latch: &IdentityLatch) -> LaunchError {
+        latch.set();
+        let quiescence = self.contain();
+        LaunchError::WorkerIdentityRejected { quiescence }
     }
 
     fn fail_launch(&mut self, error: LaunchError) -> LaunchError {
@@ -404,7 +668,7 @@ impl ProcessWorkerEndpoint {
         }
     }
 
-    fn handshake(&mut self) -> Result<(), LaunchError> {
+    fn handshake(&mut self, expected_build_id: &str) -> Result<(), HandshakeFailure> {
         let mut hello = ParentHello::new(self.generation, std::process::id());
         hello.verification_display_scope = self.verification_display_scope;
         let encoded = encode_message(&hello).map_err(|_| LaunchError::HandshakeMalformed)?;
@@ -416,20 +680,26 @@ impl ProcessWorkerEndpoint {
         let reply: ChildHello = match self.events.recv_timeout(self.config.handshake_timeout) {
             Ok(ReaderEvent::Frame(bytes)) => {
                 if bytes.len() > MAX_WORKER_HANDSHAKE_FRAME_BYTES {
-                    return Err(LaunchError::HandshakeMalformed);
+                    return Err(LaunchError::HandshakeMalformed.into());
                 }
                 decode_message(&bytes).map_err(|_| LaunchError::HandshakeMalformed)?
             }
             Ok(ReaderEvent::Failed(StreamFailure::Closed | StreamFailure::Io))
-            | Err(mpsc::RecvTimeoutError::Disconnected) => return Err(LaunchError::SpawnFailed),
-            Ok(ReaderEvent::Failed(_)) => return Err(LaunchError::HandshakeMalformed),
-            Err(mpsc::RecvTimeoutError::Timeout) => return Err(LaunchError::HandshakeTimeout),
+            | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(LaunchError::SpawnFailed.into());
+            }
+            Ok(ReaderEvent::Failed(_)) => return Err(LaunchError::HandshakeMalformed.into()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                return Err(LaunchError::HandshakeTimeout.into());
+            }
         };
-        hello
-            .validate_reply(&reply, self.pid)
-            .map_err(|_| LaunchError::HandshakeMismatch)?;
+        match hello.validate_reply(&reply, self.pid, expected_build_id) {
+            Ok(()) => {}
+            Err(HandshakeError::BuildIdMismatch) => return Err(HandshakeFailure::Identity),
+            Err(_) => return Err(LaunchError::HandshakeMismatch.into()),
+        }
 
-        self.health_check()
+        Ok(self.health_check()?)
     }
 
     /// Proves the request loop (not just process start) works before the worker is handed out.
@@ -743,6 +1013,7 @@ mod tests {
     struct ProcessControl {
         kills: Arc<AtomicU32>,
         reaped: Arc<AtomicBool>,
+        exited: Arc<AtomicBool>,
     }
 
     struct FakeProcess(ProcessControl);
@@ -755,6 +1026,10 @@ mod tests {
 
         fn try_reap(&mut self) -> io::Result<bool> {
             Ok(self.0.reaped.load(Ordering::SeqCst))
+        }
+
+        fn exited_without_reaping(&mut self) -> io::Result<bool> {
+            Ok(self.0.exited.load(Ordering::SeqCst))
         }
     }
 
@@ -1091,6 +1366,412 @@ mod tests {
         assert_eq!(response.request_id, WorkerRequestId(7));
         assert_eq!(fixture.control.kills.load(Ordering::SeqCst), 0);
         Ok(())
+    }
+
+    /// ADR-017 §5.3/§5.7 ordering and latch tests against a fake process and a fake policy.
+    mod worker_identity {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        use super::*;
+        use crate::worker_authenticity::IdentityRejection;
+
+        const BUILD: &str = "0.1.0+0123456789abcdef0123456789abcdef01234567";
+
+        /// Records what had happened at the moment the running child was verified.
+        struct FakeIdentity {
+            verdict: Result<ChildVerification, IdentityRejection>,
+            sink: SharedSink,
+            bytes_written_at_verification: Arc<Mutex<Option<usize>>>,
+            reader_started: Arc<AtomicBool>,
+            reader_started_at_verification: Arc<Mutex<Option<bool>>>,
+        }
+
+        impl WorkerIdentityCheck for FakeIdentity {
+            fn enforces_release_layout(&self) -> bool {
+                false
+            }
+            fn verify_before_spawn(&self, _path: &Path) -> Result<(), IdentityRejection> {
+                Ok(())
+            }
+            fn verify_running_child(
+                &self,
+                _pid: u32,
+            ) -> Result<ChildVerification, IdentityRejection> {
+                let written = self.sink.0.lock().map(|bytes| bytes.len()).ok();
+                if let Ok(mut slot) = self.bytes_written_at_verification.lock() {
+                    *slot = written;
+                }
+                if let Ok(mut slot) = self.reader_started_at_verification.lock() {
+                    *slot = Some(self.reader_started.load(Ordering::SeqCst));
+                }
+                self.verdict
+            }
+            fn expected_build_id(&self) -> &str {
+                BUILD
+            }
+        }
+
+        struct Harness {
+            endpoint: ProcessWorkerEndpoint,
+            control: ProcessControl,
+            worker_events: mpsc::SyncSender<ReaderEvent>,
+            identity: FakeIdentity,
+            latch: IdentityLatch,
+            kills_with_latch_set: Arc<AtomicUsize>,
+        }
+
+        /// A process whose `kill` records whether the latch was already set at that moment.
+        struct LatchObservingProcess {
+            control: ProcessControl,
+            latch: IdentityLatch,
+            kills_with_latch_set: Arc<AtomicUsize>,
+        }
+
+        impl WorkerProcess for LatchObservingProcess {
+            fn kill(&mut self) -> io::Result<()> {
+                if self.latch.is_set() {
+                    self.kills_with_latch_set.fetch_add(1, Ordering::SeqCst);
+                }
+                FakeProcess(self.control.clone()).kill()
+            }
+            fn try_reap(&mut self) -> io::Result<bool> {
+                FakeProcess(self.control.clone()).try_reap()
+            }
+            fn exited_without_reaping(&mut self) -> io::Result<bool> {
+                FakeProcess(self.control.clone()).exited_without_reaping()
+            }
+        }
+
+        fn harness(verdict: Result<ChildVerification, IdentityRejection>) -> Harness {
+            let control = ProcessControl::default();
+            let latch = IdentityLatch::default();
+            let kills_with_latch_set = Arc::new(AtomicUsize::new(0));
+            let sink = SharedSink::default();
+            let (worker_events, events) = mpsc::sync_channel(READER_QUEUE_FRAMES);
+            let endpoint = ProcessWorkerEndpoint::from_parts(
+                Box::new(LatchObservingProcess {
+                    control: control.clone(),
+                    latch: latch.clone(),
+                    kills_with_latch_set: Arc::clone(&kills_with_latch_set),
+                }),
+                Box::new(sink.clone()),
+                events,
+                WorkerGeneration(1),
+                quick_config(),
+            );
+            Harness {
+                endpoint,
+                control,
+                worker_events,
+                identity: FakeIdentity {
+                    verdict,
+                    sink,
+                    bytes_written_at_verification: Arc::new(Mutex::new(None)),
+                    reader_started: Arc::new(AtomicBool::new(false)),
+                    reader_started_at_verification: Arc::new(Mutex::new(None)),
+                },
+                latch,
+                kills_with_latch_set,
+            }
+        }
+
+        fn establish(h: Harness) -> (Result<ProcessWorkerEndpoint, LaunchError>, Harness2) {
+            let Harness {
+                endpoint,
+                control,
+                worker_events,
+                identity,
+                latch,
+                kills_with_latch_set,
+            } = h;
+            let started = Arc::clone(&identity.reader_started);
+            let result = endpoint.establish(&identity, &latch, move || {
+                started.store(true, Ordering::SeqCst);
+                Ok(())
+            });
+            (
+                result,
+                Harness2 {
+                    control,
+                    _worker_events: worker_events,
+                    identity,
+                    latch,
+                    kills_with_latch_set,
+                },
+            )
+        }
+
+        struct Harness2 {
+            control: ProcessControl,
+            _worker_events: mpsc::SyncSender<ReaderEvent>,
+            identity: FakeIdentity,
+            latch: IdentityLatch,
+            kills_with_latch_set: Arc<AtomicUsize>,
+        }
+
+        impl Harness2 {
+            fn written(&self) -> usize {
+                self.identity
+                    .sink
+                    .0
+                    .lock()
+                    .map(|b| b.len())
+                    .unwrap_or(usize::MAX)
+            }
+        }
+
+        fn hello(build_id: &str) -> Result<ReaderEvent, FrameError> {
+            Ok(ReaderEvent::Frame(encode_message(&ChildHello::new(
+                WorkerGeneration(1),
+                0,
+                build_id,
+            ))?))
+        }
+
+        #[test]
+        fn nothing_is_written_before_dynamic_verification_succeeds() {
+            let h = harness(Ok(ChildVerification::Verified));
+            h.control.reaped.store(true, Ordering::SeqCst);
+            let (result, h) = establish(h);
+            // No ChildHello arrives, so the handshake times out after ParentHello was written.
+            assert!(matches!(result, Err(LaunchError::HandshakeTimeout)));
+            assert_eq!(
+                *h.identity
+                    .bytes_written_at_verification
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+                Some(0),
+                "ParentHello must not precede dynamic verification"
+            );
+            assert_eq!(
+                *h.identity
+                    .reader_started_at_verification
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()),
+                Some(false)
+            );
+            assert!(
+                h.written() > 0,
+                "ParentHello is written only after verification"
+            );
+            assert!(!h.latch.is_set());
+        }
+
+        #[test]
+        fn failed_dynamic_verification_sends_nothing_latches_then_contains() {
+            for rejection in [
+                IdentityRejection::DynamicValidation,
+                IdentityRejection::Cdhash,
+                IdentityRejection::TeamId,
+                IdentityRejection::DynamicStatus,
+            ] {
+                let h = harness(Err(rejection));
+                h.control.reaped.store(true, Ordering::SeqCst);
+                let (result, h) = establish(h);
+                assert_eq!(
+                    result.err(),
+                    Some(LaunchError::WorkerIdentityRejected {
+                        quiescence: ExecutionQuiescence::Quiescent
+                    })
+                );
+                assert_eq!(
+                    h.written(),
+                    0,
+                    "no ParentHello, PIN, PUAT or request ({rejection:?})"
+                );
+                assert!(!h.identity.reader_started.load(Ordering::SeqCst));
+                assert!(h.latch.is_set());
+                assert!(h.control.kills.load(Ordering::SeqCst) >= 1);
+                assert_eq!(
+                    h.kills_with_latch_set.load(Ordering::SeqCst),
+                    h.control.kills.load(Ordering::SeqCst) as usize,
+                    "the latch is set before the first containment signal"
+                );
+            }
+        }
+
+        #[test]
+        fn not_contained_keeps_the_identity_rejection_latched() {
+            let h = harness(Err(IdentityRejection::DynamicValidation));
+            // The OS never reports the rejected child reaped.
+            let (result, h) = establish(h);
+            assert_eq!(
+                result.err(),
+                Some(LaunchError::WorkerIdentityRejected {
+                    quiescence: ExecutionQuiescence::Active
+                }),
+                "NotContained is carried alongside, never instead of, the rejection"
+            );
+            assert!(h.latch.is_set());
+            assert!(h.kills_with_latch_set.load(Ordering::SeqCst) >= 1);
+            assert_eq!(h.written(), 0);
+        }
+
+        #[test]
+        fn child_exiting_during_validation_is_rejected() {
+            let h = harness(Ok(ChildVerification::Verified));
+            h.control.exited.store(true, Ordering::SeqCst);
+            h.control.reaped.store(true, Ordering::SeqCst);
+            let (result, h) = establish(h);
+            assert_eq!(
+                result.err(),
+                Some(LaunchError::WorkerIdentityRejected {
+                    quiescence: ExecutionQuiescence::Quiescent
+                })
+            );
+            assert_eq!(h.written(), 0);
+            assert!(h.latch.is_set());
+        }
+
+        #[test]
+        fn development_mode_does_not_peek_or_reject_an_early_exit() {
+            let h = harness(Ok(ChildVerification::NotRequired));
+            h.control.exited.store(true, Ordering::SeqCst);
+            h.control.reaped.store(true, Ordering::SeqCst);
+            let (result, h) = establish(h);
+            // An early death stays an ordinary, restartable launch failure in development.
+            assert!(matches!(result, Err(LaunchError::HandshakeTimeout)));
+            assert!(!h.latch.is_set());
+        }
+
+        #[test]
+        fn wrong_child_hello_build_id_is_a_terminal_identity_failure() -> Result<(), FrameError> {
+            for build in [
+                "0.1.0+development",
+                "",
+                "0.1.0+0123456789abcdef0123456789abcdef01234568",
+            ] {
+                let h = harness(Ok(ChildVerification::NotRequired));
+                h.control.reaped.store(true, Ordering::SeqCst);
+                h.worker_events
+                    .try_send(hello(build)?)
+                    .map_err(|_| FrameError::Malformed)?;
+                let (result, h) = establish(h);
+                assert_eq!(
+                    result.err(),
+                    Some(LaunchError::WorkerIdentityRejected {
+                        quiescence: ExecutionQuiescence::Quiescent
+                    }),
+                    "{build:?}"
+                );
+                assert!(h.latch.is_set());
+                assert!(h.control.kills.load(Ordering::SeqCst) >= 1);
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn matching_build_id_passes_the_identity_step() -> Result<(), FrameError> {
+            let h = harness(Ok(ChildVerification::NotRequired));
+            h.control.reaped.store(true, Ordering::SeqCst);
+            h.worker_events
+                .try_send(hello(BUILD)?)
+                .map_err(|_| FrameError::Malformed)?;
+            let (result, h) = establish(h);
+            // Only the (unanswered) health check fails; identity is not involved.
+            assert!(matches!(result, Err(LaunchError::HealthCheckFailed)));
+            assert!(!h.latch.is_set());
+            Ok(())
+        }
+
+        #[test]
+        fn a_latched_or_startup_rejected_launcher_never_spawns() {
+            let mut launcher = ProcessWorkerLauncher::startup_rejected_for_test();
+            for _ in 0..3 {
+                assert_eq!(
+                    launcher.launch(WorkerGeneration(1)).err(),
+                    Some(LaunchError::WorkerIdentityRejected {
+                        quiescence: ExecutionQuiescence::Quiescent
+                    })
+                );
+            }
+            assert!(launcher.identity_latch.is_set());
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn path_checks_run_again_on_every_launch() -> Result<(), Box<dyn std::error::Error>> {
+            use std::os::unix::fs::PermissionsExt;
+            let directory =
+                std::env::temp_dir().join(format!("fido-service-relaunch-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&directory);
+            fs::create_dir_all(&directory)?;
+            let file = directory.join("worker");
+            fs::write(&file, b"#!/bin/sh\nexit 0\n")?;
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o755))?;
+            let mut launcher = ProcessWorkerLauncher::new(
+                ResolvedWorkerExecutable::from_absolute_path(file.clone())?,
+                quick_config(),
+            )?;
+            // Passes the path checks and is spawned; it exits without a handshake.
+            assert_eq!(
+                launcher.launch(WorkerGeneration(1)).err(),
+                Some(LaunchError::SpawnFailed)
+            );
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o757))?;
+            assert_eq!(
+                launcher.launch(WorkerGeneration(2)).err(),
+                Some(LaunchError::ExecutableRejected),
+                "a world-writable replacement is refused at the next spawn"
+            );
+            fs::remove_file(&file)?;
+            let other = directory.join("other");
+            fs::write(&other, b"other")?;
+            fs::set_permissions(&other, fs::Permissions::from_mode(0o755))?;
+            std::os::unix::fs::symlink(&other, &file)?;
+            assert_eq!(
+                launcher.launch(WorkerGeneration(3)).err(),
+                Some(LaunchError::ExecutableRejected),
+                "a path that now resolves elsewhere is refused"
+            );
+            fs::remove_file(&file)?;
+            assert_eq!(
+                launcher.launch(WorkerGeneration(4)).err(),
+                Some(LaunchError::ExecutableRejected)
+            );
+            let _ = fs::remove_dir_all(&directory);
+            Ok(())
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn release_layout_refuses_absolute_paths_and_group_writable_files()
+        -> Result<(), Box<dyn std::error::Error>> {
+            use std::os::unix::fs::PermissionsExt;
+            let directory =
+                std::env::temp_dir().join(format!("fido-service-layout-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&directory);
+            fs::create_dir_all(&directory)?;
+            let file = directory.join("fido-worker");
+            fs::write(&file, b"worker")?;
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o775))?;
+            let resolved = ResolvedWorkerExecutable::from_absolute_path(file.clone())?;
+            assert!(resolved.revalidate(false).is_ok());
+            assert_eq!(
+                resolved.revalidate(true).err(),
+                Some(LaunchError::ExecutableRejected),
+                "release enforcement accepts only the packaged worker beside the app"
+            );
+            assert_eq!(
+                ResolvedWorkerExecutable::checked(&file, true).err(),
+                Some(LaunchError::ExecutableRejected),
+                "group-writable is refused in release enforcement"
+            );
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o755))?;
+            assert!(ResolvedWorkerExecutable::checked(&file, true).is_ok());
+            // The test binary does not live in an .app bundle: the release layout is refused.
+            let beside = ResolvedWorkerExecutable {
+                path: file.clone(),
+                origin: ExecutableOrigin::BesideCurrentExe("fido-worker"),
+            };
+            assert_eq!(
+                beside.revalidate(true).err(),
+                Some(LaunchError::ExecutableRejected)
+            );
+            let _ = fs::remove_dir_all(&directory);
+            Ok(())
+        }
     }
 
     #[cfg(unix)]
