@@ -38,9 +38,7 @@ jobs:
         run: pnpm security:renderer-boundary
 
       - name: Frontend formatting
-        run: |
-          pnpm exec prettier scripts/test-frontend-sbom.mjs
-          pnpm lint
+        run: pnpm lint
 
       - name: Frontend typecheck
         run: pnpm typecheck

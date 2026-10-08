@@ -35,7 +35,9 @@ test('includes emitted package CSS even when rendered JS length is zero', () => 
       type: 'chunk',
       fileName: 'assets/main.js',
       code: 'console.log(1)',
-      viteMetadata: { importedCss: new Set(hasCss ? ['assets/theme.css'] : []) },
+      viteMetadata: {
+        importedCss: new Set(hasCss ? ['assets/theme.css'] : []),
+      },
       modules: {
         [cssId]: { renderedLength: 0 },
         [jsId]: { renderedLength: 0 },
