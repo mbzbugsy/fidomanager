@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 
 from release_metadata import (CheckError, canonical, digest, file_record, hex_value, keys,
-                              parse_json, publisher_requirement, read_regular, require)
+                              parse_json, publisher_requirement, read_regular, require, zip_app_tree)
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "mbzbugsy/fidomanager"
@@ -23,6 +23,10 @@ SIGNER = "mbzbugsy/fidomanager-release-signer"
 EXECUTABLES = ("fidomanager-app", "fido-worker")
 TARGETS = {"arm64": "aarch64-apple-darwin", "x86_64": "x86_64-apple-darwin"}
 CONTEXT_KEYS = "repository tag tag_object_sha commit_sha version arch deployment_target eligibility workflow signer"
+APP_NAME = "Fido Manager.app"
+CODE_EVIDENCE_SCHEMA = "fidomanager.code-evidence/1"
+CODE_EVIDENCE_KEYS = ("schema stapled version source_commit app_tree dmg_sha256 file_sha256 system_dependencies "
+                      "dmg_cdhash team_id release_identity cdhash")
 MANIFEST_KEYS = "schema product version tag source build build_tools native third_party_notices signing notarization artifacts digest_chain sbom"
 
 
@@ -46,6 +50,8 @@ def validate_context(context):
             re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?", context["version"]),
             "invalid release version")
     require(context["tag"] == "v" + context["version"], "tag/version mismatch")
+    require(context["version"] == read_json(ROOT / "src-tauri/tauri.conf.json")["version"],
+            "release version differs from the reviewed checkout")
     require(hex_value(context["commit_sha"], 40) and hex_value(context["tag_object_sha"], 40), "invalid commit/tag object")
     require(context["arch"] in TARGETS and context["deployment_target"] == "11.0", "unsupported architecture/floor")
     workflow = context["workflow"]
@@ -309,6 +315,43 @@ def notary_log(data, evidence, submitted, expected_hashes):
     require(expected_hashes <= actual, "notarization ticket missing code identity")
 
 
+def check_code_evidence(code, context, app_zip_bytes, dmg_sha256):
+    """Bind checker evidence to the trusted release context and to the exact final payload bytes.
+
+    The evidence is produced by the candidate checker in Verify; nothing in it is trusted to name
+    the release. Version and commit must equal the independent context, the checked DMG must be
+    exactly the D5 asset, and the shipped app ZIP (D3) must contain exactly the stapled app tree
+    the checker verified, parsed in memory without extraction.
+    """
+    keys(code, CODE_EVIDENCE_KEYS, "verified code evidence")
+    keys(code["file_sha256"], "fidomanager-app fido-worker", "code file digests")
+    keys(code["system_dependencies"], "fidomanager-app fido-worker", "system dependencies")
+    keys(code["release_identity"], "record_sha256 worker_file_sha256 cdhash", "checked release identity")
+    require(code["schema"] == CODE_EVIDENCE_SCHEMA, "unsupported or stale code evidence schema")
+    require(code["stapled"] is True, "code evidence is not from a stapled verification")
+    require(code["version"] == context["version"] and code["source_commit"] == context["commit_sha"],
+            "code evidence was produced for a different release version or source commit")
+    require(hex_value(code["dmg_sha256"]) and code["dmg_sha256"] == dmg_sha256,
+            "checked DMG differs from the final DMG asset (D5)")
+    tree = code["app_tree"]
+    keys(tree, "files directories", "verified app tree")
+    require(isinstance(tree["files"], dict) and isinstance(tree["directories"], list) and
+            tree["directories"] == sorted(set(tree["directories"])), "malformed verified app tree")
+    for name, item in tree["files"].items():
+        keys(item, "sha256 mode", "verified app file")
+        require(isinstance(name, str) and hex_value(item["sha256"]) and type(item["mode"]) is int and
+                0 <= item["mode"] <= 0o777, "malformed verified app file")
+    files = tree["files"]
+    require("Contents/CodeResources" in files, "verified app tree is not stapled")
+    require(files.get("Contents/MacOS/fido-worker", {}).get("sha256") == code["file_sha256"].get("fido-worker") and
+            files.get("Contents/MacOS/fidomanager-app", {}).get("sha256") == code["file_sha256"].get("fidomanager-app"),
+            "verified app tree differs from checked executables")
+    require(files.get("Contents/Resources/release-worker-identity.json", {}).get("sha256") ==
+            code["release_identity"]["record_sha256"], "verified app tree differs from the release identity record")
+    require(zip_app_tree(app_zip_bytes, APP_NAME) == tree,
+            "final app ZIP (D3) does not contain exactly the verified stapled app")
+
+
 def checksums(assets):
     return "".join(f'{assets[name]["sha256"]}  {name}\n' for name in sorted(assets)).encode()
 
@@ -320,15 +363,14 @@ def expected_outputs(directory, context, manifest_input, inputs, identity_bytes,
     require(set(manifest) == set(MANIFEST_KEYS.split()) - {"artifacts", "sbom", "native"}, "manifest input fields")
     manifest["native"] = native_metadata(identity_bytes, summary_bytes, context["arch"])
     dmg, app_zip, sbom_name = names(context)
-    payload = {name: file_record(directory / name) for name in (dmg, app_zip)}
+    payload_bytes = {name: read_regular(directory / name, 512 * 1024 * 1024) for name in (dmg, app_zip)}
+    payload = {name: {"sha256": digest(data), "size": len(data)} for name, data in payload_bytes.items()}
     manifest["artifacts"] = [{"name": name, **payload[name]} for name in (dmg, app_zip)]
     manifest["sbom"] = {"name": sbom_name, "sha256": "0" * 64}
     validate_manifest(manifest, context)
     require(manifest["digest_chain"]["D3"] == payload[app_zip]["sha256"] and
             manifest["digest_chain"]["D5"] == payload[dmg]["sha256"], "final payload digest chain mismatch")
-    keys(code, "file_sha256 system_dependencies dmg_cdhash team_id release_identity cdhash", "verified code evidence")
-    keys(code["file_sha256"], "fidomanager-app fido-worker", "code file digests")
-    keys(code["system_dependencies"], "fidomanager-app fido-worker", "system dependencies")
+    check_code_evidence(code, context, payload_bytes[app_zip], payload[dmg]["sha256"])
     require(all(hex_value(v) for v in code["file_sha256"].values()) and hex_value(code["dmg_cdhash"], 40), "invalid code evidence")
     require(code["file_sha256"]["fido-worker"] == manifest["digest_chain"]["D1"], "code evidence worker mismatch")
     require(code["team_id"] == manifest["signing"]["team_id"] and code["cdhash"] == manifest["signing"]["cdhash"],

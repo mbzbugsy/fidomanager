@@ -271,6 +271,7 @@ def check_signatures(app, main, worker, mode, expected_team_id=None):
 
 
 RID_KEY = "FidoManagerReleaseWorkerIdentitySHA256"
+CODE_EVIDENCE_SCHEMA = "fidomanager.code-evidence/1"
 MARKER = b"FIDOMANAGER-RELEASE-ENFORCING-MARKER/"
 
 
@@ -306,7 +307,8 @@ def check_requirement(binary, requirement, arch=None):
 def check_designated_requirement(binary, identifier, team):
     """Parse the small Apple DR grammar, never substring-match a possibly weakened OR expression.
 
-    Accept reordered conjunctions and Apple's documented optional Mac App Store branch; the
+    Accept codesign's printed form (existence tests rendered as `/* exists */`), reordered
+    conjunctions and Apple's documented optional Mac App Store branch; the
     separate explicit publisher requirement always excludes Store signatures (ADR-017 E1).
     Unknown syntax fails closed until a real-output fixture receives review.
     """
@@ -317,14 +319,15 @@ def check_designated_requirement(binary, identifier, team):
     require(len(lines) == 1, "missing or ambiguous designated requirement")
     text = lines[0]
     atom = (r'anchor apple generic|identifier "[a-zA-Z0-9.-]+"|'
-            r'certificate (?:1|leaf)\[field\.[0-9.]+\](?: exists)?|'
+            r'certificate (?:1|leaf)\[field\.[0-9.]+\](?: exists| /\* exists \*/)?|'
             r'certificate leaf\[subject\.OU\] = (?:"[A-Z0-9]{10}"|[A-Z0-9]{10})')
     token = re.compile(r"\s*(" + atom + r"|\(|\)|and\b|or\b)\s*")
     tokens, offset = [], 0
     while offset < len(text):
         found = token.match(text, offset)
         require(found is not None, "unsupported designated requirement syntax")
-        tokens.append(found[1].replace(" exists", ""))
+        # codesign prints existence tests as `/* exists */` comments; no other comment is accepted.
+        tokens.append(found[1].replace(" /* exists */", "").replace(" exists", ""))
         offset = found.end()
     require(len(tokens) <= 64, "designated requirement too complex")
     pos = 0
@@ -415,11 +418,22 @@ def check_staple(path, team):
                 "Gatekeeper origin mismatch")
 
 
-def tree_digest(app):
-    """Compare mounted app bytes and executable modes with the already checked app."""
-    return {p.relative_to(app).as_posix(): (digest(read_regular(p, 256 * 1024 * 1024)),
-                                          stat.S_IMODE(p.stat().st_mode) & 0o777)
-            for p in app.rglob("*") if not p.is_dir()}
+def app_tree(app):
+    """Exact file bytes, permission bits and directory set of an already tree-checked app.
+
+    The same shape is produced from the shipped app ZIP by release_metadata.zip_app_tree, so
+    provenance can require that the ZIP contains exactly the app verified here.
+    """
+    files, directories = {}, []
+    for path in sorted(app.rglob("*")):
+        relative = path.relative_to(app).as_posix()
+        mode = path.lstat().st_mode
+        if stat.S_ISDIR(mode):
+            directories.append(relative)
+        else:
+            require(stat.S_ISREG(mode), f"not a regular file: {relative}")
+            files[relative] = {"sha256": digest(read_regular(path, 256 * 1024 * 1024)), "mode": stat.S_IMODE(mode) & 0o777}
+    return {"files": files, "directories": directories}
 
 
 def check_dmg(dmg, app, team, stapled):
@@ -447,7 +461,7 @@ def check_dmg(dmg, app, team, stapled):
             require(applications.is_symlink() and os.readlink(applications) == "/Applications", "DMG Applications link mismatch")
             bundled = mount / "Fido Manager.app"
             check_tree(bundled, "developer-id", stapled)
-            require(tree_digest(bundled) == tree_digest(app), "DMG app differs from verified app")
+            require(app_tree(bundled) == app_tree(app), "DMG app differs from verified app")
         finally:
             if attached:
                 output(["hdiutil", "detach", str(mount)])
@@ -510,6 +524,28 @@ def check_worker_openssl_independence(worker):
 
 def check(app, *, signature_mode, expected_version, frontend_dist=None, execute_worker=True,
           expected_team_id=None, expected_commit=None, stapled=False, dmg=None, pre_staple_cdhashes=None):
+    if dmg is None:
+        return _check(app, signature_mode=signature_mode, expected_version=expected_version,
+                      frontend_dist=frontend_dist, execute_worker=execute_worker, expected_team_id=expected_team_id,
+                      expected_commit=expected_commit, stapled=stapled, dmg=None, pre_staple_cdhashes=pre_staple_cdhashes)
+    # Check a private copy so the recorded digest names exactly the bytes every tool examined.
+    data = read_regular(dmg, 512 * 1024 * 1024)
+    with tempfile.TemporaryDirectory(prefix="fidomanager-dmg-copy-") as private:
+        copy = Path(private).resolve() / Path(dmg).name
+        descriptor = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "wb") as target:
+            target.write(data)
+        summary = _check(app, signature_mode=signature_mode, expected_version=expected_version,
+                         frontend_dist=frontend_dist, execute_worker=execute_worker, expected_team_id=expected_team_id,
+                         expected_commit=expected_commit, stapled=stapled, dmg=copy, pre_staple_cdhashes=pre_staple_cdhashes)
+        require(read_regular(copy, 512 * 1024 * 1024) == data, "DMG copy changed during verification")
+    if summary["code_evidence"] is not None:
+        summary["code_evidence"]["dmg_sha256"] = digest(data)
+    return summary
+
+
+def _check(app, *, signature_mode, expected_version, frontend_dist, execute_worker,
+           expected_team_id, expected_commit, stapled, dmg, pre_staple_cdhashes):
     require(signature_mode in ("adhoc", "developer-id"), "invalid signature mode")
     if signature_mode == "developer-id":
         publisher_requirement(BUNDLE_ID, expected_team_id)
@@ -527,7 +563,7 @@ def check(app, *, signature_mode, expected_version, frontend_dist=None, execute_
     check_symbols(main, worker)
     assets = check_frontend(main, frontend_dist) if frontend_dist else 0
     check_signatures(app, main, worker, signature_mode, expected_team_id)
-    release = None
+    release = tree = None
     if signature_mode == "developer-id":
         release = check_release_identity(app, main, worker, info, expected_version,
                                          expected_commit, expected_team_id, arch)
@@ -546,11 +582,16 @@ def check(app, *, signature_mode, expected_version, frontend_dist=None, execute_
             check_staple(app, expected_team_id)
         if dmg is not None:
             check_dmg(dmg, app, expected_team_id, stapled)
+        # Recorded before any worker execution; provenance compares it with the shipped app ZIP.
+        tree = app_tree(app)
     if execute_worker:
         check_worker_runtime(worker)
     code_evidence = None
     if signature_mode == "developer-id":
         code_evidence = {
+            "schema": CODE_EVIDENCE_SCHEMA, "stapled": stapled,
+            "version": expected_version, "source_commit": expected_commit, "app_tree": tree,
+            "dmg_sha256": None,
             "team_id": expected_team_id, "release_identity": release,
             "file_sha256": {binary.name: digest(read_regular(binary, 256 * 1024 * 1024)) for binary in (main, worker)},
             "system_dependencies": {binary.name: dependencies(binary) for binary in (main, worker)},

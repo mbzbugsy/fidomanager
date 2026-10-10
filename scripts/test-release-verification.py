@@ -110,8 +110,52 @@ class VerificationTests(unittest.TestCase):
                 with self.assertRaises(CheckError):
                     c.check_designated_requirement(self.worker, c.WORKER_IDENTIFIER, TEAM)
 
+    # Representative of `codesign -d -r-` output shape (TN3127): existence tests are printed as
+    # `/* exists */` comments and "Executable=" goes to stderr. Synthetic Team ID; not a real signature.
+    REAL_DEVELOPER_ID_DR = ('designated => identifier "{id}" and anchor apple generic and '
+                            'certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and '
+                            'certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and '
+                            'certificate leaf[subject.OU] = {team}')
+    REAL_DEFAULT_DR = ('designated => anchor apple generic and identifier "{id}" and '
+                       '(certificate leaf[field.1.2.840.113635.100.6.1.9] /* exists */ or '
+                       'certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and '
+                       'certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and '
+                       'certificate leaf[subject.OU] = {team})')
+
+    def check_dr(self, stdout, identifier=None):
+        identifier = identifier or c.WORKER_IDENTIFIER
+        stderr = "Executable=/private/var/folders/x/Fido Manager.app/Contents/MacOS/fido-worker\n"
+        with patch.object(c, "run", return_value=subprocess.CompletedProcess([], 0, stdout + "\n", stderr)):
+            return c.check_designated_requirement(self.worker, identifier, TEAM)
+
+    def test_real_codesign_designated_requirement_syntax(self):
+        for template in (self.REAL_DEVELOPER_ID_DR, self.REAL_DEFAULT_DR):
+            self.check_dr(template.format(id=c.WORKER_IDENTIFIER, team=TEAM))
+            self.check_dr(template.format(id=c.BUNDLE_ID, team=TEAM), c.BUNDLE_ID)
+            self.check_dr(template.format(id=c.BUNDLE_ID + ".dmg", team=TEAM), c.BUNDLE_ID + ".dmg")
+        real = self.REAL_DEFAULT_DR.format(id=c.WORKER_IDENTIFIER, team=TEAM)
+        dev = self.REAL_DEVELOPER_ID_DR.format(id=c.WORKER_IDENTIFIER, team=TEAM)
+        for label, text in (
+                ("weakening OR", real + " or anchor apple generic"),
+                ("weakening OR inside group", real.replace("(certificate leaf[field.1.2.840.113635.100.6.1.9] /* exists */ or ",
+                                                           "(anchor apple or certificate leaf[field.1.2.840.113635.100.6.1.9] /* exists */ or ")),
+                ("store-only", real.replace(" or certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and "
+                                            "certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and "
+                                            f"certificate leaf[subject.OU] = {TEAM}", "")),
+                ("other Team ID", real.replace(TEAM, "OTHERTEAM1")),
+                ("other identifier", real.replace("fido-worker", "other")),
+                ("missing Developer ID CA", dev.replace("certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and ", "")),
+                ("missing Developer ID leaf", dev.replace("certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and ", "")),
+                ("other comment", dev.replace("/* exists */", "/* anything */", 1)),
+                ("comment hides clause", dev.replace("/* exists */", "/* exists */ /* or anchor apple generic */", 1)),
+                ("unterminated comment", dev.replace("/* exists */", "/* exists", 1)),
+                ("negation", dev.replace("anchor apple generic", "! anchor apple generic")),
+                ("second designated line", dev + "\n" + dev)):
+            with self.subTest(label), self.assertRaises(CheckError):
+                self.check_dr(text)
+
     def test_signature_validation_uses_strict_tools(self):
-        for failure in (None, "explicit", "deep", "runtime", "entitlement", "identifier"):
+        for failure in (None, "explicit", "deep", "runtime", "entitlement", "identifier", "no-plist-binding", "no-sealed-resources"):
             commands = []
             def run(command):
                 commands.append(command)
@@ -134,11 +178,16 @@ class VerificationTests(unittest.TestCase):
                     if failure == "identifier":
                         fields["Identifier"] = ["other"]
                     result.stderr = "\n".join(key + "=" + value for key, values in fields.items() for value in values)
-                    result.stderr += "\nSealed Resources version=2 rules=13 files=3\nInfo.plist entries=10\n"
+                    if failure != "no-sealed-resources":
+                        result.stderr += "\nSealed Resources version=2 rules=13 files=3"
+                    if failure != "no-plist-binding":
+                        result.stderr += "\nInfo.plist entries=10"
+                    result.stderr += "\n"
                 return result
             with self.subTest(failure=failure), patch.object(c, "run", side_effect=run):
                 if failure:
-                    with self.assertRaises(CheckError):
+                    message = {"no-plist-binding": "Info.plist is not bound", "no-sealed-resources": "not sealed"}.get(failure, "")
+                    with self.assertRaisesRegex(CheckError, message):
                         c.check_signatures(self.app, self.main, self.worker, "developer-id", TEAM)
                 else:
                     c.check_signatures(self.app, self.main, self.worker, "developer-id", TEAM)
@@ -245,6 +294,75 @@ class VerificationTests(unittest.TestCase):
                     c.check(self.app, **arguments, pre_staple_cdhashes=bad)
             execute.assert_not_called()
 
+    def release_check(self, dmg, evidence, dmg_check=None):
+        (self.app / "Contents/CodeResources").write_bytes(b"SYNTHETIC ticket")
+        with patch.object(c, "check_linkage", return_value=("arm64", "11.0")), patch.object(c, "check_symbols"), \
+                patch.object(c, "check_signatures"), patch.object(c, "signature", return_value=self.fields), \
+                patch.object(c, "check_requirement"), patch.object(c, "check_staple"), \
+                patch.object(c, "dependencies", return_value=[]), patch.object(c, "check_worker_runtime") as execute, \
+                patch.object(c, "check_dmg", side_effect=dmg_check) as checked_dmg:
+            try:
+                return c.check(self.app, signature_mode="developer-id", expected_version=VERSION, expected_team_id=TEAM,
+                               expected_commit=COMMIT, stapled=True, execute_worker=False, dmg=dmg,
+                               pre_staple_cdhashes=evidence), checked_dmg
+            finally:
+                execute.assert_not_called()
+
+    def test_dmg_cdhash_changed_after_stapling(self):
+        dmg = Path(self.temp.name) / "FidoManager-0.1.0-arm64.dmg"
+        dmg.write_bytes(b"SYNTHETIC DMG")
+        evidence = {name: {"arm64": "b" * 40} for name in ("fidomanager-app", "fido-worker")}
+        for bad in ({**evidence, "dmg": "c" * 40}, {**evidence, "dmg": "B" * 40}, evidence):
+            with self.subTest(evidence=bad), self.assertRaises(CheckError) as caught:
+                self.release_check(dmg, bad)
+            if "dmg" in bad:
+                self.assertIn("DMG cdhash changed after stapling", str(caught.exception))
+
+    def test_code_evidence_binds_exact_checked_dmg_release_and_app_tree(self):
+        dmg = Path(self.temp.name) / "FidoManager-0.1.0-arm64.dmg"
+        original = b"SYNTHETIC DMG bytes"
+        dmg.write_bytes(original)
+        seen = []
+
+        def capture(path, app, team, stapled):
+            seen.append(path)
+            self.assertNotEqual(path, dmg)
+            self.assertEqual(path.read_bytes(), original)
+            self.assertTrue(stapled)
+        evidence = {name: {"arm64": "b" * 40} for name in ("fidomanager-app", "fido-worker", "dmg")}
+        evidence["dmg"] = "b" * 40
+        summary, _ = self.release_check(dmg, evidence, capture)
+        code = summary["code_evidence"]
+        self.assertEqual(len(seen), 1)
+        self.assertFalse(seen[0].exists(), "private DMG copy must be removed")
+        self.assertEqual((code["schema"], code["stapled"], code["version"], code["source_commit"], code["dmg_sha256"]),
+                         (c.CODE_EVIDENCE_SCHEMA, True, VERSION, COMMIT, digest(original)))
+        self.assertEqual(code["app_tree"], c.app_tree(self.app))
+        self.assertIn("Contents/CodeResources", code["app_tree"]["files"])
+        self.assertEqual(code["app_tree"]["files"]["Contents/MacOS/fido-worker"]["sha256"], code["file_sha256"]["fido-worker"])
+
+        def mutate(path, app, team, stapled):  # the checked bytes must be the recorded bytes
+            path.write_bytes(b"SWAPPED during verification")
+        with self.assertRaisesRegex(CheckError, "changed during verification"):
+            self.release_check(dmg, evidence, mutate)
+
+    def test_unstapled_evidence_is_marked_unstapled(self):
+        with patch.object(c, "check_linkage", return_value=("arm64", "11.0")), patch.object(c, "check_symbols"), \
+                patch.object(c, "check_signatures"), patch.object(c, "signature", return_value=self.fields), \
+                patch.object(c, "check_requirement"), patch.object(c, "dependencies", return_value=[]):
+            summary = c.check(self.app, signature_mode="developer-id", expected_version=VERSION, expected_team_id=TEAM,
+                              expected_commit=COMMIT, execute_worker=False)
+        self.assertIs(summary["code_evidence"]["stapled"], False)
+        self.assertIsNone(summary["code_evidence"]["dmg_sha256"])
+
+    def test_dmg_symlink_input_rejected(self):
+        target = Path(self.temp.name) / "real.dmg"
+        target.write_bytes(b"SYNTHETIC")
+        link = Path(self.temp.name) / "link.dmg"
+        link.symlink_to(target)
+        with self.assertRaisesRegex(CheckError, "symlink"):
+            self.release_check(link, {})
+
     def test_duplicate_plist_key_rejected(self):
         data = plistlib.dumps(self.info).replace(b"<dict>", b"<dict><key>CFBundleIdentifier</key><string>other</string>", 1)
         (self.app / "Contents/Info.plist").write_bytes(data)
@@ -255,7 +373,7 @@ class VerificationTests(unittest.TestCase):
         dmg = Path(self.temp.name) / "fixture.dmg"
         dmg.write_bytes(b"SYNTHETIC, NOT SIGNED")
         fields = {**self.fields, "Identifier": [c.BUNDLE_ID + ".dmg"]}
-        for change in (None, "extra", "different-app", "bad-applications"):
+        for change in (None, "extra", "different-app", "bad-applications", "empty-dir", "mode"):
             commands = []
             def output(command):
                 commands.append(command)
@@ -267,6 +385,10 @@ class VerificationTests(unittest.TestCase):
                     (mount / "Applications").symlink_to("/Applications" if change != "bad-applications" else "/tmp")
                     if change == "extra":
                         (mount / "extra").write_bytes(b"bad")
+                    if change == "empty-dir":
+                        (mount / self.app.name / "Contents/Resources/Extra").mkdir()
+                    if change == "mode":
+                        (mount / self.app.name / "Contents/Resources/icon.icns").chmod(0o600)
                     if change == "different-app":
                         (mount / self.app.name / "Contents/Resources/release-worker-identity.json").write_bytes(b"{}")
                 return ""
@@ -281,6 +403,29 @@ class VerificationTests(unittest.TestCase):
                         c.check_dmg(dmg, self.app, TEAM, False)
                 self.assertEqual(commands[-1][:2], ["hdiutil", "detach"])
                 self.assertIn("-readonly", next(cmd for cmd in commands if cmd[1] == "attach"))
+
+    def test_dmg_stapler_and_gatekeeper_fail_closed(self):
+        dmg = Path(self.temp.name) / "FidoManager-0.1.0-arm64.dmg"
+        dmg.write_bytes(b"SYNTHETIC")
+        valid = subprocess.CompletedProcess([], 0, "The validate action worked!", "")
+        with patch.object(c, "run", side_effect=[subprocess.CompletedProcess([], 65, "", "does not have a ticket stapled")]):
+            with self.assertRaisesRegex(CheckError, "stapler validation failed"):
+                c.check_staple(dmg, TEAM)
+        with patch.object(c, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+            with self.assertRaisesRegex(CheckError, "stapler validation failed"):
+                c.check_staple(dmg, TEAM)
+        for assessment in ((3, f"{dmg}: rejected\nsource=Unnotarized Developer ID"), (0, f"{dmg}: accepted\nsource=Developer ID"),
+                           (0, f"{dmg}: rejected\nsource=Notarized Developer ID"), (1, f"{dmg}: accepted\nsource=Notarized Developer ID")):
+            calls = []
+            def run(command, assessment=assessment):
+                calls.append(command)
+                return valid if command[1] == "stapler" else subprocess.CompletedProcess(command, assessment[0], "", assessment[1])
+            with self.subTest(assessment=assessment), patch.object(c, "run", side_effect=run):
+                with self.assertRaisesRegex(CheckError, "Gatekeeper assessment failed"):
+                    c.check_staple(dmg, TEAM)
+                self.assertEqual(calls[1][:5], ["spctl", "--assess", "--type", "open", "--context"])
+        with patch.object(c, "run", side_effect=[valid, subprocess.CompletedProcess([], 0, "", f"{dmg}: accepted\nsource=Notarized Developer ID")]):
+            c.check_staple(dmg, TEAM)
 
     def test_stapler_and_gatekeeper_fail_closed(self):
         for responses in ((1, "The validate action worked!", ""), (0, "", "")):
