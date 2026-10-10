@@ -13,7 +13,11 @@ mod native_ui_spike;
     target_os = "macos"
 ))]
 mod pin_mutation;
+#[cfg(feature = "macos-app-sandbox")]
+mod sandbox_instance;
 
+#[cfg(all(feature = "macos-app-sandbox", not(target_os = "macos")))]
+compile_error!("the macos-app-sandbox flavor is macOS-only (ADR-018)");
 use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
@@ -85,16 +89,21 @@ pub fn run() {
         target_os = "macos"
     )))]
     let auth_for_startup = Arc::clone(&authentication_authority);
-    let builder = tauri::Builder::default()
-        // Security invariant: single-instance is registered before any future plugin.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // Second-launch arguments are intentionally ignored: they are untrusted input.
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-        }))
+    let builder = tauri::Builder::default();
+    // Security invariant: single-instance is registered before any future plugin.
+    #[cfg(not(feature = "macos-app-sandbox"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        // Second-launch arguments are intentionally ignored: they are untrusted input.
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }));
+    // ADR-018: the plugin's /tmp socket is denied inside the App Sandbox; use the container lock.
+    #[cfg(feature = "macos-app-sandbox")]
+    let builder = builder.plugin(sandbox_instance::init());
+    let builder = builder
         .manage(AppState {
             discovery: Arc::clone(&discovery),
             inspection: Arc::new(Mutex::new(

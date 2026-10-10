@@ -1,0 +1,4 @@
+2026-10-10 13:50:07.120 5 duplicate reports for Sandbox: fido-worker(86420) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:50:12.960 5 duplicate reports for Sandbox: fido-worker(86420) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:50:14.772 1 duplicate report for Sandbox: fido-worker(86420) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:50:18.584 5 duplicate reports for Sandbox: fido-worker(86420) deny(1) iokit-open-user-client IOHIDLibUserClient

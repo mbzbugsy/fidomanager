@@ -60,7 +60,7 @@ fn sync_directory(directory: &File) -> io::Result<()> {
 
 // Sync each newly created directory into its parent, including an app data root that did not
 // exist yet. Merely syncing the final namespace would not persist a missing ancestor entry.
-fn create_directory_durable(path: &Path) -> io::Result<()> {
+pub(crate) fn create_directory_durable(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_dir() => return Ok(()),
         Ok(_) => return Err(io::Error::other("recovery ancestor is not a directory")),

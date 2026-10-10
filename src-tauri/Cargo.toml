@@ -20,6 +20,10 @@ native-ui-spike = ["fido-service/native-ui-spike"]
 # ADR-017 §5.6 compile-time release-enforcement flavor. Enabled only by the reviewed release
 # packaging; never by CI's ad-hoc packaging, a runtime switch, the environment or the renderer.
 macos-release-signing = ["fido-service/macos-release-signing"]
+# ADR-018 macOS App Sandbox (Mac App Store compatibility) flavor. Compile-time only: replaces the
+# single-instance plugin's /tmp socket, which the sandbox denies, with a container-local lock.
+# Enabled only by scripts/package-macos-sandbox.py; never a default feature.
+macos-app-sandbox = []
 
 [dependencies]
 boogoocypher-status = { path = "../crates/boogoocypher-status" }

@@ -1,0 +1,8 @@
+   3 Sandbox: child-inherit deny(1) file-write-create /private/tmp/fm-sbx-probe-write-test
+   3 Sandbox: child-inherit deny(1) iokit-open-user-client IOHIDLibUserClient
+   3 Sandbox: child-own deny(1) forbidden-sandbox-reinit
+   4 Sandbox: parent-nousb deny(1) file-write-create /private/tmp/fm-sbx-probe-write-test
+  12 Sandbox: parent-nousb deny(1) iokit-open-user-client IOHIDLibUserClient
+   6 Sandbox: parent-usb deny(1) file-write-create /private/tmp/fm-sbx-probe-write-test
+   4 Sandbox: plain deny(1) file-write-create /private/tmp/fm-sbx-probe-write-test
+   4 Sandbox: plain deny(1) iokit-open-user-client IOHIDLibUserClient

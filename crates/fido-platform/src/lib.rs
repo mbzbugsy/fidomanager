@@ -8,6 +8,8 @@
 pub mod build_identity;
 #[cfg(unix)]
 pub mod file_once;
+#[cfg(unix)]
+pub mod instance_lock;
 #[cfg(all(target_os = "macos", feature = "macos-code-signing"))]
 pub mod macos_code_signing;
 pub mod os_version;

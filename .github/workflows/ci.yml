@@ -157,6 +157,11 @@ jobs:
         env:
           FIDOMANAGER_PACKAGED_WORKER: ${{ github.workspace }}/target/macos-package/Fido Manager.app/Contents/MacOS/fido-worker
         run: cargo test -p fido-worker --test packaged_worker --locked -- --ignored
+      - name: App Sandbox local-test bundle (ADR-018; ad-hoc, separate identity, never uploaded)
+        # Same worker build and provenance checks, then the compile-time macos-app-sandbox
+        # flavor signed ad-hoc with the reviewed sandbox entitlements and Hardened Runtime. The
+        # checker also proves the inherit-only worker is killed when started outside a sandbox.
+        run: python3 scripts/package-macos-sandbox.py
       - name: Packaging leaves the reviewed tree unchanged
         run: |
           git diff --exit-code

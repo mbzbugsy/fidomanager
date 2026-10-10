@@ -983,6 +983,77 @@ if (
 ) {
   throw new Error('The worker must not enable the Security.framework binding.');
 }
+
+// ADR-018 App Sandbox flavor: compile-time only, app crate only, never default, exactly one
+// single-instance mechanism per flavor registered first, and the exact reviewed entitlements.
+if (/macos-app-sandbox/.test(defaultFeatures)) {
+  throw new Error(
+    'The macos-app-sandbox flavor must never be a default feature.',
+  );
+}
+if (
+  (appManifest.match(/^macos-app-sandbox\s*=\s*\[\s*\]\s*$/m) ?? []).length !==
+  1
+) {
+  throw new Error(
+    'The macos-app-sandbox feature must exist in the app manifest and enable nothing else.',
+  );
+}
+for (const file of listFiles('crates', (path) => path.endsWith('Cargo.toml'))) {
+  if (/macos-app-sandbox/.test(readFileSync(file, 'utf8'))) {
+    throw new Error(
+      `The macos-app-sandbox flavor belongs to the app crate only: ${file}`,
+    );
+  }
+}
+const appLib = readFileSync('src-tauri/src/lib.rs', 'utf8');
+if (
+  (appLib.match(/\.plugin\(/g) ?? []).length !== 2 ||
+  !/let builder = tauri::Builder::default\(\);\s*\/\/[^\n]*\n\s*#\[cfg\(not\(feature = "macos-app-sandbox"\)\)\]\s*let builder = builder\.plugin\(tauri_plugin_single_instance::init\(/.test(
+    appLib,
+  ) ||
+  !/\}\)\);\s*\/\/[^\n]*\n\s*#\[cfg\(feature = "macos-app-sandbox"\)\]\s*let builder = builder\.plugin\(sandbox_instance::init\(\)\);\s*let builder = builder\s*\.manage\(/.test(
+    appLib,
+  )
+) {
+  throw new Error(
+    'Exactly one single-instance mechanism per flavor must be registered before anything else (ADR-012, ADR-018).',
+  );
+}
+const REVIEWED_SANDBOX_ENTITLEMENTS = {
+  'app.entitlements': [
+    'com.apple.security.app-sandbox',
+    'com.apple.security.device.usb',
+    'com.apple.security.network.client',
+  ],
+  'worker.entitlements': [
+    'com.apple.security.app-sandbox',
+    'com.apple.security.inherit',
+  ],
+};
+assertExactArray(
+  readdirSync('packaging/macos-app-sandbox').sort(),
+  Object.keys(REVIEWED_SANDBOX_ENTITLEMENTS).sort(),
+  'packaging/macos-app-sandbox must contain only the two reviewed entitlement files.',
+);
+for (const [name, expected] of Object.entries(REVIEWED_SANDBOX_ENTITLEMENTS)) {
+  const body = readFileSync(`packaging/macos-app-sandbox/${name}`, 'utf8')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .match(/<dict>([\s\S]*)<\/dict>/)?.[1];
+  const entries = [
+    ...(body ?? '').matchAll(/<key>([^<]+)<\/key>\s*<true\/>/g),
+  ].map((match) => match[1]);
+  if (
+    !body ||
+    body.replace(/<key>[^<]+<\/key>\s*<true\/>/g, '').trim() !== '' ||
+    entries.length !== expected.length ||
+    entries.some((key, index) => key !== expected[index])
+  ) {
+    throw new Error(
+      `App Sandbox entitlements are not the reviewed set (ADR-018): ${name}`,
+    );
+  }
+}
 console.log(
   'Renderer boundary check passed; worker authenticity is backend-only.',
 );

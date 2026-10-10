@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ADR-018: App Sandbox entitlements for the main executable (fidomanager-app). Exact key set; any
+  change needs ADR-018 review. scripts/check-macos-sandbox-bundle.py rejects anything else.
+
+  app-sandbox     The App Sandbox itself (required for the Mac App Store).
+  network.client  Required by WKWebView: without it the WebKit Network process crash-loops and the
+                  renderer never loads. Also carries the existing BooGooCypher status request.
+  device.usb      Required to open FIDO HID devices (IOHIDLibUserClient). The worker inherits this
+                  process's sandbox, so it is granted here, not on the worker.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.device.usb</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>
