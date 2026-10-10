@@ -6,13 +6,18 @@ placement, native linkage and signature *shape*; it never proves notarization or
 """
 
 import argparse
+from datetime import datetime
 import json
+import os
 from pathlib import Path
 import plistlib
 import re
 import stat
 import subprocess
 import tempfile
+
+from release_metadata import (CheckError, require, hex_value, read_regular, digest,
+                              identity_record, publisher_requirement, parse_json, keys)
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE_ID = "eu.fidomanager.desktop"
@@ -46,20 +51,14 @@ FORBIDDEN_ENTITLEMENTS = (
     "com.apple.security.cs.allow-jit",
 )
 FORBIDDEN_PLIST_KEYS = ("LSEnvironment", "NSAppTransportSecurity", "SUFeedURL", "SUPublicEDKey")
-MACH_O_MAGIC = (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca")
+MACH_O_MAGIC = (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",
+                b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xce",
+                b"\xca\xfe\xba\xbf", b"\xbf\xba\xfe\xca")
 WORKER_EXIT_USAGE, WORKER_EXIT_ORDERLY, WORKER_EXIT_CONFIG = 64, 0, 78
 
 
-class CheckError(RuntimeError):
-    pass
-
-
-def require(condition, message):
-    if not condition:
-        raise CheckError(message)
-
-
 def run(command, **options):
+    options.setdefault("env", {**os.environ, "LC_ALL": "C", "LANG": "C"})
     return subprocess.run(command, capture_output=True, text=True, **options)
 
 
@@ -100,8 +99,8 @@ def entitlements(binary):
     return plistlib.loads(data) if data else {}
 
 
-def signature(binary):
-    result = run(["codesign", "-dvvv", str(binary)])
+def signature(binary, arch=None):
+    result = run(["codesign", "-dvvv", *(["--arch", arch] if arch else []), str(binary)])
     require(result.returncode == 0, f"{binary.name}: not signed ({result.stderr.strip()})")
     fields = {}
     for line in result.stderr.splitlines():
@@ -120,8 +119,14 @@ WORKER_SYSTEM_DEPENDENCIES = {
 }
 
 
+class UniquePlist(dict):
+    def __setitem__(self, key, value):
+        require(key not in self, f"duplicate Info.plist key: {key}")
+        super().__setitem__(key, value)
+
+
 def check_info(app, expected_version):
-    info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    info = plistlib.loads(read_regular(app / "Contents/Info.plist"), dict_type=UniquePlist)
     require(info.get("CFBundleIdentifier") == BUNDLE_ID, "bundle identifier mismatch")
     require(info.get("CFBundleName") == PRODUCT_NAME, "bundle name mismatch")
     require(info.get("CFBundleDisplayName") == PRODUCT_NAME, "bundle display name mismatch")
@@ -135,12 +140,19 @@ def check_info(app, expected_version):
     return info
 
 
-def check_tree(app):
+def check_tree(app, mode="adhoc", stapled=False):
+    require(not stapled or mode == "developer-id", "stapling requires Developer ID mode")
+    require(not app.is_symlink(), "symlink bundle root")
     contents = app / "Contents"
     require(not (contents / "Frameworks").exists(), "Contents/Frameworks must not exist (no bundled dylibs)")
     allowed = {"Contents/Info.plist", "Contents/PkgInfo", f"Contents/MacOS/{MAIN_EXECUTABLE}",
                f"Contents/MacOS/{WORKER}", "Contents/Resources/icon.icns", f"Contents/Resources/{NOTICES}",
                "Contents/_CodeSignature/CodeResources"}
+    if mode == "developer-id":
+        allowed.add("Contents/Resources/release-worker-identity.json")
+    if stapled:
+        allowed.add("Contents/CodeResources")
+        require((app / "Contents/CodeResources").is_file(), "stapled bundle ticket missing")
     directories = {"Contents", "Contents/MacOS", "Contents/Resources", "Contents/_CodeSignature"}
     for path in sorted(app.rglob("*")):
         relative = path.relative_to(app).as_posix()
@@ -150,6 +162,8 @@ def check_tree(app):
         if path.is_dir():
             require(relative in directories, f"unexpected directory: {relative}")
         else:
+            require(stat.S_ISREG(path.lstat().st_mode) and path.lstat().st_nlink == 1,
+                    f"not a single regular file: {relative}")
             require(relative in allowed, f"unexpected bundle entry: {relative}")
     worker = contents / "MacOS" / WORKER
     require(worker.is_file(), "bundled worker missing at Contents/MacOS/fido-worker")
@@ -224,7 +238,7 @@ def check_frontend(main, dist):
     return len(assets)
 
 
-def check_signatures(app, main, worker, mode):
+def check_signatures(app, main, worker, mode, expected_team_id=None):
     for binary in (main, worker):
         fields = signature(binary)
         granted = entitlements(binary)
@@ -238,12 +252,12 @@ def check_signatures(app, main, worker, mode):
             require("linker-signed" not in flags, f"{binary.name}: still only linker-signed")
             require("runtime" not in flags, f"{binary.name}: ad-hoc Hardened Runtime breaks library validation")
         else:
-            require(fields.get("Authority", [""])[0].startswith("Developer ID Application:"),
-                    f"{binary.name}: not signed with Developer ID")
-            require(fields.get("TeamIdentifier", ["not set"]) != ["not set"], f"{binary.name}: no Team ID")
-            require("Timestamp" in fields, f"{binary.name}: no secure timestamp")
-            if binary in (main, worker):
-                require("runtime" in flags, f"{binary.name}: Hardened Runtime missing")
+            check_developer_signature(fields, expected_team_id, binary.name)
+            require(re.search(r"flags=0x10000\(runtime\)", flags),
+                    f"{binary.name}: Hardened Runtime flags mismatch")
+            identifier = BUNDLE_ID if binary == main else WORKER_IDENTIFIER
+            check_requirement(binary, publisher_requirement(identifier, expected_team_id))
+            check_designated_requirement(binary, identifier, expected_team_id)
     require(signature(main).get("Identifier") == [BUNDLE_ID], "main executable signing identifier mismatch")
     require(signature(worker).get("Identifier") == [WORKER_IDENTIFIER], "worker signing identifier mismatch")
     if mode != "adhoc":
@@ -254,6 +268,203 @@ def check_signatures(app, main, worker, mode):
     require(re.search(r"^Info\.plist entries=\d+$", bundle, re.M), "Info.plist is not bound to the signature")
     result = run(["codesign", "--verify", "--strict", "--deep", "--verbose=2", str(app)])
     require(result.returncode == 0, f"codesign verification failed: {result.stderr.strip()}")
+
+
+RID_KEY = "FidoManagerReleaseWorkerIdentitySHA256"
+CODE_EVIDENCE_SCHEMA = "fidomanager.code-evidence/1"
+MARKER = b"FIDOMANAGER-RELEASE-ENFORCING-MARKER/"
+
+
+def check_developer_signature(fields, team, label):
+    publisher_requirement(BUNDLE_ID, team)
+    authorities = fields.get("Authority", [])
+    require(len(authorities) == 3 and
+            re.fullmatch(r"Developer ID Application: .+ \(" + re.escape(team) + r"\)", authorities[0]) and
+            authorities[1:] == ["Developer ID Certification Authority", "Apple Root CA"],
+            f"{label}: not signed with Developer ID authority chain for expected Team ID")
+    require(fields.get("TeamIdentifier") == [team], f"{label}: wrong Team ID")
+    timestamp = fields.get("Timestamp", [])
+    require(len(timestamp) == 1 and timestamp[0].strip() and timestamp[0].lower() not in ("none", "not set"),
+            f"{label}: no secure timestamp (Signed Time is not trusted)")
+    parsed_timestamp = False
+    for format in ("%b %d, %Y at %H:%M:%S", "%b %d, %Y at %I:%M:%S %p"):
+        try:
+            datetime.strptime(timestamp[0], format)
+            parsed_timestamp = True
+        except ValueError:
+            pass
+    require(parsed_timestamp, f"{label}: malformed secure timestamp")
+    require("Signed Time" not in fields and "Signature" not in fields,
+            f"{label}: conflicting signature/timestamp evidence")
+
+
+def check_requirement(binary, requirement, arch=None):
+    result = run(["codesign", "--verify", "--strict", *(["--arch", arch] if arch else []),
+                  "-R=" + requirement, str(binary)])
+    require(result.returncode == 0, f"{binary.name}: explicit signing requirement failed: {result.stderr.strip()}")
+
+
+def check_designated_requirement(binary, identifier, team):
+    """Parse the small Apple DR grammar, never substring-match a possibly weakened OR expression.
+
+    Accept codesign's printed form (existence tests rendered as `/* exists */`), reordered
+    conjunctions and Apple's documented optional Mac App Store branch; the
+    separate explicit publisher requirement always excludes Store signatures (ADR-017 E1).
+    Unknown syntax fails closed until a real-output fixture receives review.
+    """
+    result = run(["codesign", "-d", "-r-", str(binary)])
+    require(result.returncode == 0, "cannot read designated requirement")
+    lines = [line.removeprefix("designated => ") for line in (result.stdout + "\n" + result.stderr).splitlines()
+             if line.startswith("designated => ")]
+    require(len(lines) == 1, "missing or ambiguous designated requirement")
+    text = lines[0]
+    atom = (r'anchor apple generic|identifier "[a-zA-Z0-9.-]+"|'
+            r'certificate (?:1|leaf)\[field\.[0-9.]+\](?: exists| /\* exists \*/)?|'
+            r'certificate leaf\[subject\.OU\] = (?:"[A-Z0-9]{10}"|[A-Z0-9]{10})')
+    token = re.compile(r"\s*(" + atom + r"|\(|\)|and\b|or\b)\s*")
+    tokens, offset = [], 0
+    while offset < len(text):
+        found = token.match(text, offset)
+        require(found is not None, "unsupported designated requirement syntax")
+        # codesign prints existence tests as `/* exists */` comments; no other comment is accepted.
+        tokens.append(found[1].replace(" /* exists */", "").replace(" exists", ""))
+        offset = found.end()
+    require(len(tokens) <= 64, "designated requirement too complex")
+    pos = 0
+
+    def factor():
+        nonlocal pos
+        require(pos < len(tokens), "incomplete designated requirement")
+        current = tokens[pos]
+        pos += 1
+        if current == "(":
+            value = expression()
+            require(pos < len(tokens) and tokens[pos] == ")", "unbalanced designated requirement")
+            pos += 1
+            return value
+        require(current not in ("and", "or", ")"), "invalid designated requirement atom")
+        if current.startswith("certificate leaf[subject.OU]"):
+            current = current.replace('"', '')
+        return {frozenset([current])}
+
+    def conjunction():
+        nonlocal pos
+        value = factor()
+        while pos < len(tokens) and tokens[pos] == "and":
+            pos += 1
+            right = factor()
+            value = {a | b for a in value for b in right}
+            require(len(value) <= 4, "too many designated requirement alternatives")
+        return value
+
+    def expression():
+        nonlocal pos
+        value = conjunction()
+        while pos < len(tokens) and tokens[pos] == "or":
+            pos += 1
+            value |= conjunction()
+            require(len(value) <= 4, "too many designated requirement alternatives")
+        return value
+
+    actual = expression()
+    require(pos == len(tokens), "trailing designated requirement syntax")
+    common = {"anchor apple generic", f'identifier "{identifier}"'}
+    developer = frozenset(common | {"certificate 1[field.1.2.840.113635.100.6.2.6]",
+                                    "certificate leaf[field.1.2.840.113635.100.6.1.13]",
+                                    f"certificate leaf[subject.OU] = {team}"})
+    store = frozenset(common | {"certificate leaf[field.1.2.840.113635.100.6.1.9]"})
+    require(actual in ({developer}, {developer, store}), "designated requirement identity/clauses mismatch")
+    return text
+
+
+def check_release_identity(app, main, worker, info, version, commit, team, arch):
+    rid = info.get(RID_KEY)
+    require(hex_value(rid), "missing or malformed release identity Info.plist digest")
+    data = read_regular(app / "Contents/Resources/release-worker-identity.json", 4096)
+    require(digest(data) == rid, "identity record digest differs from Info.plist")
+    record = identity_record(data, version, commit, team)
+    identity = record["worker"]
+    require(identity["file_sha256"] == digest(read_regular(worker, 256 * 1024 * 1024)),
+            "worker file SHA-256 mismatch")
+    require(identity["slices"][0]["arch"] == arch, "worker slice architecture mismatch")
+    for item in identity["slices"]:
+        fields = signature(worker, item["arch"])
+        require(fields.get("CDHash") == [item["cdhash"]] and
+                fields.get("CandidateCDHashFull sha256") == [item["cdhash_sha256"]],
+                "worker CDHash mismatch")
+        check_requirement(worker, publisher_requirement(WORKER_IDENTIFIER, team) +
+                          f' and cdhash H"{item["cdhash"]}"', item["arch"])
+    expected = f"{MARKER.decode()}1;team={team};version={version};commit={commit};end".encode()
+    binary = main.read_bytes()
+    starts = [match.start() for match in re.finditer(re.escape(MARKER), binary)]
+    require(len(starts) == 1 and binary[starts[0]:starts[0] + len(expected)] == expected,
+            "missing, malformed or conflicting release-enforcement marker")
+    require(identity["build_id"].encode() in worker.read_bytes(), "worker compiled build identity missing")
+    return {"record_sha256": rid, "worker_file_sha256": identity["file_sha256"],
+            "cdhash": {item["arch"]: item["cdhash"] for item in identity["slices"]}}
+
+
+def check_staple(path, team):
+    result = run(["xcrun", "stapler", "validate", str(path)])
+    require(result.returncode == 0 and "The validate action worked!" in result.stdout,
+            f"{path.name}: stapler validation failed")
+    options = ["--type", "execute"] if path.suffix == ".app" else ["--type", "open", "--context", "context:primary-signature"]
+    result = run(["spctl", "--assess", *options, "-vvv", str(path)])
+    text = result.stdout + "\n" + result.stderr
+    require(result.returncode == 0 and re.search(r"^.*: accepted$", text, re.M) and
+            re.search(r"^source=Notarized Developer ID$", text, re.M), f"{path.name}: Gatekeeper assessment failed")
+    if path.suffix == ".app":
+        require(re.search(r"^origin=Developer ID Application: .+ \(" + re.escape(team) + r"\)$", text, re.M),
+                "Gatekeeper origin mismatch")
+
+
+def app_tree(app):
+    """Exact file bytes, permission bits and directory set of an already tree-checked app.
+
+    The same shape is produced from the shipped app ZIP by release_metadata.zip_app_tree, so
+    provenance can require that the ZIP contains exactly the app verified here.
+    """
+    files, directories = {}, []
+    for path in sorted(app.rglob("*")):
+        relative = path.relative_to(app).as_posix()
+        mode = path.lstat().st_mode
+        if stat.S_ISDIR(mode):
+            directories.append(relative)
+        else:
+            require(stat.S_ISREG(mode), f"not a regular file: {relative}")
+            files[relative] = {"sha256": digest(read_regular(path, 256 * 1024 * 1024)), "mode": stat.S_IMODE(mode) & 0o777}
+    return {"files": files, "directories": directories}
+
+
+def check_dmg(dmg, app, team, stapled):
+    read_regular(dmg, 512 * 1024 * 1024)
+    fields = signature(dmg)
+    check_developer_signature(fields, team, dmg.name)
+    require(fields.get("Identifier") == [BUNDLE_ID + ".dmg"], "DMG signing identifier mismatch")
+    require(not entitlements(dmg), "DMG has entitlements")
+    check_requirement(dmg, publisher_requirement(BUNDLE_ID + ".dmg", team))
+    check_designated_requirement(dmg, BUNDLE_ID + ".dmg", team)
+    image = plistlib.loads(output(["hdiutil", "imageinfo", "-plist", str(dmg)]).encode())
+    require(image.get("Format") == "UDZO", "DMG must be UDZO")
+    output(["hdiutil", "verify", str(dmg)])
+    if stapled:
+        check_staple(dmg, team)
+    with tempfile.TemporaryDirectory(prefix="fidomanager-dmg-check-") as directory:
+        mount = Path(directory).resolve() / "volume"
+        mount.mkdir()
+        attached = False
+        try:
+            output(["hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", str(mount), str(dmg)])
+            attached = True
+            require({p.name for p in mount.iterdir()} == {"Fido Manager.app", "Applications"}, "unexpected DMG tree")
+            applications = mount / "Applications"
+            require(applications.is_symlink() and os.readlink(applications) == "/Applications", "DMG Applications link mismatch")
+            bundled = mount / "Fido Manager.app"
+            check_tree(bundled, "developer-id", stapled)
+            require(app_tree(bundled) == app_tree(app), "DMG app differs from verified app")
+        finally:
+            if attached:
+                output(["hdiutil", "detach", str(mount)])
 
 
 def check_worker_runtime(worker):
@@ -311,18 +522,84 @@ def check_worker_openssl_independence(worker):
         require(not marker.exists(), "worker loaded an external OpenSSL module")
 
 
-def check(app, *, signature_mode, expected_version, frontend_dist=None, execute_worker=True):
+def check(app, *, signature_mode, expected_version, frontend_dist=None, execute_worker=True,
+          expected_team_id=None, expected_commit=None, stapled=False, dmg=None, pre_staple_cdhashes=None):
+    if dmg is None:
+        return _check(app, signature_mode=signature_mode, expected_version=expected_version,
+                      frontend_dist=frontend_dist, execute_worker=execute_worker, expected_team_id=expected_team_id,
+                      expected_commit=expected_commit, stapled=stapled, dmg=None, pre_staple_cdhashes=pre_staple_cdhashes)
+    # Check a private copy so the recorded digest names exactly the bytes every tool examined.
+    data = read_regular(dmg, 512 * 1024 * 1024)
+    with tempfile.TemporaryDirectory(prefix="fidomanager-dmg-copy-") as private:
+        copy = Path(private).resolve() / Path(dmg).name
+        descriptor = os.open(copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "wb") as target:
+            target.write(data)
+        summary = _check(app, signature_mode=signature_mode, expected_version=expected_version,
+                         frontend_dist=frontend_dist, execute_worker=execute_worker, expected_team_id=expected_team_id,
+                         expected_commit=expected_commit, stapled=stapled, dmg=copy, pre_staple_cdhashes=pre_staple_cdhashes)
+        require(read_regular(copy, 512 * 1024 * 1024) == data, "DMG copy changed during verification")
+    if summary["code_evidence"] is not None:
+        summary["code_evidence"]["dmg_sha256"] = digest(data)
+    return summary
+
+
+def _check(app, *, signature_mode, expected_version, frontend_dist, execute_worker,
+           expected_team_id, expected_commit, stapled, dmg, pre_staple_cdhashes):
+    require(signature_mode in ("adhoc", "developer-id"), "invalid signature mode")
+    if signature_mode == "developer-id":
+        publisher_requirement(BUNDLE_ID, expected_team_id)
+        require(hex_value(expected_commit, 40), "explicit expected source commit required")
+    else:
+        require(not stapled and dmg is None, "release stapling/DMG checks require Developer ID mode")
+    require(not app.is_symlink(), "symlink bundle root")
     app = app.resolve(strict=True)
     require(app.suffix == ".app" and app.is_dir(), "not an application bundle")
+    main, worker = check_tree(app, signature_mode, stapled)
     info = check_info(app, expected_version)
-    main, worker = check_tree(app)
+    if signature_mode == "adhoc":
+        require(RID_KEY not in info, "release identity digest forbidden in ad-hoc bundle")
     arch, minimum = check_linkage(main, worker, info)
     check_symbols(main, worker)
     assets = check_frontend(main, frontend_dist) if frontend_dist else 0
-    check_signatures(app, main, worker, signature_mode)
+    check_signatures(app, main, worker, signature_mode, expected_team_id)
+    release = tree = None
+    if signature_mode == "developer-id":
+        release = check_release_identity(app, main, worker, info, expected_version,
+                                         expected_commit, expected_team_id, arch)
+        if stapled:
+            keys(pre_staple_cdhashes, "fidomanager-app fido-worker" + (" dmg" if dmg is not None else ""),
+                 "pre-staple cdhash evidence")
+            for binary in (main, worker):
+                keys(pre_staple_cdhashes[binary.name], arch, "pre-staple architecture")
+                expected = pre_staple_cdhashes[binary.name][arch]
+                require(hex_value(expected, 40) and signature(binary, arch).get("CDHash") == [expected],
+                        f"{binary.name}: cdhash changed after stapling")
+            if dmg is not None:
+                expected = pre_staple_cdhashes["dmg"]
+                require(hex_value(expected, 40) and signature(dmg).get("CDHash") == [expected],
+                        "DMG cdhash changed after stapling")
+            check_staple(app, expected_team_id)
+        if dmg is not None:
+            check_dmg(dmg, app, expected_team_id, stapled)
+        # Recorded before any worker execution; provenance compares it with the shipped app ZIP.
+        tree = app_tree(app)
     if execute_worker:
         check_worker_runtime(worker)
+    code_evidence = None
+    if signature_mode == "developer-id":
+        code_evidence = {
+            "schema": CODE_EVIDENCE_SCHEMA, "stapled": stapled,
+            "version": expected_version, "source_commit": expected_commit, "app_tree": tree,
+            "dmg_sha256": None,
+            "team_id": expected_team_id, "release_identity": release,
+            "file_sha256": {binary.name: digest(read_regular(binary, 256 * 1024 * 1024)) for binary in (main, worker)},
+            "system_dependencies": {binary.name: dependencies(binary) for binary in (main, worker)},
+            "cdhash": {binary.name: {arch: signature(binary, arch)["CDHash"][0]} for binary in (main, worker)},
+            "dmg_cdhash": signature(dmg)["CDHash"][0] if dmg is not None else None,
+        }
     return {
+        "code_evidence": code_evidence,
         "bundle_identifier": BUNDLE_ID, "version": expected_version, "architecture": arch,
         "minimum_system_version": info["LSMinimumSystemVersion"], "newest_code_minos": minimum,
         "main_executable": f"Contents/MacOS/{MAIN_EXECUTABLE}", "worker": f"Contents/MacOS/{WORKER}",
@@ -330,6 +607,7 @@ def check(app, *, signature_mode, expected_version, frontend_dist=None, execute_
         "worker_dynamic_dependencies": sorted(dependencies(worker)),
         "third_party_notices": f"Contents/Resources/{NOTICES}", "embedded_frontend_assets": assets,
         "signature": signature_mode, "worker_executed": execute_worker,
+        "release_identity": release, "stapled": stapled,
     }
 
 
@@ -337,14 +615,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app", type=Path)
     parser.add_argument("--signature", choices=("adhoc", "developer-id"), default="adhoc")
+    parser.add_argument("--expected-team-id")
+    parser.add_argument("--expected-commit", help="peeled source commit from trusted release context")
+    parser.add_argument("--stapled", action="store_true")
+    parser.add_argument("--dmg", type=Path)
+    parser.add_argument("--pre-staple-cdhashes", type=Path, help="trusted pre-staple observations; required with --stapled")
     parser.add_argument("--frontend-dist", type=Path)
     parser.add_argument("--no-execute-worker", action="store_true")
     arguments = parser.parse_args()
     version = json.loads((ROOT / "src-tauri/tauri.conf.json").read_text())["version"]
     try:
         summary = check(arguments.app, signature_mode=arguments.signature, expected_version=version,
-                        frontend_dist=arguments.frontend_dist, execute_worker=not arguments.no_execute_worker)
-    except CheckError as error:
+                        frontend_dist=arguments.frontend_dist, execute_worker=not arguments.no_execute_worker,
+                        expected_team_id=arguments.expected_team_id, expected_commit=arguments.expected_commit,
+                        stapled=arguments.stapled, dmg=arguments.dmg,
+                        pre_staple_cdhashes=parse_json(read_regular(arguments.pre_staple_cdhashes)) if arguments.pre_staple_cdhashes else None)
+    except (CheckError, OSError, ValueError, plistlib.InvalidFileException) as error:
         raise SystemExit(f"FAIL: {error}")
     print("PASS: macOS bundle structure, linkage and signature shape")
     print(json.dumps(summary, indent=2))
