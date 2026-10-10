@@ -1,0 +1,4 @@
+2026-10-10 13:31:17.849 E  fidomanager-app[69923:16a26e0] (WebKit) WebContent[0] Application does not have permission to communicate with network resources. rc=1 : errno=34
+2026-10-10 13:31:17.893 E  fidomanager-app[69923:16a26e0] (WebKit) WebContent[69947] Application does not have permission to communicate with network resources. rc=1 : errno=34
+2026-10-10 13:31:17.907 E  fidomanager-app[69923:16a26e0] [com.apple.WebKit:Process] 0x12012c3e0 - NetworkProcessProxy::didClose (Network Process 0 crash)
+2026-10-10 13:31:17.907 E  fidomanager-app[69923:16a26e0] (WebKit) WebContent[69949] Application does not have permission to communicate with network resources. rc=1 : errno=34

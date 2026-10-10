@@ -1047,6 +1047,90 @@ mod tests {
     }
 
     #[test]
+    fn steady_polling_with_devices_present_never_replaces_the_worker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Regression (MAS.0 §5.2): the renderer polls about once a second. With healthy
+        // authenticators connected, ten minutes of polling keep the first worker.
+        let (mut supervisor, world, clock) = supervisor(RestartPolicy::default())?;
+        for _ in 0..600 {
+            let snapshot = supervisor.refresh()?;
+            assert_eq!(snapshot.devices.len(), 1);
+            clock.advance(1_000);
+        }
+        let status = supervisor.status();
+        assert_eq!(status.state, SupervisorState::Running);
+        assert_eq!(status.worker_generation, Some(WorkerGeneration(1)));
+        assert_eq!(status.launches, 1);
+        assert_eq!(status.consecutive_failures, 0);
+        assert_eq!(world.borrow().launch_attempts, 1);
+        assert!(
+            !world
+                .borrow()
+                .log
+                .iter()
+                .any(|entry| entry.starts_with("contain")),
+            "a healthy idle worker is never contained"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn post_authentication_retirement_is_not_a_failure_and_never_trips_the_breaker()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Regression (MAS.0 §5.2): every completed or cancelled authentication retires its worker
+        // on purpose. Retirements arriving faster than the crash-loop threshold allows must
+        // never be counted as failures, and the replacement must still wait out the settle
+        // interval after the old worker is proven stopped.
+        let (mut supervisor, world, clock) = supervisor(policy(3))?;
+        supervisor.refresh()?;
+
+        for round in 1..=10u64 {
+            assert_eq!(
+                supervisor.retire_authentication(),
+                ExecutionQuiescence::Quiescent
+            );
+            let status = supervisor.status();
+            assert_eq!(
+                status.state,
+                SupervisorState::Restarting {
+                    retry_after_ms: 1_000
+                },
+                "round {round}"
+            );
+            assert_eq!(status.consecutive_failures, 0, "round {round}");
+
+            // Inside the settle interval nothing is launched.
+            clock.advance(999);
+            assert_eq!(
+                supervisor.refresh().err(),
+                Some(SupervisorError::RestartBackoff { retry_after_ms: 1 })
+            );
+            assert_eq!(world.borrow().launch_attempts, round);
+
+            clock.advance(1);
+            supervisor.refresh()?;
+            assert_eq!(generation_of(&supervisor), Some(round + 1));
+            assert_eq!(supervisor.status().state, SupervisorState::Running);
+
+            let log = world.borrow().log.clone();
+            let launch = log
+                .iter()
+                .position(|entry| *entry == format!("launch g{}", round + 1))
+                .ok_or("replacement was never launched")?;
+            assert!(
+                log[..launch].contains(&format!("contain g{round}")),
+                "{log:?}"
+            );
+            clock.advance(500);
+        }
+        let status = supervisor.status();
+        assert_eq!(status.state, SupervisorState::Running);
+        assert_eq!(status.consecutive_failures, 0);
+        assert_eq!(status.launches, 11);
+        Ok(())
+    }
+
+    #[test]
     fn invalid_restart_policy_is_rejected() {
         let mut broken = policy(3);
         broken.initial_backoff_ms = broken.max_backoff_ms + 1;

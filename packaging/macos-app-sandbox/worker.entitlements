@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ADR-018: App Sandbox entitlements for the embedded helper (fido-worker). Apple requires a
+  sandboxed app's helper executables to carry exactly these two keys. The worker runs in the
+  sandbox inherited from fidomanager-app; it cannot be launched outside a sandboxed parent and
+  cannot hold a sandbox of its own. Exact key set; any change needs ADR-018 review.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.inherit</key>
+	<true/>
+</dict>
+</plist>

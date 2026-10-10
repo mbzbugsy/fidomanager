@@ -19,3 +19,11 @@ The application-level singleton is a coordination mechanism, not a security boun
 - All frontend windows resolve to one authority and canonical worker registry.
 - M1 must surface external contention rather than assuming exclusive physical-device ownership.
 - If Windows uses an elevated broker, ADR-013 must define the stronger broker-side singleton/authority model.
+
+## Amendment (ADR-018)
+
+Inside the macOS App Sandbox the plugin's `/tmp` socket is denied, so the plugin silently allows
+a second instance. The `macos-app-sandbox` build flavor therefore registers, in the same first
+position, a container-local exclusive lock instead of the plugin. The contract above is
+unchanged: one authority per user session (per container), and second-launch input is never
+processed.

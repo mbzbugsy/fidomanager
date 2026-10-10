@@ -1,0 +1,117 @@
+{
+  "app": "<worktree>/target/macos-sandbox-test/Fido Manager Sandbox Test.app",
+  "identifier": "eu.fidomanager.desktop.sandboxtest",
+  "macos": "26.5.2",
+  "fido_hid_devices_present": 2,
+  "checks": [
+    {
+      "check": "exactly one authority process launched",
+      "result": "PASS"
+    },
+    {
+      "check": "renderer IPC (list_authenticators) spawned exactly one worker",
+      "result": "PASS"
+    },
+    {
+      "check": "worker runs the fixed production --authentication mode",
+      "result": "PASS"
+    },
+    {
+      "check": "app is sandboxed by the kernel (sandbox_check)",
+      "result": "PASS"
+    },
+    {
+      "check": "app runs with valid code signature and Hardened Runtime (cs_flags 0x22011311)",
+      "result": "PASS"
+    },
+    {
+      "check": "worker is sandboxed by the kernel (sandbox_check)",
+      "result": "PASS"
+    },
+    {
+      "check": "worker runs with valid code signature and Hardened Runtime (cs_flags 0x22011311)",
+      "result": "PASS"
+    },
+    {
+      "check": "after the observation window one worker serves the app (handshake and health check passed)",
+      "result": "PASS"
+    },
+    {
+      "check": "application data directory is inside the test container, mode 0700",
+      "result": "PASS"
+    },
+    {
+      "check": "recovery storage initialized in the container, mode 0700",
+      "result": "PASS"
+    },
+    {
+      "check": "single-instance lock is in the container, mode 0600",
+      "result": "PASS"
+    },
+    {
+      "check": "second launch (open -n) exited; one authority remains",
+      "result": "PASS"
+    },
+    {
+      "check": "second launch spawned no worker (at most one, owned by the single authority)",
+      "result": "PASS"
+    },
+    {
+      "check": "a worker is running before the kill test",
+      "result": "PASS"
+    },
+    {
+      "check": "SIGKILLed worker was replaced by the supervisor",
+      "result": "PASS"
+    },
+    {
+      "check": "replacement worker is sandboxed",
+      "result": "PASS"
+    },
+    {
+      "check": "after the app ended, the worker exited on its own",
+      "result": "PASS"
+    },
+    {
+      "check": "no unreviewed Sandbox denial for fidomanager-app or fido-worker",
+      "result": "PASS"
+    },
+    {
+      "check": "WKWebView: no network-permission failure or WebKit process crash",
+      "result": "PASS"
+    }
+  ],
+  "started": "2026-10-10 13:56:26",
+  "processes": [
+    {
+      "pid": 42987,
+      "sandboxed": 1,
+      "cs_status_ok": 1,
+      "cs_flags": 570495761,
+      "path": "<worktree>/target/macos-sandbox-test/Fido Manager Sandbox Test.app/Contents/MacOS/fidomanager-app"
+    },
+    {
+      "pid": 42997,
+      "sandboxed": 1,
+      "cs_status_ok": 1,
+      "cs_flags": 570495761,
+      "path": "<worktree>/target/macos-sandbox-test/Fido Manager Sandbox Test.app/Contents/MacOS/fido-worker"
+    }
+  ],
+  "worker_pids_at_end_of_observation": [
+    42997
+  ],
+  "container_data": "~/Library/Containers/eu.fidomanager.desktop.sandboxtest/Data/Library/Application Support/eu.fidomanager.desktop.sandboxtest",
+  "recovery_entries": [],
+  "replacement_worker": {
+    "pid": 43048,
+    "sandboxed": 1,
+    "cs_status_ok": 1,
+    "cs_flags": 570495761,
+    "path": "<worktree>/target/macos-sandbox-test/Fido Manager Sandbox Test.app/Contents/MacOS/fido-worker"
+  },
+  "app_stderr": "[authentication] prepared grant=CredMan\n[authentication] prompt main=true secure_control=true window_modal=true default_cancel=true\n[authentication] prompt_teardown main=true detached=true\n[authentication] status=Cancelled grant=Some(CredMan) attached_puat_cleared=false worker_quiescent=true prompt_torn_down=true\n",
+  "sandbox_denials": {},
+  "unexpected_sandbox_denials": {},
+  "webkit_failures": []
+}

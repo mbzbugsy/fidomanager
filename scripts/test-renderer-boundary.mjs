@@ -20,6 +20,7 @@ try {
   });
   cpSync('src', join(fixture, 'src'), { recursive: true });
   cpSync('crates', join(fixture, 'crates'), { recursive: true });
+  cpSync('packaging', join(fixture, 'packaging'), { recursive: true });
   const manifestPath = join(fixture, 'src-tauri/Cargo.toml');
   const manifest = readFileSync(manifestPath, 'utf8');
   let checks = 0;
@@ -740,6 +741,102 @@ try {
     /worker must not enable the Security.framework binding/,
     'the worker linking the Security.framework binding',
   );
+  // ADR-018 App Sandbox flavor.
+  mutate(
+    'src-tauri/Cargo.toml',
+    (text) =>
+      text.replace(
+        'default = ["native-pin"]',
+        'default = ["native-pin", "macos-app-sandbox"]',
+      ),
+    /macos-app-sandbox flavor must never be a default feature/,
+    'sandbox flavor as a default feature',
+  );
+  mutate(
+    'src-tauri/Cargo.toml',
+    (text) =>
+      text.replace(
+        'macos-app-sandbox = []',
+        'macos-app-sandbox = ["fido-service/macos-release-signing"]',
+      ),
+    /must exist in the app manifest and enable nothing else/,
+    'sandbox flavor enabling another feature',
+  );
+  mutate(
+    'crates/fido-service/Cargo.toml',
+    (text) =>
+      text.replace('default = []', 'default = []\nmacos-app-sandbox = []'),
+    /belongs to the app crate only/,
+    'sandbox flavor in a service crate',
+  );
+  mutate(
+    'src-tauri/src/lib.rs',
+    (text) =>
+      text.replace(
+        '#[cfg(not(feature = "macos-app-sandbox"))]\n    let builder = builder.plugin(',
+        'let builder = builder.plugin(',
+      ),
+    /Exactly one single-instance mechanism per flavor/,
+    'both single-instance mechanisms in the sandbox flavor',
+  );
+  mutate(
+    'src-tauri/src/lib.rs',
+    (text) =>
+      text.replace(
+        '    let builder = builder\n        .manage(',
+        '    let builder = builder\n        .plugin(sandbox_instance::init())\n        .manage(',
+      ),
+    /Exactly one single-instance mechanism per flavor/,
+    'an additional plugin registration',
+  );
+  for (const [path, edit, label] of [
+    [
+      'packaging/macos-app-sandbox/app.entitlements',
+      (text) =>
+        text.replace(
+          '</dict>',
+          '\t<key>com.apple.security.files.user-selected.read-write</key>\n\t<true/>\n</dict>',
+        ),
+      'an extra app entitlement',
+    ],
+    [
+      'packaging/macos-app-sandbox/app.entitlements',
+      (text) =>
+        text.replace(
+          '<key>com.apple.security.device.usb</key>\n\t<true/>',
+          '<key>com.apple.security.device.usb</key>\n\t<false/>',
+        ),
+      'a non-boolean-true app entitlement',
+    ],
+    [
+      'packaging/macos-app-sandbox/worker.entitlements',
+      (text) =>
+        text.replace(
+          '</dict>',
+          '\t<key>com.apple.security.device.usb</key>\n\t<true/>\n</dict>',
+        ),
+      'a worker entitlement beyond inheritance',
+    ],
+    [
+      'packaging/macos-app-sandbox/worker.entitlements',
+      (text) =>
+        text.replace('<key>com.apple.security.inherit</key>\n\t<true/>', ''),
+      'a worker without sandbox inheritance',
+    ],
+  ]) {
+    mutate(path, edit, /not the reviewed set \(ADR-018\)/, label);
+  }
+  {
+    const extra = join(
+      fixture,
+      'packaging/macos-app-sandbox/extra.entitlements',
+    );
+    writeFileSync(extra, '<plist><dict></dict></plist>');
+    const result = check();
+    rmSync(extra);
+    assert.notEqual(result.status, 0, 'An extra entitlement file must fail.');
+    assert.match(result.stderr, /only the two reviewed entitlement files/);
+  }
   assert.equal(check().status, 0, 'All restored M4 fixtures must pass.');
   console.log(
     `Renderer boundary regression checks passed (${checks} checker executions; 8 denied crates, command/permission allowlists, service separation and M4 controls).`,

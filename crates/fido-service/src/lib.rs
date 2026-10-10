@@ -12,6 +12,13 @@ pub mod mutation;
 pub mod presentation;
 pub mod recovery;
 
+/// ADR-012 single-instance authority lock used by the App Sandbox flavor (ADR-018), where the
+/// single-instance plugin's `/tmp` socket is denied by the sandbox.
+#[cfg(unix)]
+pub mod instance {
+    pub use fido_platform::instance_lock::{InstanceLock, InstanceLockError};
+}
+
 mod discovery;
 mod process_worker;
 // ADR-017 release-identity code is exercised by tests everywhere but only *used* by the macOS

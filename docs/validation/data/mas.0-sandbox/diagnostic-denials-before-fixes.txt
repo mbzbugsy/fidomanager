@@ -1,0 +1,38 @@
+2026-10-10 13:31:17.881 1 duplicate report for Sandbox: fidomanager-app(69923) deny(1) file-read-data /Library/Preferences/com.apple.networkd.plist
+2026-10-10 13:32:56.255 8 duplicate reports for Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:32:57.637 1 duplicate report for Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:05.626 6 duplicate reports for Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:10.134 4 duplicate reports for Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:19.116 8 duplicate reports for Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:20.083 Sandbox: fidomanager-app(81487) deny(1) file-write-create /private/tmp/eu_fidomanager_desktop_si.sock
+2026-10-10 13:33:20.268 Sandbox: fidomanager-app(81487) deny(1) mach-lookup com.apple.Safari.SafeBrowsing.Service
+2026-10-10 13:33:20.343 Sandbox: fido-worker(81494) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:20.879 Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:21.359 Sandbox: fido-worker(81494) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:21.885 Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:22.366 Sandbox: fido-worker(81494) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:22.893 Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:23.447 Sandbox: fido-worker(81494) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:23.998 Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:24.548 Sandbox: fido-worker(81494) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:25.101 Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:25.649 Sandbox: fido-worker(81494) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:26.206 Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:26.713 Sandbox: fido-worker(81494) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:27.310 Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:27.816 Sandbox: fido-worker(81494) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:28.415 Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:28.916 Sandbox: fido-worker(81494) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:29.521 Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:30.013 Sandbox: fido-worker(81494) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:30.626 Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:31.115 Sandbox: fido-worker(81494) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:31.710 Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:32.215 Sandbox: fido-worker(81494) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:32.814 Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:33.315 Sandbox: fido-worker(81494) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:33.918 Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:34.472 Sandbox: fido-worker(81494) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:34.924 Sandbox: fido-worker(81415) deny(1) iokit-open-user-client IOHIDLibUserClient
+2026-10-10 13:33:45.270 Sandbox: fidomanager-app(81549) deny(1) file-write-create /private/tmp/eu_fidomanager_desktop_si.sock
+2026-10-10 13:33:45.442 Sandbox: fidomanager-app(81549) deny(1) mach-lookup com.apple.Safari.SafeBrowsing.Service
