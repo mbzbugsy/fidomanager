@@ -100,6 +100,39 @@ fn hung_worker_is_recovered_without_restarting_the_app() -> TestResult {
 }
 
 #[test]
+fn idle_polling_keeps_one_worker_process() -> TestResult {
+    // Regression (MAS.0 §5.2): repeated read-only discovery against a healthy worker process
+    // never kills, quarantines or replaces it.
+    let launcher = SequencedLauncher::new(vec![launcher(&["--script=ok", "--tag=sup-steady"])?]);
+    let clock = ManualClock::default();
+    let mut supervisor = DiscoverySupervisor::with_clock(
+        launcher,
+        policy(500),
+        RestartPolicy::default(),
+        clock.clone(),
+    )?;
+
+    supervisor.refresh()?;
+    let first = common::fixture_processes("sup-steady");
+    assert_eq!(first.len(), 1);
+    for _ in 0..50 {
+        clock.advance(1_000);
+        let snapshot = supervisor.refresh()?;
+        assert_eq!(snapshot.devices[0].read_status, DeviceReadStatus::Ready);
+    }
+    let status = supervisor.status();
+    assert_eq!(status.state, SupervisorState::Running);
+    assert_eq!(status.worker_generation, Some(WorkerGeneration(1)));
+    assert_eq!(status.launches, 1);
+    assert_eq!(status.consecutive_failures, 0);
+    assert_eq!(common::fixture_processes("sup-steady"), first);
+
+    assert_eq!(supervisor.shutdown(), ExecutionQuiescence::Quiescent);
+    assert_eq!(count_processes("sup-steady"), 0);
+    Ok(())
+}
+
+#[test]
 fn crashing_worker_is_replaced_and_old_handles_stay_dead() -> TestResult {
     let launcher = SequencedLauncher::new(vec![
         launcher(&["--script=ok,crash", "--tag=sup-crash"])?,

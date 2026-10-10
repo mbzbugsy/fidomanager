@@ -146,8 +146,8 @@ def main():
             worker_pid, _, worker_command = worker[0]
             require(worker_command.endswith("fido-worker --authentication"),
                     "worker runs the fixed production --authentication mode", report)
-            # Probe the first worker right away: with authenticators present the supervisor may
-            # replace it during the observation window (pre-existing behaviour, also unsandboxed).
+            # Probe the first worker right away: an operator inspecting a key during the run retires
+            # and replaces it by design (MAS.0 §5.2), so later checks cannot rely on this pid.
             time.sleep(2)
             states = {entry["pid"]: entry for entry in probe(helper, app_pid, worker_pid)}
             report["processes"] = list(states.values())
@@ -177,8 +177,8 @@ def main():
             time.sleep(8)
             apps, workers = processes(app)
             require(apps == [app_pid], "second launch (open -n) exited; one authority remains", report)
-            # With authenticators present the supervisor may legitimately replace its own worker
-            # (observed identically without the sandbox), so assert ownership, not a fixed pid.
+            # A credential inspection retires its worker by design (MAS.0 §5.2), and an operator may
+            # inspect during the run, so assert ownership, not a fixed pid.
             require(len(workers) <= 1 and all(w[1] == app_pid for w in workers),
                     "second launch spawned no worker (at most one, owned by the single authority)", report)
 

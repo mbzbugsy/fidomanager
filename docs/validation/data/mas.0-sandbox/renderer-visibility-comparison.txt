@@ -1,0 +1,215 @@
+MAS.0 §5.4: renderer visibility, device polling and native-menu freshness
+=======================================================================
+
+Variants: the same instrumented sandbox-flavor build (temporary, not committed), copied twice.
+  sbx   = entitlements app-sandbox, network.client, device.usb (worker: app-sandbox, inherit)
+  nosbx = re-signed ad-hoc with Hardened Runtime and NO entitlements; same identifiers
+  App binary SHA-256 after removing signatures: identical for both variants.
+Both FIDO2 keys connected (1050:0406, 1ea8:f829). Hardware use: read-only discovery only.
+Window actions: temporary in-app control (Accessibility not granted). 'probe-menu' runs the same
+read-only refresh as a menu selection and checks every menu handle still resolves (never republishes).
+polls = renderer list_authenticators calls; webkit = WebProcessProxy::didChangeThrottleState in the
+phase; state = NSRunningApplication active/hidden + CGWindowList on-screen flag for the app's windows
+(an experimental window-coverage figure was unreliable and has been removed).
+
+== run-sbx (app pid 44792)
+visible                       20s polls= 20 max_gap=1.0s menu_republish=0 webkit=['Foreground']
+                              state active=true hidden=false windows=[onscreen:1000x700,offscreen:500x500]
+minimized                     15s polls= 15 max_gap=1.1s menu_republish=0 webkit=['Background', 'Foreground', 'Background']
+                              state active=false hidden=false windows=[offscreen:1000x700,offscreen:500x500]
+                              state active=true hidden=false windows=[offscreen:1000x700,offscreen:500x500]
+                              state active=true hidden=false windows=[onscreen:1000x700,offscreen:500x500]
+minimized-after-replacement   10s polls=  9 max_gap=1.3s menu_republish=1 webkit=-
+                              state active=false hidden=false windows=[offscreen:1000x700,offscreen:500x500]
+                              state active=true hidden=false windows=[offscreen:1000x700,offscreen:500x500]
+restored                      10s polls= 10 max_gap=1.1s menu_republish=0 webkit=['Foreground', 'Background', 'Foreground']
+                              state active=false hidden=false windows=[offscreen:1000x700,offscreen:500x500]
+                              state active=true hidden=false windows=[onscreen:1000x700,offscreen:500x500]
+hidden                        15s polls= 14 max_gap=1.1s menu_republish=0 webkit=['Background']
+                              state active=false hidden=true windows=[offscreen:1000x700,offscreen:500x500]
+hidden-after-replacement      10s polls=  9 max_gap=1.3s menu_republish=1 webkit=-
+                              state active=false hidden=true windows=[offscreen:1000x700,offscreen:500x500]
+shown                         10s polls= 10 max_gap=1.0s menu_republish=0 webkit=['Foreground']
+                              state active=false hidden=false windows=[onscreen:1000x700,offscreen:500x500]
+inactive                      20s polls= 20 max_gap=1.0s menu_republish=0 webkit=-
+                              state active=false hidden=false windows=[onscreen:1000x700,offscreen:500x500]
+reactivated                    8s polls=  8 max_gap=1.0s menu_republish=0 webkit=-
+                              state active=true hidden=false windows=[onscreen:1000x700,offscreen:500x500]
+probes / controls / starts:
+  +  22.1s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  38.3s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  38.9s SIGKILL worker [44814] (stand-in for any replacement: post-inspection retirement, crash)
+  +  48.9s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  50.5s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  62.5s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  78.7s SIGKILL worker [44890]
+  +  88.8s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  90.3s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  + 102.5s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  + 123.1s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+
+== run-nosbx (app pid 45045)
+visible                       20s polls= 20 max_gap=1.0s menu_republish=0 webkit=['Foreground']
+                              state active=true hidden=false windows=[offscreen:500x500,onscreen:1000x700]
+minimized                     15s polls= 14 max_gap=1.1s menu_republish=0 webkit=['Background']
+                              state active=true hidden=false windows=[offscreen:500x500,offscreen:1000x700]
+minimized-after-replacement   10s polls=  9 max_gap=1.3s menu_republish=1 webkit=-
+                              state active=true hidden=false windows=[offscreen:500x500,offscreen:1000x700]
+restored                      10s polls= 10 max_gap=1.1s menu_republish=0 webkit=['Foreground', 'Background']
+                              state active=false hidden=false windows=[offscreen:500x500,offscreen:1000x700]
+                              state active=true hidden=false windows=[offscreen:500x500,onscreen:1000x700]
+hidden                        15s polls= 13 max_gap=1.1s menu_republish=0 webkit=-
+                              state active=false hidden=true windows=[offscreen:500x500,offscreen:1000x700]
+hidden-after-replacement      10s polls=  9 max_gap=1.3s menu_republish=1 webkit=-
+                              state active=false hidden=true windows=[offscreen:500x500,offscreen:1000x700]
+shown                         10s polls=  9 max_gap=1.1s menu_republish=0 webkit=-
+                              state active=false hidden=false windows=[offscreen:500x500,offscreen:1000x700]
+inactive                      20s polls= 18 max_gap=1.1s menu_republish=0 webkit=-
+                              state active=false hidden=false windows=[offscreen:500x500,offscreen:1000x700]
+reactivated                    8s polls=  8 max_gap=1.1s menu_republish=0 webkit=['Foreground', 'Background']
+                              state active=false hidden=false windows=[offscreen:500x500,offscreen:1000x700]
+                              state active=true hidden=false windows=[offscreen:500x500,onscreen:1000x700]
+probes / controls / starts:
+  +  21.8s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  37.9s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  38.6s SIGKILL worker [45057] (stand-in for any replacement: post-inspection retirement, crash)
+  +  48.6s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  50.1s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  62.2s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  78.4s SIGKILL worker [45121]
+  +  88.5s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  90.0s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  + 102.1s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  + 122.8s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+
+== nv-sbx-prehide (app pid 46604)
+never-visible                 30s polls= 27 max_gap=1.2s menu_republish=1 webkit=['Foreground', 'Background']
+                              state active=false hidden=false windows=[]
+                              state active=false hidden=true windows=[offscreen:500x500,offscreen:1000x700]
+shown                         12s polls= 12 max_gap=1.0s menu_republish=0 webkit=['Foreground']
+                              state active=false hidden=false windows=[offscreen:500x500,onscreen:1000x700]
+probes / controls / starts:
+  +  30.1s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  43.3s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+
+== nv-nosbx-prehide (app pid 46684)
+never-visible                 30s polls= 27 max_gap=1.2s menu_republish=1 webkit=['Foreground', 'Background']
+                              state active=false hidden=false windows=[]
+                              state active=false hidden=true windows=[offscreen:500x500,offscreen:1000x700]
+shown                         12s polls= 12 max_gap=1.0s menu_republish=0 webkit=['Foreground']
+                              state active=false hidden=false windows=[offscreen:500x500,onscreen:1000x700]
+probes / controls / starts:
+  +  30.2s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  43.4s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+
+== long-sbx (app pid 47360)
+minimized-inactive           300s polls=273 max_gap=1.3s menu_republish=1 webkit=['Background']
+                              state active=false hidden=false windows=[offscreen:500x500,offscreen:1000x700]
+restored                      10s polls= 10 max_gap=1.0s menu_republish=0 webkit=['Foreground']
+                              state active=false hidden=false windows=[offscreen:500x500,onscreen:1000x700]
+probes / controls / starts:
+  + 252.9s SIGKILL worker [47371]
+  + 282.9s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  + 284.4s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  + 323.0s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+
+== long-nosbx (app pid 47378)
+minimized-inactive           300s polls=273 max_gap=1.3s menu_republish=1 webkit=['Background']
+                              state active=false hidden=false windows=[offscreen:500x500,offscreen:1000x700]
+restored                      10s polls= 10 max_gap=1.0s menu_republish=0 webkit=['Foreground']
+                              state active=false hidden=false windows=[offscreen:500x500,onscreen:1000x700]
+probes / controls / starts:
+  + 251.1s SIGKILL worker [47385]
+  + 281.1s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  + 282.7s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  + 332.2s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+
+== lock-sbx (app pid 45876)
+visible                       10s polls= 10 max_gap=1.0s menu_republish=0 webkit=['Foreground']
+                              state active=true hidden=false windows=[offscreen:500x500,onscreen:1000x700] locked=False
+locked                       562s polls= 78 max_gap=483.4s menu_republish=1 webkit=['Background', 'Foreground']
+                              state active=false hidden=false windows=[offscreen:500x500,onscreen:1000x700] locked=True
+                              state active=true hidden=false windows=[offscreen:500x500,onscreen:998x699] locked=False
+unlocked                      12s polls= 12 max_gap=1.0s menu_republish=0 webkit=['Foreground']
+                              state active=true hidden=false windows=[offscreen:500x500,onscreen:1000x700] locked=False
+probes / controls / starts:
+  +  11.1s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  31.8s SIGKILL worker [45885] (stand-in for a replacement while locked)
+  +  51.8s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  + 585.8s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+
+== lock-nosbx (app pid 46244)
+visible                       10s polls= 10 max_gap=1.0s menu_republish=0 webkit=['Foreground']
+                              state active=true hidden=false windows=[offscreen:500x500,onscreen:1000x700] locked=False
+locked                       131s polls= 46 max_gap=1.2s menu_republish=1 webkit=['Background']
+                              state active=false hidden=false windows=[offscreen:500x500,onscreen:1000x700] locked=True
+unlocked                      12s polls= 12 max_gap=1.0s menu_republish=0 webkit=['Foreground']
+                              state active=true hidden=false windows=[offscreen:500x500,onscreen:1000x700] locked=False
+probes / controls / starts:
+  +  11.2s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  31.7s SIGKILL worker [46252] (stand-in for a replacement while locked)
+  +  51.8s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  + 155.2s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+
+== ll-sbx (app pid 46900)
+locked                        41s polls= 14 max_gap=26.6s menu_republish=2 webkit=['Foreground', 'Background', 'Suspended(ready)', 'Suspended', 'Background', 'Foreground']
+                              state active=false hidden=false windows=[] locked=True
+                              state active=false hidden=false windows=[onscreen:1000x700,offscreen:500x500] locked=False
+                              state active=false hidden=false windows=[onscreen:900x631,offscreen:500x500] locked=True
+                              state active=false hidden=false windows=[onscreen:992x695,offscreen:500x500] locked=False
+unlocked-untouched            15s polls= 15 max_gap=1.0s menu_republish=0 webkit=-
+                              state active=false hidden=false windows=[onscreen:1000x700,offscreen:500x500] locked=False
+shown                         12s polls= 12 max_gap=1.0s menu_republish=0 webkit=-
+                              state active=false hidden=false windows=[onscreen:1000x700,offscreen:500x500] locked=False
+probes / controls / starts:
+  +  59.5s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  72.5s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+
+== ll-nosbx (app pid 46905)
+locked                        41s polls= 14 max_gap=26.5s menu_republish=2 webkit=['Foreground', 'Background', 'Suspended(ready)', 'Suspended', 'Background', 'Foreground']
+                              state active=false hidden=false windows=[] locked=True
+                              state active=false hidden=false windows=[offscreen:500x500,onscreen:1000x700] locked=False
+                              state active=false hidden=false windows=[offscreen:500x500,onscreen:900x631] locked=True
+                              state active=false hidden=false windows=[offscreen:500x500,onscreen:994x697] locked=False
+unlocked-untouched            15s polls= 15 max_gap=1.0s menu_republish=0 webkit=-
+                              state active=false hidden=false windows=[offscreen:500x500,onscreen:1000x700] locked=False
+shown                         12s polls= 12 max_gap=1.0s menu_republish=0 webkit=-
+                              state active=false hidden=false windows=[offscreen:500x500,onscreen:1000x700] locked=False
+probes / controls / starts:
+  +  59.5s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+  +  85.5s CONTROL result=Ok("menu_targets=2 stale=0 devices=2 missing_from_menu=0 => FRESH")
+
+Display-sleep / lock timelines (relative to the display-sleep request, or to unlock for ll-*):
+== lock-sbx pid=45876
+display sleep requested         +0.0s
+first sample locked=True        +0.6s
+last poll while locked        +561.2s  (78 polls during lock)
+unlock observed               +562.0s
+first poll after unlock       +562.3s
+
+== lock-nosbx pid=46244
+display sleep requested         +0.0s
+first sample locked=True        +0.6s
+last poll while locked         +53.9s  (46 polls during lock)
+unlock observed               +131.5s
+first poll after unlock       +131.6s
+
+== ll-sbx (launched while locked, 40.8s before unlock)
+   -40.48s vs unlock  WebKit Foreground
+   -40.35s vs unlock  WebKit Background
+   -33.94s vs unlock  WebKit Suspended
+    -6.51s vs unlock  WebKit Background
+    -6.51s vs unlock  WebKit Foreground
+  first poll after unlock +0.58s; polls in 15 s after unlock: 15
+
+== ll-nosbx (launched while locked, 40.6s before unlock)
+   -40.41s vs unlock  WebKit Foreground
+   -40.37s vs unlock  WebKit Background
+   -33.70s vs unlock  WebKit Suspended
+    -6.51s vs unlock  WebKit Background
+    -6.51s vs unlock  WebKit Foreground
+  first poll after unlock +0.54s; polls in 15 s after unlock: 15
+
+Original observation (sandbox hands-off run, 14:22:50): the screen had auto-locked at 14:20:51
+(loginwindow kLWLockFromDisplayDim); WindowServer reported the new window 'hidden' -> 'occluded' at
+creation; WebContent 'ready to suspend' at +6.7 s; display woke at 14:24:10.

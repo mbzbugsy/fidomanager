@@ -1,0 +1,95 @@
+MAS.0 §5.2: attribution of every worker replacement
+====================================================
+
+A. Original MAS.0 session (2026-10-10), from the unified log.
+   Columns: time, event. SPAWNED = the kernel's first log line for a new fido-worker process;
+   'device closed' = the worker's HIDAnalytics unregister line when a device session closes;
+   'menu action' = AppKit 'perform action for menu item' in the app (an operator selection).
+
+-- hardware run 2 (app 85343)
+13:45:43.559  fidomanager-app[85343] app start
+13:45:43.561  fidomanager-app[85343] app start
+13:45:43.795  fido-worker[85352] SPAWNED
+13:45:43.893  fido-worker[85352] device closed
+13:45:43.929  fido-worker[85352] device closed
+13:46:02.201  fidomanager-app[85343] menu action (operator)
+13:46:09.261  fido-worker[85352] device closed
+13:46:10.279  fido-worker[85374] SPAWNED
+
+-- hardware session, next launch (app 85394)
+13:46:26.084  fidomanager-app[85394] app start
+13:46:26.087  fidomanager-app[85394] app start
+13:46:26.266  fido-worker[85408] SPAWNED
+13:46:26.363  fido-worker[85408] device closed
+13:46:26.400  fido-worker[85408] device closed
+13:46:31.691  fidomanager-app[85394] menu action (operator)
+13:46:37.570  fido-worker[85408] device closed
+13:46:38.586  fido-worker[85494] SPAWNED
+13:46:38.638  fido-worker[85494] device closed
+13:46:38.727  fido-worker[85494] device closed
+
+-- unsandboxed control (app 85906)
+13:47:56.127  fidomanager-app[85906] app start
+13:47:56.129  fidomanager-app[85906] app start
+13:47:56.294  fido-worker[85922] SPAWNED
+13:47:56.342  fido-worker[85922] device closed
+13:47:56.437  fido-worker[85922] device closed
+13:48:07.439  fidomanager-app[85906] menu action (operator)
+13:48:14.518  fido-worker[86058] SPAWNED
+13:48:14.564  fido-worker[86058] device closed
+13:48:14.654  fido-worker[86058] device closed
+13:48:20.932  fidomanager-app[85906] menu action (operator)
+13:48:28.451  fido-worker[86058] device closed
+13:48:29.467  fido-worker[86163] SPAWNED
+13:48:29.516  fido-worker[86163] device closed
+13:48:29.606  fido-worker[86163] device closed
+
+-- hardware run 3 (app 86331)
+13:49:18.266  fidomanager-app[86331] app start
+13:49:18.268  fidomanager-app[86331] app start
+13:49:18.437  fido-worker[86341] SPAWNED
+13:49:18.535  fido-worker[86341] device closed
+13:49:18.572  fido-worker[86341] device closed
+13:49:50.710  fido-worker[86373] SPAWNED
+13:49:50.762  fido-worker[86373] device closed
+
+-- final run (app 42987)
+13:56:27.266  fidomanager-app[42987] app start
+13:56:27.269  fidomanager-app[42987] app start
+13:56:27.433  fido-worker[42997] SPAWNED
+13:56:27.478  fido-worker[42997] device closed
+13:56:27.581  fido-worker[42997] device closed
+13:56:56.817  fidomanager-app[42987] menu action (operator)
+13:57:03.342  fido-worker[43048] SPAWNED
+13:57:03.390  fido-worker[43048] device closed
+13:57:03.479  fido-worker[43048] device closed
+
+   Run 2 app stderr (from its harness report): [authentication] status=Validated ... worker_quiescent=true
+   Final run app stderr (from §4 report):     [authentication] status=Cancelled ... worker_quiescent=true
+
+B. Reproduction with a temporary, uncommitted instrumentation build (both keys connected:
+   1050:0406 and 1ea8:f829). Excerpts; the full traces stay with the investigation, not in the repo.
+
+-- operator inspection -> retirement (packaged build)
+[DIAG 1791634500768 worker pid=72490] REQ end id=51 kind=PrepareAuthentication elapsed_ms=39 result=AuthenticationPrepared {..}
+[DIAG 1791634508311 worker pid=72490] REQ end id=52 kind=InspectCredentials elapsed_ms=201 result=CredentialsInspected {..}
+[DIAG 1791634508311 service pid=72481] SUPERVISOR retire_authentication
+[DIAG 1791634508321 service pid=72481] TERMINATE gen=1 worker_pid=72490 already_exited=Some(false) caller=AuthenticationAuthority::inspect_with_progress
+[DIAG 1791634508323 service pid=72481] REAPED worker_pid=72490 code=None signal=Some(9)
+[authentication] status=Validated grant=Some(CredMan) attached_puat_cleared=true worker_quiescent=true prompt_torn_down=true
+[DIAG 1791634509346 service pid=72481] LAUNCH gen=2 elapsed_ms=20 result=ok worker_pid=72950
+[DIAG 1791634559620 worker pid=72950] REQ end id=106 kind=PrepareAuthentication elapsed_ms=94 result=AuthenticationPrepared {..}
+
+-- harness SIGKILL -> quarantine -> replacement (sandbox build, real harness 19/19 PASS)
+[DIAG 1791635198455 service pid=90851] TERMINATE gen=1 worker_pid=90860 already_exited=Some(true) caller=WorkerEndpoint::exchange
+[DIAG 1791635198455 service pid=90851] REAPED worker_pid=90860 code=None signal=Some(9)
+[DIAG 1791635198455 service pid=90851] EXCHANGE gen=1 worker_pid=90860 id=29 kind=ListDevices budget_ms=2000 wait_limit_ms=2100 elapsed_ms=24 outcome=ERR Unavailable
+[DIAG 1791635198455 service pid=90851] COORDINATOR refresh gen=1 ERR Endpoint(Unavailable) quarantine=true
+[DIAG 1791635198455 service pid=90851] SUPERVISOR refresh elapsed_ms=24 before=Running/gSome(1) after=Restarting { retry_after_ms: 250 }/gSome(1) launches=1 consecutive_failures=1 recent_failures=1 circuit=Closed result=ERR Discov
+[DIAG 1791635199574 service pid=90851] LAUNCH gen=2 elapsed_ms=19 result=ok worker_pid=90892
+
+-- hands-off windows, both keys connected
+debug, unsandboxed  launches=1 list_devices=92 deadline_exceeded=0 quarantines=0
+Developer ID pkg   launches=1 list_devices=145 deadline_exceeded=0 quarantines=0
+sandbox pkg        launches=1 list_devices=7 deadline_exceeded=0 quarantines=0
+(sandbox pkg: the screen had auto-locked before launch; see §5.4.)
