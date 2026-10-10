@@ -27,3 +27,21 @@ a second instance. The `macos-app-sandbox` build flavor therefore registers, in 
 position, a container-local exclusive lock instead of the plugin. The contract above is
 unchanged: one authority per user session (per container), and second-launch input is never
 processed.
+
+## Proposed G5 amendment — blocked at the identity decision
+
+For the first public macOS release, [Issue #38](https://github.com/mbzbugsy/fidomanager/issues/38)
+proposes one process-lifetime flock authority in one Team-ID-prefixed App Group root shared by
+both production channels and their schema-1 recovery journal. Acquire and retain this lock
+before recovery, UI, IPC or worker initialization. A second launch exits before acquiring any
+authority; socket-based focus may remain only if demonstrably non-authoritative. Independent
+channel locks do not enforce exclusion across channels. This remains a coordination mechanism
+against competing application instances, not protection against other local FIDO clients.
+
+The implementation is BLOCKED: latest main's reviewed `MACOS_RELEASE_TEAM_ID` is `None`, and the
+exact App Group and production Mac App Store bundle identifier are undecided. No new authority
+is enabled by this proposal. Missing, inaccessible or unsafe shared storage must fail closed,
+without an alternate root. Current unsigned/ad-hoc storage remains isolated; Windows behavior
+is unchanged. The maintainer's existing pre-release recovery state must not be implicitly
+bypassed; switching it requires a separately reviewed human-controlled transition. No general
+migration engine, downgrade sentinel, schema 2 or multi-incident UI is proposed.

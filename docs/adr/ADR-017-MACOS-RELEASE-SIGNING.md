@@ -121,6 +121,40 @@ at `15ae91c` [REPO]:
 | D15 | **Signing-environment independence.** The credential-bearing job runs only a minimal signing/notarization driver plus Apple OS tools. The driver is checked out from a separate, protected repository at a pinned full commit SHA, never from the candidate commit. The candidate app is handled as data only. | [POLICY] |
 | D16 | **Immutable publication.** Publication is bound to an explicit authorization tuple (section 7.6). The authorization record never vouches for itself: its digest `D7` travels through trusted job outputs and its provenance attestation is verified against the exact run before it is used. GitHub immutable releases are required and confirmed by a least-privilege policy check. Every byte-changing step has its own input and output digest (section 9.4). Tags are never moved or reused. | [GITHUB] + [POLICY] |
 
+### 2.1 G5 Phase 1 decision boundary (Issue #38)
+
+[PROPOSED, BLOCKED] The first-release shared authority design in
+[Issue #38](https://github.com/mbzbugsy/fidomanager/issues/38) requires a narrowly scoped amendment
+to D3: the production Developer ID **main app** would carry exactly
+`com.apple.security.application-groups` with the single reviewed Team-ID-prefixed group identifier.
+The Developer ID worker retains **zero entitlements**. The production sandbox app would carry
+the same group grant in addition to its reviewed sandbox grants; its worker retains only the
+existing sandbox/inherit pair. No broad exception or worker group grant is proposed.
+
+This is not an active entitlement allowlist change. Latest main (`a661d4c`) pins
+`MACOS_RELEASE_TEAM_ID: Option<&str> = None` in
+`crates/fido-service/src/worker_authenticity.rs`. Its source contract deliberately refuses an
+optimized enforcing build until that one reviewed identity is provisioned; debug release startup
+also fails closed. There is no reviewed Team ID to reuse for an exact group grant today.
+The exact App Group identifier and production Mac App Store bundle identifier have not been
+pinned either. A fake Team ID, an environment-provided value, or the ad-hoc `.sandboxtest`
+identifier must not fill that gap. D3's current zero-entitlement enforcement remains unchanged
+until these decisions are reviewed and the exact checker/signing amendments are implemented.
+
+Future G5 implementation must reuse the existing identity constant, resolve/open the group with
+the trusted OS API, and acquire its shared flock before recovery/UI/IPC/worker initialization.
+The unchanged schema-1 journal and durable storage algorithms remain the persistence contract.
+Apple Development feasibility, actual Developer ID entitlement access/notarization/Gatekeeper,
+and TestFlight/App Store Connect sharing/provisioning remain separate signed gates.
+The maintainer's real pre-release recovery state requires a separately reviewed human-controlled
+transition; G5 must not implicitly bypass it. This decision-boundary change neither accesses
+that state nor implements a migration or production startup path.
+
+PR #36 also amends this ADR, and PR #35 changes the bundle checker/provenance and CI policy.
+Their branches remain untouched. The eventual G5 D3 amendment must reconcile their policy text
+and exact entitlement checks on the reviewed main history; it cannot weaken the worker contract
+or pretend their independent release gates are complete.
+
 ## 3. Code set and nested code
 
 ### 3.1 What gets signed

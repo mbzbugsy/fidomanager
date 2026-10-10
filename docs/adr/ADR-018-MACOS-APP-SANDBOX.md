@@ -226,3 +226,24 @@ hazard; it is not App Group access or signed G5 validation.
   crate fails the renderer-boundary checker and needs an amendment to this ADR.
 - ADR-012 now has two implementations (socket for Developer ID, container lock for the sandbox)
   with the same contract.
+
+### G5 Phase 1 implementation boundary
+
+[BLOCKED] At main `a661d4c`, the sole release Team ID constant is explicitly `None`.
+Neither the exact Team-ID-prefixed App Group identifier nor a production Mac App Store bundle
+identity is pinned. The `.sandboxtest` bundle is a disposable ad-hoc fixture, not a production
+identity decision. G5 Phase 1 stops here rather than inventing any of these values.
+
+The proposed S2/S4 amendment is: both production macOS channels use one trusted-API-resolved
+App Group root, one existing schema-1 journal, and one shared flock authority acquired before
+recovery, UI, IPC or worker initialization. Both production **apps** need the same exact group
+grant; worker entitlements remain unchanged. Missing, denied or unsafe group storage must stop
+startup without creating a substitute root or loading an independent empty journal. Only a
+missing record inside a successfully opened, validated shared root may mean NoRecord.
+
+Current unsigned development and ad-hoc sandbox flavors keep their isolated storage and existing
+entitlements. No G5 production feature, entitlement, identity, resolver or startup path is enabled
+by this documentation amendment. G5 remains OPEN until implementation and genuine signed
+validation are complete. See [G5 decision-boundary evidence](../validation/G5-phase1-decision-boundary.md)
+for the required decisions and the distinction between existing-flavor regressions and blocked
+shared-container validation.
