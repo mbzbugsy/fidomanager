@@ -130,17 +130,90 @@ def events(output):
     return found
 
 
+def validate_kernel(found, expected_pids=None):
+    kernels = [entry for entry in found if entry.get("event") == "kernel"]
+    require(kernels, "missing runtime kernel evidence")
+    pids = []
+    for entry in kernels:
+        require(all(type(entry.get(key)) is int for key in ("pid", "sandboxed", "cs_status", "cs_flags")),
+                "invalid kernel evidence fields")
+        require(entry["pid"] > 0 and entry["sandboxed"] == 1 and entry["cs_status"] == 0
+                and entry["cs_flags"] & 0x10001 == 0x10001, "kernel sandbox/runtime checks failed")
+        pids.append(entry["pid"])
+    require(len(set(pids)) == len(pids), "duplicate kernel evidence")
+    if expected_pids is not None:
+        require(set(pids) == set(expected_pids), "missing or unexpected process kernel evidence")
+    else:
+        require(len(pids) == 1, "expected exactly one completed-process kernel event")
+
+
+BAD_RECORD_CASES = ("malformed", "corrupted-utf8", "empty", "oversized", "unknown-field",
+                    "unsupported-schema", "inconsistent-resolution", "invalid-incident",
+                    "unknown-operation", "wrong-application", "unresolved-tombstone",
+                    "unreadable", "permissive-record", "record-symlink", "record-hardlink", "record-directory")
+UNAVAILABLE_CASES = ("permissive-namespace", "namespace-symlink", "permissive-root")
+
+
+def expected_authorities(step):
+    action, case = step.split(":")
+    if action in ("contend", "child"):
+        return {}
+    if action == "negative":
+        expected = {name: ("loaded", "Barrier", None, True) for name in BAD_RECORD_CASES}
+        expected.update({name: ("unavailable", "Barrier", None, None) for name in UNAVAILABLE_CASES})
+        expected["failed-acknowledgement"] = ("loaded", "Barrier", "dispatch_capable", False)
+        expected["write-denied-after-pending"] = ("loaded", "Open", "pending", False)
+        return expected
+    if action == "g5":
+        return {"g5-continuity": ("loaded", "Open", None, False)}
+    if case == "lock":
+        return {case: ("loaded", "Open", None, False)}
+    require(case in CASES and action in ("seed", "reload"), "unknown fixture step")
+    phase = "dispatch_capable" if case == "dispatch" else "pending" if case == "pending" else "resolved"
+    admission = "Barrier" if case == "dispatch" else "Open"
+    return {case: ("loaded", admission, phase, False)}
+
+
+def validate_admissions(found, step):
+    expected = expected_authorities(step)
+    rows = [entry for entry in found if entry.get("event") == "authority"]
+    require(len(rows) == len(expected) and {row.get("case") for row in rows} == set(expected),
+            "missing, duplicate or unexpected authority evidence")
+    for row in rows:
+        initialization, admission, phase, poisoned = expected[row["case"]]
+        require(row.get("initialization") == initialization and row.get("admission") == admission
+                and row.get("phase") == phase and "phase" in row
+                and "poisoned" in row and row["poisoned"] is poisoned
+                and row.get("journal_present") is (initialization == "loaded"),
+                f"unexpected initialization/admission: {row['case']}")
+    action, case = step.split(":")
+    if action in ("seed", "reload") and case in CASES:
+        record = select(found, "record")
+        require(record.get("step") == step and record.get("admission") == expected[case][1],
+                "record admission does not match expected authority admission")
+
+
 def validate_success(result, step):
     require(result.returncode == 0, f"fixture failed ({step}): {result.stdout}\n{result.stderr}")
     require("test result: ok. 1 passed; 0 failed; 0 ignored;" in result.stdout,
             "fixture must execute exactly one test, not merely match an empty filter")
     found = events(result.stdout)
-    require(found and found[0]["event"] == "kernel", "missing runtime kernel evidence")
-    for entry in found:
-        if entry["event"] == "kernel":
-            require(entry["sandboxed"] == 1 and entry["cs_status"] == 0
-                    and entry["cs_flags"] & 0x10001 == 0x10001, "kernel sandbox/runtime checks failed")
+    require(found and found[0].get("event") == "kernel", "missing initial kernel evidence")
+    validate_kernel(found)
+    validate_admissions(found, step)
     return found
+
+
+def validate_holding(found, step, parent_pid):
+    require(found and found[0].get("event") == "kernel", "missing holding kernel evidence")
+    pids = [parent_pid]
+    if step == "hold:lock":
+        child_pid = select(found, "lock-held").get("child_pid")
+        require(type(child_pid) is int and child_pid > 0 and child_pid != parent_pid, "invalid inherit child PID")
+        require(select(found, "child-ready").get("pid") == child_pid, "wrong inherit child")
+        pids.append(child_pid)
+    validate_kernel(found, pids)
+    validate_admissions(found, step)
 
 
 def fixture_environment(run_id, step):
@@ -158,6 +231,7 @@ def complete(binary, run_id, step, extra_environment=None):
 
 class HoldingFixture:
     def __init__(self, binary, run_id, step):
+        self.step = step
         self.process = subprocess.Popen([str(binary), *ARGS], env=fixture_environment(run_id, step),
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         self.lines = []
@@ -180,6 +254,7 @@ class HoldingFixture:
                 found.append(entry)
                 if expected(found):
                     require(self.process.poll() is None, "holding fixture exited prematurely")
+                    validate_holding(found, self.step, self.process.pid)
                     return found
             except queue.Empty:
                 require(self.process.poll() is None, "fixture exited before evidence: " + "".join(self.lines))

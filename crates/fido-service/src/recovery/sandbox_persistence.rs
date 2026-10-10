@@ -75,9 +75,36 @@ fn journal(root: &Path) -> io::Result<RecoveryJournal> {
     )?)))
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ExpectedInitialization {
+    Loaded {
+        admission: RecoveryAdmission,
+        phase: Option<JournalPhase>,
+        poisoned: bool,
+    },
+    StorageUnavailable,
+}
+
+fn expected_loaded(
+    admission: RecoveryAdmission,
+    phase: Option<JournalPhase>,
+) -> ExpectedInitialization {
+    ExpectedInitialization::Loaded {
+        admission,
+        phase,
+        poisoned: false,
+    }
+}
+
+const POISONED: ExpectedInitialization = ExpectedInitialization::Loaded {
+    admission: RecoveryAdmission::Barrier,
+    phase: None,
+    poisoned: true,
+};
+
 fn assert_authority(
     root: &Path,
-    expected: RecoveryAdmission,
+    expected: ExpectedInitialization,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let authority = AuthenticationAuthority::awaiting_recovery_startup();
     assert_eq!(
@@ -89,29 +116,53 @@ fn assert_authority(
         RecoveryAdmission::Barrier
     );
     let initialized = authority.initialize_recovery_at(root);
-    if initialized.is_ok() {
-        let empty_reload = root.join("unused-reload");
-        assert_eq!(
-            authority.initialize_recovery_at(&empty_reload),
-            Err(JournalError::InvalidTransition)
-        );
-        assert!(
-            !empty_reload.exists(),
-            "one-shot initialization refuses before opening fresh storage"
-        );
-    }
-    if expected == RecoveryAdmission::Open {
-        initialized?;
-    }
+    let (admission, initialization) = match expected {
+        ExpectedInitialization::Loaded {
+            admission,
+            phase,
+            poisoned,
+        } => {
+            assert_eq!(
+                initialized,
+                Ok(()),
+                "must initialize storage and load a journal"
+            );
+            {
+                let slot = authority.recovery.lock().map_err(|_| "recovery")?;
+                let journal = slot.as_ref().ok_or("expected loaded journal")?;
+                assert_eq!(journal.phase(), phase);
+                assert_eq!(journal.poisoned, poisoned);
+                assert_eq!(journal.admission(), admission);
+                if poisoned {
+                    assert!(!journal.can_acknowledge());
+                }
+            }
+            let empty_reload = root.join("unused-reload");
+            assert_eq!(
+                authority.initialize_recovery_at(&empty_reload),
+                Err(JournalError::InvalidTransition)
+            );
+            assert!(
+                !empty_reload.exists(),
+                "one-shot initialization refuses before opening fresh storage"
+            );
+            (admission, "loaded")
+        }
+        ExpectedInitialization::StorageUnavailable => {
+            assert_eq!(initialized, Err(JournalError::Unavailable));
+            assert!(authority.recovery.lock().map_err(|_| "recovery")?.is_none());
+            (RecoveryAdmission::Barrier, "unavailable")
+        }
+    };
     assert_eq!(
         authority
             .gate
             .lock()
             .map_err(|_| "gate")?
             .recovery_admission(),
-        expected
+        admission
     );
-    if expected == RecoveryAdmission::Barrier {
+    if admission == RecoveryAdmission::Barrier {
         for kind in [
             SensitiveWorkflowKind::CredentialInspection,
             SensitiveWorkflowKind::SetPin,
@@ -125,13 +176,14 @@ fn assert_authority(
                 Err(crate::AdmissionError::RecoveryBarrier)
             ));
         }
-        if let Some(loaded) = authority.recovery.lock().map_err(|_| "recovery")?.as_ref() {
-            // Untrustworthy bytes cannot be cleared with an acknowledgement.
-            if loaded.phase().is_none() {
-                assert!(!loaded.can_acknowledge());
-            }
-        }
     }
+    let slot = authority.recovery.lock().map_err(|_| "recovery")?;
+    emit(
+        serde_json::json!({"event": "authority", "case": root.file_name().and_then(|name| name.to_str()).ok_or("case")?,
+        "initialization": initialization, "admission": format!("{admission:?}"),
+        "journal_present": slot.is_some(), "phase": slot.as_ref().and_then(|j| j.phase()),
+        "poisoned": slot.as_ref().map(|j| j.poisoned)}),
+    )?;
     Ok(())
 }
 
@@ -256,7 +308,7 @@ fn negatives(base: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let _held = lock(&root)?;
         DurableRecoveryFile::open(&root)?.replace(&bytes)?;
         let before = fs::read(root.join("fido-authority-recovery-v1/incident.json"))?;
-        assert_authority(&root, RecoveryAdmission::Barrier)?;
+        assert_authority(&root, POISONED)?;
         assert_eq!(
             fs::read(root.join("fido-authority-recovery-v1/incident.json"))?,
             before
@@ -305,7 +357,13 @@ fn negatives(base: &Path) -> Result<(), Box<dyn std::error::Error>> {
             "permissive-root" => fs::set_permissions(&root, fs::Permissions::from_mode(0o770))?,
             _ => unreachable!(),
         }
-        assert_authority(&root, RecoveryAdmission::Barrier)?;
+        let initialization = match name {
+            "permissive-namespace" | "namespace-symlink" | "permissive-root" => {
+                ExpectedInitialization::StorageUnavailable
+            }
+            _ => POISONED,
+        };
+        assert_authority(&root, initialization)?;
         if name == "permissive-root" {
             assert!(matches!(
                 InstanceLock::acquire(&root),
@@ -340,7 +398,13 @@ fn negatives(base: &Path) -> Result<(), Box<dyn std::error::Error>> {
     );
     assert_eq!(loaded.admission(), RecoveryAdmission::Barrier);
     assert_eq!(journal(&root)?.phase(), Some(JournalPhase::DispatchCapable));
-    assert_authority(&root, RecoveryAdmission::Barrier)?;
+    assert_authority(
+        &root,
+        expected_loaded(
+            RecoveryAdmission::Barrier,
+            Some(JournalPhase::DispatchCapable),
+        ),
+    )?;
     emit(
         serde_json::json!({"event": "negative", "case": "failed-acknowledgement",
         "injection": "after successful production replace, not a real kernel sync failure",
@@ -364,7 +428,10 @@ fn negatives(base: &Path) -> Result<(), Box<dyn std::error::Error>> {
     fs::set_permissions(&namespace, fs::Permissions::from_mode(0o700))?;
     // No dispatch receipt was minted. The unchanged, Pending-only restart may correctly reopen.
     assert_eq!(journal(&root)?.phase(), Some(JournalPhase::Pending));
-    assert_authority(&root, RecoveryAdmission::Open)?;
+    assert_authority(
+        &root,
+        expected_loaded(RecoveryAdmission::Open, Some(JournalPhase::Pending)),
+    )?;
     emit(
         serde_json::json!({"event": "negative", "case": "write-denied-after-pending",
         "fault": "real owner-write permission denial at production temporary-file creation",
@@ -432,7 +499,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .read_bounded(MAX_JOURNAL_BYTES)?
                 .is_none()
         );
-        assert_authority(&root, RecoveryAdmission::Open)?;
+        assert_authority(&root, expected_loaded(RecoveryAdmission::Open, None))?;
         emit(
             serde_json::json!({"event": "g5", "external_synthetic_marker_denied": true,
             "denial_errno": denied.raw_os_error(), "container_record_missing": true,
@@ -474,7 +541,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             ])
             .env("FIDOMANAGER_MAS1_STEP", "child:lock")
             .spawn()?;
-        assert_authority(&root, RecoveryAdmission::Open)?;
+        assert_authority(&root, expected_loaded(RecoveryAdmission::Open, None))?;
         emit(
             serde_json::json!({"event": "lock-held", "child_pid": child.id(),
             "journal_initialized": true}),
@@ -494,7 +561,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if case == "lock" {
         assert_eq!(action, "reload");
-        assert_authority(&root, RecoveryAdmission::Open)?;
+        assert_authority(&root, expected_loaded(RecoveryAdmission::Open, None))?;
         emit(serde_json::json!({"event": "lock-reacquired", "journal_initialized": true}))?;
         return Ok(());
     }
@@ -533,7 +600,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         RecoveryAdmission::Open
     };
-    assert_authority(&root, admission)?;
+    assert_authority(&root, expected_loaded(admission, Some(phase)))?;
     inspect(&root, &step, phase)?;
     if action == "seed" && phase != JournalPhase::Resolved {
         hold();

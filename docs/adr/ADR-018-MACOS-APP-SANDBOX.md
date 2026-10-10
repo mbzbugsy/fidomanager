@@ -142,7 +142,7 @@ flavors are separate features.
 | Patch or fork `tauri-plugin-single-instance` | A vendored dependency fork for one path. The in-tree lock is about 100 reviewed lines |
 | Give the worker its own sandbox (`app-sandbox` + `device.usb`, no `inherit`) | Killed at launch: `forbidden-sandbox-reinit` [LOCAL] |
 | Let the GUI open HID devices itself | Violates ADR-009: the GUI never links or runs native FIDO code |
-| `com.apple.security.application-groups` for a shared socket | Requires a provisioning profile and a Team ID prefix, and is not needed |
+| An App Group merely for the single-instance socket | The MAS.0 container lock removed the need for a shared socket. This rejection was specific to that socket use, not all App Groups or an assumed universal provisioning restriction. The Team-ID-prefixed shared recovery/authority design is evaluated separately in [Issue #38](https://github.com/mbzbugsy/fidomanager/issues/38); actual entitlement/provisioning access needs signed validation |
 
 ## 4. Observed benign denial (no exception granted)
 
@@ -159,7 +159,7 @@ runs. The runtime harness tolerates exactly this denial and fails on anything el
 | G2 | `productbuild` with a Mac Installer Distribution identity; App Store Connect upload validation |
 | G3 | App Review accepting `device.usb` (FIDO2 security keys over USB HID) and `network.client` (WebKit; BooGooCypher status) with their justifications; App Privacy disclosure for the BooGooCypher request |
 | G4 | A Mac App Store worker-authenticity flavor (ADR-017 §5 equivalent). Open question: whether the exact cdhash pin (ADR-017 D14) survives Apple's re-signing of store builds; if Apple re-signs, the expected identity cannot be fixed before submission. Needs a store-signed (TestFlight) build to answer |
-| G5 | Recovery continuity across distribution channels remains **OPEN**. MAS.1 reproduces the separate-storage hazard using disposable synthetic data, without accessing either real channel's journal. See §5.1: recommend a separate ADR for a quiesced, durable one-way handoff; first-launch migration or a user instruction alone does not prove journal/lock continuity. Until that ADR is implemented and validated, do not ship both channels to the same users |
+| G5 | Recovery continuity across distribution channels remains **OPEN**. MAS.1 reproduces the separate-storage hazard using disposable synthetic data, without accessing either real channel's journal. See §5.1 and [Issue #38](https://github.com/mbzbugsy/fidomanager/issues/38): prefer one Team-ID-prefixed App Group container, one shared schema-1 recovery journal and one shared flock-based single-instance authority for the first public release. G5 remains open until implementation and signed validation are complete; independent roots must not ship as cross-channel continuity |
 | G6 | Privacy manifest (`PrivacyInfo.xcprivacy`) review for required-reason APIs (for example the file-metadata `stat`/`fstat` calls in the recovery and lock code) |
 | G7 | Architecture policy for the store (arm64-only vs universal; ADR-017 M7.1 gate 4) |
 | G8 | A store-signed build exercised through TestFlight on a clean Mac: sandbox, USB, WKWebView and single-instance behaviour under Apple's signature rather than ad-hoc |
@@ -185,22 +185,37 @@ cannot exclude the other channel. An empty destination, an old Resolved tombston
 cancelled by the user must not become evidence that an external unresolved incident never existed.
 The journal represents historical uncertainty, not a portable dispatch/approval capability.
 
-**Recommendation [POLICY, proposed; no migration implemented]:** keep G5 as a distribution blocker
-for existing users and commission a separate ADR for a quiesced, durable one-way channel handoff.
-That ADR must establish exclusion across both channels before reading either journal; validate
-bounded records and ownership without following links; preserve unresolved incidents and unknown
-history; refuse corrupt, conflicting or unavailable evidence; durably publish and reload the
-destination before acknowledging handoff; and prevent the source channel or a rollback from
-silently resuming with independent Open admission. Failure at any cutover stage must retain a
-barrier. A future common journal **and** singleton namespace is another option, but would require
-its own signing/entitlement/storage decision. Neither option changes Developer ID architecture in
-MAS.1.
+**Recommendation [POLICY, proposed; not implemented in MAS.1]:** align the first-public-release
+design with [Issue #38](https://github.com/mbzbugsy/fidomanager/issues/38): one **Team-ID-prefixed
+App Group container**, one shared existing **schema-1 recovery journal**, and one shared
+**flock-based single-instance authority** for both production distribution channels. Resolve the
+root through the trusted OS API, validate and open it successfully, and acquire the common lock
+before recovery/UI/IPC/worker initialization. Missing, denied or unsafe group access must fail
+closed without falling back to an independent empty journal or alternative authority root.
+Independent journals can hide unresolved incidents, and independent locks permit concurrent
+channel authority; the shared design must eliminate both hazards.
 
-A documented one-channel restriction is an interim distribution constraint, not enforcement and
-not completion of G5. Apple's migration mechanism may be an input to a reviewed handoff, not its
-entire safety argument. Actual store signatures, provisioning, first-install migration, existing
-containers, reverse switching and conflicting/rollback states still need Apple-dependent and
-cross-channel validation after that design decision.
+There are no public releases to support with a general legacy migration engine. Do not add a
+general migration engine, downgrade sentinel, schema 2 or multi-incident UI for this design.
+The maintainer's existing **pre-release recovery state still needs a separately reviewed,
+human-controlled transition**. No public releases does not imply no real local state. Do not
+read, modify, delete, overwrite or implicitly bypass it; block the maintainer's transition if
+preservation of recovery admission cannot be established by that separate procedure. MAS.1 does
+not inspect that state or implement G5.
+
+G5 stays **OPEN** until the shared design is implemented and signed validation is complete.
+Actual Apple Development/Developer ID access, common journal visibility/durability, cross-channel
+lock contention and crash recovery, notarization/Gatekeeper, and ultimately store provisioning and
+TestFlight group sharing/reinstall behavior remain required gates in Issue #38. Fake Team-ID or
+ad-hoc probes are not proof of successful real App Group access; an OS-returned plausible URL is
+not sufficient. Production bundle-identifier and portal/profile details remain decisions there.
+Current development/ad-hoc test identities must remain isolated. Any required production policy,
+entitlement or signing amendments belong to the separate G5 implementation, not MAS.1.
+
+A one-channel instruction is only an interim distribution constraint, not enforcement or
+completion of G5. Apple's first-launch migration mechanism does not by itself establish the
+shared authority protocol. The MAS.1 separate-storage probe remains valid evidence of the current
+hazard; it is not App Group access or signed G5 validation.
 
 ## 6. Consequences
 

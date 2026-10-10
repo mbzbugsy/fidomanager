@@ -4,6 +4,8 @@ Status: **PASS locally** for synthetic journal writes, exact-byte process-restar
 authority admission and single-instance compatibility under a kernel-enforced App Sandbox.
 This is a credential-free compatibility test, not a Mac App Store submission or a power-loss test.
 G5 recovery continuity between installation channels remains **OPEN**.
+The committed runtime evidence was freshly rerun after the Opus E1/E2 changes on
+2026-10-10 at 20:09 UTC; it is not a relabeling of the original reviewed run.
 
 Base: `main` at `2e80fe74031cca13199bb39a391b4bf37a2aa8c7` (merged PR #37).
 Host: macOS 26.5.2 (25F84), arm64, SIP enabled; Rust 1.98.1; Python 3.9.6;
@@ -84,11 +86,32 @@ and PIDs naturally differ between runs. The script redacts the operator's home/w
 | Unresolved DispatchCapable restart | After acknowledgement, writer stays alive, is killed with SIGKILL and reaped; a different process reacquires the lock and reloads identical bytes/SHA-256/incident with Barrier | PASS |
 | Pending-only restart | Same forced termination; identical record reloads Pending with Open admission, correctly indicating no successful dispatch-capable acknowledgement | PASS |
 | Resolved restart | Separate normal-exit writer and reader for each of NotDispatched, Rejected, ConfirmedSuccessful and AcknowledgedUnknown; exact history preserved and Open admission | PASS |
-| Authority initialization | Starts blocked; loads journal to the expected admission; a second initialization against fresh empty storage is refused before opening it | PASS |
+| Authority initialization | Starts blocked; each case requires exact `Ok(())` with a journal or `Err(Unavailable)` with no journal, plus exact phase/poison/admission. Every successful initialization refuses a second load before opening fresh storage | PASS |
 | Blocked workflows | For untrustworthy/unresolved records, inspection, SetPin, ChangePin, deletion, Reset and sensitive export all return RecoveryBarrier before prompts/workers | PASS |
 | Singleton | A second signed process completes successfully at AlreadyHeld, before journal loading; holder killed/reaped; replacement acquires and initializes recovery | PASS |
-| Lock CLOEXEC/inheritance | Inherit-only signed child is sandboxed and remains executing (not a zombie) before/after parent termination and replacement acquisition; it cannot retain the lock | PASS |
+| Lock CLOEXEC/inheritance | Inherit-only signed child is sandboxed and remains executing (not a zombie) before/after parent termination and replacement acquisition; it cannot retain the lock. Parser requires distinct PID-matched kernel sandbox/signature/runtime evidence for parent and child | PASS |
 | G5 separate-storage probe | External synthetic DispatchCapable marker denied with EPERM; empty independent container journal starts Open; external synthetic bytes unchanged | PASS (hazard reproduced; migration not tested) |
+
+### Exact initialization outcomes (E1/E2 delta)
+
+The fixture asserts initialization results independently of admission, then emits `authority`
+evidence. The runner validates every expected case's initialization, journal presence, phase,
+poison state and admission; seed/reload record admissions must also match. A Barrier caused by
+storage-open failure cannot substitute for a successfully initialized unresolved journal.
+
+| Scenario | Exact initialization / journal state | Admission |
+| --- | --- | --- |
+| DispatchCapable seed/reload; post-publication failure reload | `Ok(())`; journal present, DispatchCapable, not poisoned | Barrier |
+| Pending seed/reload; restored write-denied Pending; four resolved cases | `Ok(())`; journal present, expected Pending/Resolved phase, not poisoned | Open |
+| 11 invalid-record cases and 5 unsafe/inaccessible record cases | `Ok(())`; poisoned journal present, no accepted phase | Barrier |
+| Permissive namespace, namespace symlink, permissive app-data root | `Err(Unavailable)`; no journal, no phase or poison state | Barrier |
+| Empty singleton and G5 disposable roots | `Ok(())`; journal present, no phase, not poisoned | Open |
+
+Completed fixtures require valid kernel evidence and successful libtest completion. Holding
+fixtures are terminated intentionally after their asserted evidence, so the parser instead checks
+the same kernel fields against the actual holding PID, and both parent/child PIDs for the lock
+case. Missing, duplicate, wrong-PID, unsandboxed, invalid-signature or missing-runtime evidence
+fails the run. The inherited child's readiness event alone is insufficient.
 
 ### Synchronization evidence and its limits
 
@@ -128,9 +151,10 @@ namespace is made 0500 temporarily, so the real filesystem denies creation. Both
 are confined to fresh disposable records. Foreign-UID ownership rejection remains source/unit
 policy; MAS.1 does not change ownership to another user or require root.
 
-The Python evidence parser's eight regression tests reject empty filters, live-but-incomplete
+The Python evidence parser's 14 regression tests reject empty filters, live-but-incomplete
 process output, failing exits, missing/ambiguous record evidence, unsandboxed or invalid runtime
-status, and signing-variable injection. The boundary mutation check rejects removing the fixture's
+status, wrong authority/record admission, substituted initialization outcomes, missing or invalid
+holding/child kernel evidence, and signing-variable injection. The boundary mutation check rejects removing the fixture's
 test-only compilation guard; fixture selectors/evidence strings are forbidden in production Rust.
 
 ## G5 recommendation and blockers
@@ -140,20 +164,29 @@ MAS.1 demonstrates why a separate empty container cannot account for another cha
 history. It implements no cross-channel read, import, migration manifest, shared container or
 authority bypass.
 
-Recommended next decision: a separate ADR for a **quiesced, durable one-way handoff**, with
-exclusion across channels, bounded/no-follow validation, preserved uncertainty, conflict handling,
-destination durability/reload and prevention of source-channel/rollback re-admission. Keep dual
-distribution to existing users blocked until this is designed and validated. A one-channel user
-instruction is only an interim distribution constraint. Apple's first-launch migration can assist
-a reviewed transfer; it does not alone prove ongoing recovery/lock continuity.
+The preferred first-public-release design in [Issue #38](https://github.com/mbzbugsy/fidomanager/issues/38)
+is **one Team-ID-prefixed App Group container, one shared existing schema-1 recovery journal,
+and one shared flock-based single-instance authority** across both production channels. Shared
+journal visibility and exclusion must both hold; independent storage can miss unresolved history
+and independent locks permit concurrent authority. Group-root resolution/open/validation must
+fail closed on missing, denied or unsafe access, without an independent-storage fallback.
 
-Apple-dependent validation remains: store signatures/provisioning, real first-install migration,
-pre-existing containers, simultaneous installations, reverse switching, interrupted transfer,
-conflicting incidents and rollback. The other ADR-018 App Store gates remain unchanged.
+No general legacy migration engine, downgrade sentinel, schema 2 or multi-incident UI is proposed.
+The maintainer's existing pre-release recovery state requires a **separately reviewed,
+human-controlled transition** that preserves recovery admission; block that transition if this
+cannot be established. MAS.1 never accesses that state and implements no G5 changes.
+
+G5 remains **OPEN** until implementation and signed validation are complete. Apple-dependent
+gates include genuine Apple Development/Developer ID group access, shared journal and flock
+validation, notarization/Gatekeeper, store provisioning, and TestFlight cross-channel group sharing
+and reinstall/concurrent-launch behavior. Ad-hoc probes and plausible OS-returned group URLs do
+not prove actual App Group access. A one-channel instruction or first-launch file copy alone is
+not authority continuity. Current disposable test identities remain isolated.
 
 ## Local regression validation
 
-Commands were run locally in the isolated worktree. Initial command-sandbox failures for loopback
+The following commands were rerun locally in the existing MAS.1 worktree for the Opus delta.
+Initial implementation validation also ran in that isolated worktree. Initial command-sandbox failures for loopback
 binding and `hdiutil` were environment restrictions; rerunning those checks outside that sandbox
 passed. No product fix or weakened test assertion was used for those failures.
 
@@ -166,7 +199,7 @@ passed. No product fix or weakened test assertion was used for those failures.
 | `cargo test -p fido-service --doc --locked --offline` | 8 passed |
 | `pnpm lint`, `pnpm typecheck`, `pnpm test` | PASS; 0 type errors; 45 tests |
 | `pnpm security:renderer-boundary` | PASS; 161 checker executions, including the MAS.1 compilation-guard mutation |
-| `python3 scripts/test-macos-sandbox-recovery-runner.py` | 8 passed |
+| `python3 scripts/test-macos-sandbox-recovery-runner.py` | 14 passed |
 | `python3 scripts/test-native-deps.py` | PASS |
 | `python3 scripts/package-macos.py --dmg` | PASS; unchanged credential-free Developer ID path |
 | `python3 scripts/test-macos-bundle-check.py <Developer-ID-path app>` | PASS; 33 mutated bundles rejected |
@@ -174,6 +207,9 @@ passed. No product fix or weakened test assertion was used for those failures.
 | `python3 scripts/package-macos-sandbox.py` | PASS; existing MAS.0 signature/entitlement/inheritance checks |
 | Production bundle fixture-marker absence | PASS; both app and worker executables in both build flavors (4 executables) |
 | MAS.1 local sandbox runner | PASS; six restart cases, 21 negatives, singleton/CLOEXEC, unsigned control and G5 probe |
+
+Non-blocking review items E3–E5 and cosmetic naming item D3 are deferred. Production recovery
+algorithms, entitlements, signing architecture and distribution identities are unchanged.
 
 CI builds/signs/verifies the MAS.1 fixture in `--build-only` mode and runs the parser regressions.
 The local runtime report supplies enforcement/persistence evidence; CI is not claimed to replace it.
