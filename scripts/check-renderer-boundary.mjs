@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -83,7 +84,12 @@ assertExactArray(
       /^tauri(?:\..+)?\.conf\.(?:json5?|toml)$|^Tauri\.toml$/i.test(name),
     )
     .sort(),
-  ['tauri.conf.json', 'tauri.macos-bundle.conf.json'],
+  [
+    'tauri.conf.json',
+    'tauri.macos-bundle.conf.json',
+    'tauri.macos-developer-id.conf.json',
+    'tauri.macos-store.conf.json',
+  ],
   'Only tauri.conf.json and the reviewed macOS bundle overlay are permitted Tauri configs.',
 );
 if ('plugins' in tauriConfig) {
@@ -1009,10 +1015,10 @@ for (const file of listFiles('crates', (path) => path.endsWith('Cargo.toml'))) {
 const appLib = readFileSync('src-tauri/src/lib.rs', 'utf8');
 if (
   (appLib.match(/\.plugin\(/g) ?? []).length !== 2 ||
-  !/let builder = tauri::Builder::default\(\);\s*\/\/[^\n]*\n\s*#\[cfg\(not\(feature = "macos-app-sandbox"\)\)\]\s*let builder = builder\.plugin\(tauri_plugin_single_instance::init\(/.test(
+  !/let builder = tauri::Builder::default\(\);\s*\/\/[^\n]*\n\s*#\[cfg\(not\(any\(feature = "macos-app-sandbox", feature = "macos-shared-authority"\)\)\)\]\s*let builder = builder\.plugin\(tauri_plugin_single_instance::init\(/.test(
     appLib,
   ) ||
-  !/\}\)\);\s*\/\/[^\n]*\n\s*#\[cfg\(feature = "macos-app-sandbox"\)\]\s*let builder = builder\.plugin\(sandbox_instance::init\(\)\);\s*let builder = builder\s*\.manage\(/.test(
+  !/\}\)\);\s*\/\/[^\n]*\n\s*#\[cfg\(all\(\s*feature = "macos-app-sandbox",\s*not\(feature = "macos-shared-authority"\)\s*\)\)\]\s*let builder = builder\.plugin\(sandbox_instance::init\(\)\);\s*let builder = builder\s*\.manage\(/.test(
     appLib,
   )
 ) {
@@ -1076,3 +1082,64 @@ for (const file of [...crateRustFiles, ...rustFiles]) {
 console.log(
   'Renderer boundary check passed; worker authenticity is backend-only.',
 );
+
+// G5: production policy and startup ordering are app/service-owned; workers cannot select it.
+const authorityPolicy = spawnSync(
+  'python3',
+  ['scripts/macos-authority-policy.py'],
+  { encoding: 'utf8' },
+);
+if (authorityPolicy.status !== 0)
+  throw new Error(
+    'Exact G5 production authority policy failed: ' + authorityPolicy.stderr,
+  );
+const sharedStart = appLib.indexOf('SharedAuthority::production(');
+const sharedInit = appLib.search(/shared_authority\s*\.initialize\(/);
+const storeGate = appLib.indexOf('    enforce_store_worker_gate();');
+const workerStart = appLib.indexOf(
+  'ProcessWorkerLauncher::beside_current_exe(',
+);
+if (
+  !(
+    sharedStart >= 0 &&
+    sharedStart < sharedInit &&
+    sharedInit < storeGate &&
+    storeGate < workerStart
+  ) ||
+  !appLib.includes(
+    'std::process::exit(0); // kernel releases shared authority only at actual process termination',
+  ) ||
+  !appLib.includes(
+    '#[cfg(not(feature = "macos-shared-authority"))]\nfn initialize_recovery(',
+  )
+) {
+  throw new Error(
+    'G5 shared lock and recovery must precede worker/UI/IPC and remain held',
+  );
+}
+const sharedCode = readFileSync(
+  'crates/fido-service/src/shared_authority.rs',
+  'utf8',
+).split('#[cfg(test)]')[0];
+if (
+  /std::env|app_data_dir|initialize_recovery_at|create_dir/.test(sharedCode) ||
+  sharedCode.indexOf('me.check_validity(') >
+    sharedCode.indexOf('macos_app_group::resolve(') ||
+  !sharedCode.includes('has_exact_authority_entitlements(')
+) {
+  throw new Error(
+    'G5 production resolution must enforce identity before querying group, without fallback',
+  );
+}
+const resolver = readFileSync(
+  'crates/fido-service/src/macos_app_group.rs',
+  'utf8',
+);
+if (
+  !resolver.includes('containerURLForSecurityApplicationGroupIdentifier') ||
+  /std::env|Library\/Group Containers|create_dir|canonicalize/.test(resolver)
+) {
+  throw new Error(
+    'G5 group root must come exclusively from the trusted macOS API',
+  );
+}

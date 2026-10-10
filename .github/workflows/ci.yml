@@ -79,6 +79,8 @@ jobs:
         run: cargo test --workspace --all-targets --locked
       - name: Service security contract doctests
         run: cargo test -p fido-service --doc --locked
+      - name: G5 exact production authority policies (credential-free)
+        run: python3 scripts/test-macos-authority-policy.py
       - name: MAS.1 evidence parser negative controls (no container access)
         run: python3 scripts/test-macos-sandbox-recovery-runner.py
 
@@ -101,6 +103,11 @@ jobs:
         run: python3 scripts/test-libfido2.py --rebuild
       - name: Compile production AppKit, PIN mutation and PUAT paths
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Compile both G5 production authority flavors without signing or launching
+        run: |
+          cargo check -p fidomanager-app --features macos-release-signing --locked
+          cargo check -p fidomanager-app --features macos-app-sandbox,macos-shared-authority --locked
+          cargo test -p fido-service --features macos-shared-authority --locked
       - name: Deterministic macOS auth and process tests (no hardware claim)
         run: cargo test --workspace --all-targets --locked
       - name: Service security contract doctests

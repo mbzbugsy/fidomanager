@@ -1,3 +1,7 @@
+> Historical decision-boundary snapshot. The maintainer approved the identities in PR #40;
+> current implementation and genuinely rerun results are in [Phase 1 evidence](G5-phase1-shared-authority.md).
+> Results below describe the earlier documentation-only HEAD, not the implemented shared authority.
+
 # G5 Phase 1 — shared authority decision boundary
 
 Status: **BLOCKED BY MISSING IDENTITY / ENTITLEMENT DECISIONS**. This is a documentation-only

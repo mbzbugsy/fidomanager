@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "eu.fidomanager.desktop.mas",
+  "build": {
+    "features": ["macos-app-sandbox", "macos-shared-authority"]
+  },
+  "bundle": {
+    "macOS": {
+      "signingIdentity": null,
+      "entitlements": "../packaging/macos-production/store-app.entitlements"
+    }
+  }
+}

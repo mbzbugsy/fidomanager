@@ -1,3 +1,9 @@
+#[cfg(all(
+    feature = "macos-shared-authority",
+    not(any(feature = "macos-release-signing", feature = "macos-app-sandbox"))
+))]
+compile_error!("shared authority requires a production channel feature");
+
 fn main() {
     let attributes =
         tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[

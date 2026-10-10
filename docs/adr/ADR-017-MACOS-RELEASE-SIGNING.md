@@ -106,7 +106,7 @@ at `15ae91c` [REPO]:
 | --- | --- | --- |
 | D1 | The shipped code set is exactly two Mach-O executables: the main app and `Contents/MacOS/fido-worker`. Tauri adds no other nested code in this configuration. Anything else fails the release. | [POLICY]; matches [REPO] M7.1 checker and signer |
 | D2 | Sign inside-out: worker, then the release-worker identity record (D14), then bundle, then DMG. Never sign with `--deep`. | [APPLE] + [POLICY] |
-| D3 | Hardened Runtime on both executables. **Zero entitlements** on both. No exception entitlement may be added without its own ADR. | [APPLE] requirement + [POLICY] |
+| D3 | Hardened Runtime on both executables. **Exact App Group grant on the main app (section 2.1); zero entitlements on the worker**. No exception entitlement may be added without its own ADR. | [APPLE] requirement + [POLICY] |
 | D4 | Every signature carries a secure timestamp from `timestamp.apple.com`. Without one, signing fails; there is no unsigned fallback. | [APPLE] + [POLICY] |
 | D5 | Before **every** spawn, the app validates the worker against a compiled-in **publisher** requirement (Apple-issued Developer ID Application, a fixed Team ID, identifier `eu.fidomanager.desktop.fido-worker`) **and** against the exact per-release worker identity from D14. It validates statically before exec, then dynamically against the running child before any message is sent. | [POLICY], built on [APPLE] APIs |
 | D6 | The verification mode is fixed at compile time. Release builds enforce it, and the release checks prove the shipped binary is an enforcing build. Nothing at runtime can select a weaker mode. | [POLICY] |
@@ -121,39 +121,47 @@ at `15ae91c` [REPO]:
 | D15 | **Signing-environment independence.** The credential-bearing job runs only a minimal signing/notarization driver plus Apple OS tools. The driver is checked out from a separate, protected repository at a pinned full commit SHA, never from the candidate commit. The candidate app is handled as data only. | [POLICY] |
 | D16 | **Immutable publication.** Publication is bound to an explicit authorization tuple (section 7.6). The authorization record never vouches for itself: its digest `D7` travels through trusted job outputs and its provenance attestation is verified against the exact run before it is used. GitHub immutable releases are required and confirmed by a least-privilege policy check. Every byte-changing step has its own input and output digest (section 9.4). Tags are never moved or reused. | [GITHUB] + [POLICY] |
 
-### 2.1 G5 Phase 1 decision boundary (Issue #38)
+### 2.1 G5 Phase 1 — approved production authority policy
 
-[PROPOSED, BLOCKED] The first-release shared authority design in
-[Issue #38](https://github.com/mbzbugsy/fidomanager/issues/38) requires a narrowly scoped amendment
-to D3: the production Developer ID **main app** would carry exactly
-`com.apple.security.application-groups` with the single reviewed Team-ID-prefixed group identifier.
-The Developer ID worker retains **zero entitlements**. The production sandbox app would carry
-the same group grant in addition to its reviewed sandbox grants; its worker retains only the
-existing sandbox/inherit pair. No broad exception or worker group grant is proposed.
+[POLICY] The [maintainer decision](https://github.com/mbzbugsy/fidomanager/pull/40#issuecomment-6102688283)
+under [Issue #38](https://github.com/mbzbugsy/fidomanager/issues/38) provisions the existing sole
+`MACOS_RELEASE_TEAM_ID` source constant with `7VGK9SN42B`. This approval is not evidence of
+certificate/profile registration or successful signed access. No credentials were inspected.
+Developer ID keeps app `eu.fidomanager.desktop` and worker
+`eu.fidomanager.desktop.fido-worker`. Store app `eu.fidomanager.desktop.mas` is separate; its
+per-release worker signing identity is a MAS.2/G4 decision, not inferred from that app ID.
 
-This is not an active entitlement allowlist change. Latest main (`a661d4c`) pins
-`MACOS_RELEASE_TEAM_ID: Option<&str> = None` in
-`crates/fido-service/src/worker_authenticity.rs`. Its source contract deliberately refuses an
-optimized enforcing build until that one reviewed identity is provisioned; debug release startup
-also fails closed. There is no reviewed Team ID to reuse for an exact group grant today.
-The exact App Group identifier and production Mac App Store bundle identifier have not been
-pinned either. A fake Team ID, an environment-provided value, or the ad-hoc `.sandboxtest`
-identifier must not fill that gap. D3's current zero-entitlement enforcement remains unchanged
-until these decisions are reviewed and the exact checker/signing amendments are implemented.
+D3 is amended narrowly: Developer ID **main** carries exactly
+`com.apple.security.application-groups = ["7VGK9SN42B.eu.fidomanager.authority"]`;
+Developer ID **worker** retains zero entitlements. The production sandbox main adds this same
+group to its three existing sandbox grants; its worker retains only sandbox/inherit. No worker
+group grant or signing exception is allowed. `packaging/macos-production/`, the production
+Tauri overlays, source policy, runtime CoreFoundation parser and bundle/main checkers pin these
+exact values. Profile-added store entitlements are still G1 work and are currently rejected.
 
-Future G5 implementation must reuse the existing identity constant, resolve/open the group with
-the trusted OS API, and acquire its shared flock before recovery/UI/IPC/worker initialization.
-The unchanged schema-1 journal and durable storage algorithms remain the persistence contract.
-Apple Development feasibility, actual Developer ID entitlement access/notarization/Gatekeeper,
-and TestFlight/App Store Connect sharing/provisioning remain separate signed gates.
-The maintainer's real pre-release recovery state requires a separately reviewed human-controlled
-transition; G5 must not implicitly bypass it. This decision-boundary change neither accesses
-that state nor implements a migration or production startup path.
+`macos-release-signing` now implies `macos-shared-authority`; a shared-only app feature selection
+is a compilation error. The store overlay selects sandbox plus shared authority and deliberately
+refuses worker/UI startup until G4 is implemented. Ad-hoc packaging selects neither production
+feature and retains zero Developer ID-path grants and disposable sandbox identities.
 
-PR #36 also amends this ADR, and PR #35 changes the bundle checker/provenance and CI policy.
-Their branches remain untouched. The eventual G5 D3 amendment must reconcile their policy text
-and exact entitlement checks on the reviewed main history; it cannot weaken the worker contract
-or pretend their independent release gates are complete.
+Production self-validation before group resolution requires an Apple-issued signature with the
+approved identifier and Team, Hardened Runtime, dynamic valid/kill flags, and exact main grants.
+ADR-017's stronger Developer ID leaf requirement and authenticated per-release worker record
+continue at launcher initialization. That self-check now admits precisely the main group grant;
+all worker checks still reject entitlements. Shared-root acquisition and recovery loading precede
+launcher initialization. No runtime environment/renderer/bundle-ID inference selects authority.
+
+The root comes from Foundation, is opened without following symlinks and is pinned for the flock
+and existing journal namespace. Durable replacement/synchronization algorithms and schema 1 are
+unchanged. Signed permissions/root traversal, Apple Development feasibility, Developer ID group
+access/notarization/Gatekeeper and store provisioning/sharing remain validation gates. G5 stays
+OPEN; implementation tests cannot substitute for them. The maintainer's old unresolved state
+needs a separately reviewed human-controlled transition before launch against a new authority.
+
+Read-only coordination with drafts #35/#36 identified overlap in the bundle checker and this ADR.
+Their signing-driver/preflight policies must reconcile the main-only grant while retaining zero
+worker grants, publisher and exact-release checks. Neither PR nor the release-signer repository
+was modified. See [Phase 1 evidence](../validation/G5-phase1-shared-authority.md).
 
 ## 3. Code set and nested code
 
@@ -238,7 +246,7 @@ scripts.
 
 # 3. Bundle (main executable, resource seal incl. the record, Info.plist binding)
 /usr/bin/codesign --force --sign "$IDENTITY_SHA1" --keychain "$KC" --timestamp \
-  --options runtime "Fido Manager.app"
+  --options runtime --entitlements "$DRIVER_G5_MAIN_ENTITLEMENTS" "Fido Manager.app"
 #    re-read the record from the sealed bundle and confirm that its cdhashes equal the worker's
 #    CDHash in the signed bundle and that its SHA-256 equals the plist key;
 #    codesign --verify --strict --deep (seal covers record + worker; signature binds Info.plist)
@@ -251,9 +259,10 @@ scripts.
 - The identity is the **SHA-1 fingerprint** of the certificate, pinned as an environment
   variable, not the display name. [APPLE] recommends the hash when names could be ambiguous.
   [POLICY] The fingerprint also binds the job to the one certificate the maintainers approved.
-- No `--entitlements`, no `--requirements` (custom DR) and no `--deep` while signing.
+- Only the main receives `--entitlements` with the driver-owned exact G5 group policy. Workers
+  receive none. No `--requirements` (custom DR) and no `--deep` while signing.
   [POLICY] We keep codesign's default Developer ID designated requirement. TN3127 advises against
-  hand-writing DRs, and we have no Mac App Store variant that would need a mutually compatible DR.
+  hand-writing DRs; the distinct store app identity does not require a mutually compatible DR.
 - `--keychain` restricts the identity search to the ephemeral keychain. [EMPIRICAL E9] Confirm
   that codesign finds the identity there without adding the keychain to the user search list. If
   it does not, add it to the search list for the job and restore the list in `always()`.
@@ -276,7 +285,8 @@ scripts.
 
 ### 3.3 Entitlement policy
 
-[POLICY] **Zero entitlements** on the main app and the worker, in every build.
+[POLICY] Production Developer ID main carries **exactly the section 2.1 App Group grant**.
+The worker and ad-hoc Developer ID-path packaging retain **zero entitlements**.
 
 - [APPLE] Hardened Runtime is required for notarization. Exception entitlements are opt-in, and
   Apple says to "use only the entitlements that are absolutely necessary".
@@ -291,8 +301,8 @@ scripts.
   the signed worker or the app.
 - No App Sandbox in this phase (architecture plan section 37, M7.0 section 8). Adopting the
   sandbox later would be a separate ADR.
-- [POLICY] Signature checks fail if any entitlement is present (`check-macos-bundle.py` already
-  enforces this). They also fail if the code signature flags lack `runtime` on either executable.
+- [POLICY] Signature checks require exactly the section 2.1 App Group grant on the main app
+  and reject every worker entitlement (`check-macos-bundle.py` and runtime self-validation). They also fail if the code signature flags lack `runtime` on either executable.
 
 ## 4. Verification commands and where each runs
 
@@ -309,7 +319,7 @@ by default it executes the worker and compiles and loads a test dylib (section 1
 | Enforcing-build marker | byte search of the main binary for the marker (5.6) | Driver (pre-sign, data only) and Verify | present; its Team ID and release ID equal the driver's pinned Team ID and the tag's version/commit |
 | Deep strict verify | `codesign --verify --strict --deep --verbose=4 "Fido Manager.app"` | Driver (post-sign) and Verify | exit 0 [APPLE: `--strict` matches notarization's restrictiveness] |
 | Signature details | `codesign -dvvv "…/fidomanager-app"` and `"…/fido-worker"` | Driver and Verify | `Authority=Developer ID Application: … (TEAMID)`, then `Developer ID Certification Authority`, then `Apple Root CA`; `TeamIdentifier=$EXPECTED_TEAM_ID`; `Timestamp=` present, **not** `Signed Time=` [APPLE]; `flags=0x10000(runtime)`; expected `Identifier=` |
-| Entitlements | `codesign -d --entitlements - --xml <exe>` | Driver and Verify | empty |
+| Entitlements | `codesign -d --entitlements - --xml <exe>` | Driver and Verify | main: exact section 2.1 group grant; worker: empty |
 | Worker publisher requirement | `codesign --verify --strict -R='=<worker publisher requirement, 5.1>' "…/fido-worker"` | Driver and Verify | `explicit requirement satisfied` |
 | Worker exact requirement | same, with `… and cdhash H"<record cdhash>"` | Driver (post-sign) and Verify | satisfied; and **not** satisfied by any other cdhash (Verify negative test) |
 | Record ↔ worker | parse `release-worker-identity.json`; compare with `codesign -d -vvv --arch <a>` `CDHash`/`CandidateCDHashFull` and `shasum -a 256` | Driver (post-sign, post-staple) and Verify | all equal |
@@ -687,6 +697,7 @@ protected job. It is never derived at runtime from whatever worker file happens 
 
 ```text
 S1  self = SecCodeCopySelf(); SecCodeCheckValidity(self, DYNAMIC_FLAGS(os), APP_REQ)
+    require runtime and exact main group entitlements (section 2.1)
     selfUnique = kSecCodeInfoUnique(self)                         # kernel-backed running identity
 S2  bundle = SecCodeCopyStaticCode(self)                          # [APPLE] for bundles: the whole bundle
     require kSecCodeInfoUnique(bundle main executable) == selfUnique
@@ -1156,7 +1167,7 @@ sign-notarize   (driver @ pinned SHA; candidate = data; OS tools by absolute pat
   6  write Contents/Resources/release-worker-identity.json (5.8); RID = its SHA-256;
      add FidoManagerReleaseWorkerIdentitySHA256 = RID to Info.plist (only that key changes)
   7  codesign bundle (3.2 step 3); codesign --verify --strict --deep; post-sign data checks
-     (section 4 "Driver" rows: chain, timestamp, runtime, zero entitlements, identifiers,
+     (section 4 "Driver" rows: chain, timestamp, runtime, exact main group grant and zero worker entitlements, identifiers,
      record ↔ worker CDHash, record SHA-256 == Info.plist digest, exact requirement)
   8  ditto -c -k --keepParent app → app-signed.zip; D2 = SHA-256 (notarization input #1)
   9  notarytool submit app-signed.zip --key … --wait --timeout 45m --output-format json
@@ -1504,7 +1515,7 @@ against the worker's `CDHash`; Verify repeats both checks. The record is a seale
                            "scope": "native libraries only (libfido2, OpenSSL, libcbor)" },
   "signing": {
     "team_id": "XXXXXXXXXX", "identity_sha1": "…", "authority": "Developer ID Application: …",
-    "hardened_runtime": true, "entitlements": {},
+    "hardened_runtime": true, "entitlements": { "main": { "com.apple.security.application-groups": ["7VGK9SN42B.eu.fidomanager.authority"] }, "worker": {} },
     "cdhash": { "fidomanager-app": { "arm64": "…" }, "fido-worker": { "arm64": "…" } },
     "worker_publisher_requirement": "anchor apple generic and …",
     "release_worker_identity": { "sha256": "<RID, also in Info.plist>", "worker_file_sha256": "…" },
@@ -1736,7 +1747,8 @@ The existing `ci.yml` stays ad-hoc and secret-free. The release workflow is a ne
 
 ## 13. Unresolved empirical questions
 
-None of these has been answered yet: no Developer ID identity, notarization or Gatekeeper run
+The source Team ID is now maintainer-approved (section 2.1). These empirical questions remain
+unanswered: no Developer ID-signed validation, notarization or Gatekeeper run
 exists. "Gate" says what an unfavourable or missing answer means:
 
 - **Release gate:** M7.2 does not ship until it is answered favourably.

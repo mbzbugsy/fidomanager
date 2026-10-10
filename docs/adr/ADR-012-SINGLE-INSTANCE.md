@@ -28,20 +28,37 @@ position, a container-local exclusive lock instead of the plugin. The contract a
 unchanged: one authority per user session (per container), and second-launch input is never
 processed.
 
-## Proposed G5 amendment — blocked at the identity decision
+## G5 Phase 1 amendment — production macOS authority
 
-For the first public macOS release, [Issue #38](https://github.com/mbzbugsy/fidomanager/issues/38)
-proposes one process-lifetime flock authority in one Team-ID-prefixed App Group root shared by
-both production channels and their schema-1 recovery journal. Acquire and retain this lock
-before recovery, UI, IPC or worker initialization. A second launch exits before acquiring any
-authority; socket-based focus may remain only if demonstrably non-authoritative. Independent
-channel locks do not enforce exclusion across channels. This remains a coordination mechanism
-against competing application instances, not protection against other local FIDO clients.
+[Issue #38](https://github.com/mbzbugsy/fidomanager/issues/38) and the
+[maintainer decision](https://github.com/mbzbugsy/fidomanager/pull/40#issuecomment-6102688283)
+approve Team `7VGK9SN42B`, App Group `7VGK9SN42B.eu.fidomanager.authority`, Developer ID app
+`eu.fidomanager.desktop` and store app `eu.fidomanager.desktop.mas`. The two installable apps
+share one schema-1 journal and one process-lifetime `flock`; independent channel locks do not
+exclude cross-channel concurrency.
 
-The implementation is BLOCKED: latest main's reviewed `MACOS_RELEASE_TEAM_ID` is `None`, and the
-exact App Group and production Mac App Store bundle identifier are undecided. No new authority
-is enabled by this proposal. Missing, inaccessible or unsafe shared storage must fail closed,
-without an alternate root. Current unsigned/ad-hoc storage remains isolated; Windows behavior
-is unchanged. The maintainer's existing pre-release recovery state must not be implicitly
-bypassed; switching it requires a separately reviewed human-controlled transition. No general
-migration engine, downgrade sentinel, schema 2 or multi-incident UI is proposed.
+Production startup validates its signed main identity and exact entitlement policy, resolves the
+root with Foundation's `containerURLForSecurityApplicationGroupIdentifier`, opens every path
+component without following symlinks, and checks the existing root is owned by the effective user
+with mode `0700` and no extended ACL. It pins that directory descriptor and acquires the shared lock before recovery,
+UI, IPC, plugins, discovery or worker initialization. Lock and recovery namespace creation both
+use that same descriptor. A contender exits before journal initialization; unavailable/unsafe
+storage exits without a substitute root. Lock descriptors are close-on-exec and retained through
+app shutdown/worker cleanup until actual process termination; process death releases the lock without deleting its file.
+
+This coordinates cooperating applications. It does not protect against a same-user process
+that can deliberately remove/replace private directories or lock files, other local FIDO clients,
+or privileged processes. Descriptor pinning prevents a path replacement from splitting lock
+and journal within a running authority; it does not prove continuity after an externally replaced
+container. Signed access, cross-channel contention and actual OS container permissions remain
+G5 validation gates, not conclusions from synthetic tests.
+
+Default unsigned builds retain the plugin and their existing storage. Ad-hoc sandbox tests retain
+their disposable container-local lock. Neither enables the production shared-authority feature;
+Windows behavior is unchanged. The production sandbox path stops before worker initialization
+until MAS.2/G4 establishes store worker authenticity.
+
+G5 remains OPEN pending signed validation. The maintainer's unresolved pre-release journal was
+not accessed. A separately reviewed human-controlled transition is required before that install
+switches authority; this implementation provides no migration, downgrade sentinel, schema 2 or
+multi-incident UI. See [Phase 1 evidence](../validation/G5-phase1-shared-authority.md).

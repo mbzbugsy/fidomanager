@@ -20,6 +20,7 @@ try {
   });
   cpSync('src', join(fixture, 'src'), { recursive: true });
   cpSync('crates', join(fixture, 'crates'), { recursive: true });
+  cpSync('scripts', join(fixture, 'scripts'), { recursive: true });
   cpSync('packaging', join(fixture, 'packaging'), { recursive: true });
   const manifestPath = join(fixture, 'src-tauri/Cargo.toml');
   const manifest = readFileSync(manifestPath, 'utf8');
@@ -773,7 +774,7 @@ try {
     'src-tauri/src/lib.rs',
     (text) =>
       text.replace(
-        '#[cfg(not(feature = "macos-app-sandbox"))]\n    let builder = builder.plugin(',
+        '#[cfg(not(any(feature = "macos-app-sandbox", feature = "macos-shared-authority")))]\n    let builder = builder.plugin(',
         'let builder = builder.plugin(',
       ),
     /Exactly one single-instance mechanism per flavor/,
@@ -846,6 +847,55 @@ try {
       ),
     /MAS\.1 recovery fixture must remain macOS test-only/,
     'MAS.1 fixture compiled into the production service',
+  );
+  mutate(
+    'src-tauri/src/lib.rs',
+    (text) =>
+      text.replace(
+        'std::process::exit(0); // kernel releases shared authority only at actual process termination',
+        'drop(shared_authority);',
+      ),
+    /G5 shared lock and recovery/,
+    'G5 process-lifetime lock removed',
+  );
+  mutate(
+    'src-tauri/src/lib.rs',
+    (text) => text.replace('    enforce_store_worker_gate();', ''),
+    /G5 shared lock and recovery/,
+    'production store worker gate removed',
+  );
+  mutate(
+    'crates/fido-service/src/shared_authority_policy.rs',
+    (text) =>
+      text.replace(
+        '7VGK9SN42B.eu.fidomanager.authority',
+        'OTHERTEAM0.eu.fidomanager.authority',
+      ),
+    /Exact G5 production authority policy/,
+    'unapproved group identifier',
+  );
+  mutate(
+    'src-tauri/tauri.macos-store.conf.json',
+    (text) =>
+      text.replace('eu.fidomanager.desktop.mas', 'eu.fidomanager.desktop'),
+    /Exact G5 production authority policy/,
+    'store identity conflated with Developer ID',
+  );
+  mutate(
+    'crates/fido-service/src/macos_app_group.rs',
+    (text) =>
+      text.replace(
+        'containerURLForSecurityApplicationGroupIdentifier',
+        'constructed_group_path',
+      ),
+    /trusted macOS API/,
+    'trusted group API removed',
+  );
+  mutate(
+    'crates/fido-service/src/shared_authority.rs',
+    (text) => text.replace('me.check_validity(', 'std::env::var('),
+    /G5 production resolution/,
+    'runtime environment authority selection',
   );
   assert.equal(check().status, 0, 'All restored M4 fixtures must pass.');
   console.log(
