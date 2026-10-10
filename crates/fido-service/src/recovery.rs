@@ -327,6 +327,10 @@ impl RecoveryJournal {
 
 pub use fido_auth::mutation::PinRecoveryPolicy;
 
+// MAS.1 is an ignored libtest fixture, never linked into the production app or worker.
+#[cfg(all(test, target_os = "macos"))]
+mod sandbox_persistence;
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

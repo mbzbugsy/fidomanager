@@ -1,0 +1,991 @@
+{
+  "identity": "eu.fidomanager.desktop.mas1recoverytest",
+  "run_id": "0ce0e735dc8b42069549b7adc64f9c94",
+  "started_utc": "2026-10-10T20:09:06.667599+00:00",
+  "macos": "26.5.2",
+  "sip": "System Integrity Protection status: enabled.",
+  "build": {
+    "identifier": "eu.fidomanager.desktop.mas1recoverytest",
+    "app_entitlements": {
+      "com.apple.security.app-sandbox": true,
+      "com.apple.security.device.usb": true,
+      "com.apple.security.network.client": true
+    },
+    "child_entitlements": {
+      "com.apple.security.app-sandbox": true,
+      "com.apple.security.inherit": true
+    },
+    "signature": "ad-hoc + Hardened Runtime",
+    "native_fido_linkage": false,
+    "binary_sha256": {
+      "mas1-recovery-test": "e6c2943bd45465a24b4b042e072fe265c2ccd7b27b1e73a504eea83853354bef",
+      "mas1-inherit-probe": "0394d9367cc167f3f59a2b440318ce49f0d7281abc32a67c193b7f75e1a53053"
+    },
+    "source_sha256": {
+      "crates/fido-platform/src/recovery_file.rs": "c697631648a6e95be5b673119f0a20e7a1c5522b73f696bd1cd3fa48e61b2576",
+      "crates/fido-platform/src/instance_lock.rs": "94d3cf7c6c380770b3b63cf75ee89284b716ed4eaad1b0874fa9cdfdc6121f2d",
+      "crates/fido-service/src/recovery.rs": "69296f7ccf30a35f0a7553184d829a74bc6852734ddc0f23efb18227e6e3fd62",
+      "crates/fido-service/src/authentication.rs": "c5d3476b60859d251fe36bcba4f00e69a01bc6a2797f1178f7a8897f8a40d19f",
+      "crates/fido-service/src/recovery/sandbox_persistence.rs": "44cf83adb689bc7b7b791df98dbb0c3eec2c20dea05d9b8acd0eb1163bea66b4"
+    }
+  },
+  "checks": [
+    {
+      "case": "unsandboxed-refused-before-storage",
+      "result": "PASS",
+      "kernel": {
+        "cs_flags": 570556929,
+        "cs_status": 0,
+        "event": "kernel",
+        "pid": 68236,
+        "sandboxed": 0
+      }
+    },
+    {
+      "case": "dispatch",
+      "result": "PASS",
+      "termination": "SIGKILL after durable write acknowledgement",
+      "seed": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68237,
+          "sandboxed": 1
+        },
+        {
+          "admission": "Barrier",
+          "case": "dispatch",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": "dispatch_capable",
+          "poisoned": false
+        },
+        {
+          "admission": "Barrier",
+          "bytes": 200,
+          "directory_mode": "0700",
+          "event": "record",
+          "record": {
+            "application": "fidomanager-m4-v1",
+            "created_unix_secs": 1700000000,
+            "incident": "7d8a8619655f2ca1c18c5095f61ea999",
+            "operation": "delete_credential",
+            "phase": "dispatch_capable",
+            "resolution": null,
+            "schema": 1
+          },
+          "record_mode": "0600",
+          "root": "~/Library/Containers/eu.fidomanager.desktop.mas1recoverytest/Data/Library/Application Support/eu.fidomanager.desktop.mas1recoverytest/runs/0ce0e735dc8b42069549b7adc64f9c94/dispatch",
+          "sha256": "b2f665d524a434d64317f301c48ee5b49463c23ec427e82f7b31d6c43fc15952",
+          "step": "seed:dispatch",
+          "uid": 501
+        }
+      ],
+      "reload": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68238,
+          "sandboxed": 1
+        },
+        {
+          "admission": "Barrier",
+          "case": "dispatch",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": "dispatch_capable",
+          "poisoned": false
+        },
+        {
+          "admission": "Barrier",
+          "bytes": 200,
+          "directory_mode": "0700",
+          "event": "record",
+          "record": {
+            "application": "fidomanager-m4-v1",
+            "created_unix_secs": 1700000000,
+            "incident": "7d8a8619655f2ca1c18c5095f61ea999",
+            "operation": "delete_credential",
+            "phase": "dispatch_capable",
+            "resolution": null,
+            "schema": 1
+          },
+          "record_mode": "0600",
+          "root": "~/Library/Containers/eu.fidomanager.desktop.mas1recoverytest/Data/Library/Application Support/eu.fidomanager.desktop.mas1recoverytest/runs/0ce0e735dc8b42069549b7adc64f9c94/dispatch",
+          "sha256": "b2f665d524a434d64317f301c48ee5b49463c23ec427e82f7b31d6c43fc15952",
+          "step": "reload:dispatch",
+          "uid": 501
+        }
+      ]
+    },
+    {
+      "case": "pending",
+      "result": "PASS",
+      "termination": "SIGKILL after durable write acknowledgement",
+      "seed": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68239,
+          "sandboxed": 1
+        },
+        {
+          "admission": "Open",
+          "case": "pending",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": "pending",
+          "poisoned": false
+        },
+        {
+          "admission": "Open",
+          "bytes": 191,
+          "directory_mode": "0700",
+          "event": "record",
+          "record": {
+            "application": "fidomanager-m4-v1",
+            "created_unix_secs": 1700000000,
+            "incident": "6ca3f48cfc69d0ff4629b5a6b1476785",
+            "operation": "delete_credential",
+            "phase": "pending",
+            "resolution": null,
+            "schema": 1
+          },
+          "record_mode": "0600",
+          "root": "~/Library/Containers/eu.fidomanager.desktop.mas1recoverytest/Data/Library/Application Support/eu.fidomanager.desktop.mas1recoverytest/runs/0ce0e735dc8b42069549b7adc64f9c94/pending",
+          "sha256": "11560a7126ad61d69a43fa1095e1eca04b592edb4bb61c0b7220027bdf4a9af8",
+          "step": "seed:pending",
+          "uid": 501
+        }
+      ],
+      "reload": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68240,
+          "sandboxed": 1
+        },
+        {
+          "admission": "Open",
+          "case": "pending",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": "pending",
+          "poisoned": false
+        },
+        {
+          "admission": "Open",
+          "bytes": 191,
+          "directory_mode": "0700",
+          "event": "record",
+          "record": {
+            "application": "fidomanager-m4-v1",
+            "created_unix_secs": 1700000000,
+            "incident": "6ca3f48cfc69d0ff4629b5a6b1476785",
+            "operation": "delete_credential",
+            "phase": "pending",
+            "resolution": null,
+            "schema": 1
+          },
+          "record_mode": "0600",
+          "root": "~/Library/Containers/eu.fidomanager.desktop.mas1recoverytest/Data/Library/Application Support/eu.fidomanager.desktop.mas1recoverytest/runs/0ce0e735dc8b42069549b7adc64f9c94/pending",
+          "sha256": "11560a7126ad61d69a43fa1095e1eca04b592edb4bb61c0b7220027bdf4a9af8",
+          "step": "reload:pending",
+          "uid": 501
+        }
+      ]
+    },
+    {
+      "case": "not-dispatched",
+      "result": "PASS",
+      "termination": "normal process exit",
+      "seed": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68241,
+          "sandboxed": 1
+        },
+        {
+          "admission": "Open",
+          "case": "not-dispatched",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": "resolved",
+          "poisoned": false
+        },
+        {
+          "admission": "Open",
+          "bytes": 204,
+          "directory_mode": "0700",
+          "event": "record",
+          "record": {
+            "application": "fidomanager-m4-v1",
+            "created_unix_secs": 1700000000,
+            "incident": "cfa449fd8e0ce94d833aed4ee4a798df",
+            "operation": "delete_credential",
+            "phase": "resolved",
+            "resolution": "not_dispatched",
+            "schema": 1
+          },
+          "record_mode": "0600",
+          "root": "~/Library/Containers/eu.fidomanager.desktop.mas1recoverytest/Data/Library/Application Support/eu.fidomanager.desktop.mas1recoverytest/runs/0ce0e735dc8b42069549b7adc64f9c94/not-dispatched",
+          "sha256": "2868f9374cb00cbb187333015823e55d52e7bc8d2136efe075cdcc8376e4f8d8",
+          "step": "seed:not-dispatched",
+          "uid": 501
+        }
+      ],
+      "reload": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68242,
+          "sandboxed": 1
+        },
+        {
+          "admission": "Open",
+          "case": "not-dispatched",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": "resolved",
+          "poisoned": false
+        },
+        {
+          "admission": "Open",
+          "bytes": 204,
+          "directory_mode": "0700",
+          "event": "record",
+          "record": {
+            "application": "fidomanager-m4-v1",
+            "created_unix_secs": 1700000000,
+            "incident": "cfa449fd8e0ce94d833aed4ee4a798df",
+            "operation": "delete_credential",
+            "phase": "resolved",
+            "resolution": "not_dispatched",
+            "schema": 1
+          },
+          "record_mode": "0600",
+          "root": "~/Library/Containers/eu.fidomanager.desktop.mas1recoverytest/Data/Library/Application Support/eu.fidomanager.desktop.mas1recoverytest/runs/0ce0e735dc8b42069549b7adc64f9c94/not-dispatched",
+          "sha256": "2868f9374cb00cbb187333015823e55d52e7bc8d2136efe075cdcc8376e4f8d8",
+          "step": "reload:not-dispatched",
+          "uid": 501
+        }
+      ]
+    },
+    {
+      "case": "rejected",
+      "result": "PASS",
+      "termination": "normal process exit",
+      "seed": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68243,
+          "sandboxed": 1
+        },
+        {
+          "admission": "Open",
+          "case": "rejected",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": "resolved",
+          "poisoned": false
+        },
+        {
+          "admission": "Open",
+          "bytes": 198,
+          "directory_mode": "0700",
+          "event": "record",
+          "record": {
+            "application": "fidomanager-m4-v1",
+            "created_unix_secs": 1700000000,
+            "incident": "78fdcd0be454d028222e6fab6d3f5e3c",
+            "operation": "delete_credential",
+            "phase": "resolved",
+            "resolution": "rejected",
+            "schema": 1
+          },
+          "record_mode": "0600",
+          "root": "~/Library/Containers/eu.fidomanager.desktop.mas1recoverytest/Data/Library/Application Support/eu.fidomanager.desktop.mas1recoverytest/runs/0ce0e735dc8b42069549b7adc64f9c94/rejected",
+          "sha256": "4427644db8968a060f58f25d7209262fa85280a5f3c6ce4425a4fd99f3cd1dbd",
+          "step": "seed:rejected",
+          "uid": 501
+        }
+      ],
+      "reload": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68244,
+          "sandboxed": 1
+        },
+        {
+          "admission": "Open",
+          "case": "rejected",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": "resolved",
+          "poisoned": false
+        },
+        {
+          "admission": "Open",
+          "bytes": 198,
+          "directory_mode": "0700",
+          "event": "record",
+          "record": {
+            "application": "fidomanager-m4-v1",
+            "created_unix_secs": 1700000000,
+            "incident": "78fdcd0be454d028222e6fab6d3f5e3c",
+            "operation": "delete_credential",
+            "phase": "resolved",
+            "resolution": "rejected",
+            "schema": 1
+          },
+          "record_mode": "0600",
+          "root": "~/Library/Containers/eu.fidomanager.desktop.mas1recoverytest/Data/Library/Application Support/eu.fidomanager.desktop.mas1recoverytest/runs/0ce0e735dc8b42069549b7adc64f9c94/rejected",
+          "sha256": "4427644db8968a060f58f25d7209262fa85280a5f3c6ce4425a4fd99f3cd1dbd",
+          "step": "reload:rejected",
+          "uid": 501
+        }
+      ]
+    },
+    {
+      "case": "confirmed-successful",
+      "result": "PASS",
+      "termination": "normal process exit",
+      "seed": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68245,
+          "sandboxed": 1
+        },
+        {
+          "admission": "Open",
+          "case": "confirmed-successful",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": "resolved",
+          "poisoned": false
+        },
+        {
+          "admission": "Open",
+          "bytes": 210,
+          "directory_mode": "0700",
+          "event": "record",
+          "record": {
+            "application": "fidomanager-m4-v1",
+            "created_unix_secs": 1700000000,
+            "incident": "559dffe363c18ccd7a59f7cbf7bf48ef",
+            "operation": "delete_credential",
+            "phase": "resolved",
+            "resolution": "confirmed_successful",
+            "schema": 1
+          },
+          "record_mode": "0600",
+          "root": "~/Library/Containers/eu.fidomanager.desktop.mas1recoverytest/Data/Library/Application Support/eu.fidomanager.desktop.mas1recoverytest/runs/0ce0e735dc8b42069549b7adc64f9c94/confirmed-successful",
+          "sha256": "ba6c74d16d2ca24b2d78707b750d0748944054d640f601edabce25e94e4b52e7",
+          "step": "seed:confirmed-successful",
+          "uid": 501
+        }
+      ],
+      "reload": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68246,
+          "sandboxed": 1
+        },
+        {
+          "admission": "Open",
+          "case": "confirmed-successful",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": "resolved",
+          "poisoned": false
+        },
+        {
+          "admission": "Open",
+          "bytes": 210,
+          "directory_mode": "0700",
+          "event": "record",
+          "record": {
+            "application": "fidomanager-m4-v1",
+            "created_unix_secs": 1700000000,
+            "incident": "559dffe363c18ccd7a59f7cbf7bf48ef",
+            "operation": "delete_credential",
+            "phase": "resolved",
+            "resolution": "confirmed_successful",
+            "schema": 1
+          },
+          "record_mode": "0600",
+          "root": "~/Library/Containers/eu.fidomanager.desktop.mas1recoverytest/Data/Library/Application Support/eu.fidomanager.desktop.mas1recoverytest/runs/0ce0e735dc8b42069549b7adc64f9c94/confirmed-successful",
+          "sha256": "ba6c74d16d2ca24b2d78707b750d0748944054d640f601edabce25e94e4b52e7",
+          "step": "reload:confirmed-successful",
+          "uid": 501
+        }
+      ]
+    },
+    {
+      "case": "acknowledged-unknown",
+      "result": "PASS",
+      "termination": "normal process exit",
+      "seed": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68247,
+          "sandboxed": 1
+        },
+        {
+          "admission": "Open",
+          "case": "acknowledged-unknown",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": "resolved",
+          "poisoned": false
+        },
+        {
+          "admission": "Open",
+          "bytes": 210,
+          "directory_mode": "0700",
+          "event": "record",
+          "record": {
+            "application": "fidomanager-m4-v1",
+            "created_unix_secs": 1700000000,
+            "incident": "5bf06d58f96ae26b74893056086a0aa2",
+            "operation": "delete_credential",
+            "phase": "resolved",
+            "resolution": "acknowledged_unknown",
+            "schema": 1
+          },
+          "record_mode": "0600",
+          "root": "~/Library/Containers/eu.fidomanager.desktop.mas1recoverytest/Data/Library/Application Support/eu.fidomanager.desktop.mas1recoverytest/runs/0ce0e735dc8b42069549b7adc64f9c94/acknowledged-unknown",
+          "sha256": "75d7a731c6d8770a017521fd3a3ed1199d2d521db440fcaec9a961e9b62d4662",
+          "step": "seed:acknowledged-unknown",
+          "uid": 501
+        }
+      ],
+      "reload": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68248,
+          "sandboxed": 1
+        },
+        {
+          "admission": "Open",
+          "case": "acknowledged-unknown",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": "resolved",
+          "poisoned": false
+        },
+        {
+          "admission": "Open",
+          "bytes": 210,
+          "directory_mode": "0700",
+          "event": "record",
+          "record": {
+            "application": "fidomanager-m4-v1",
+            "created_unix_secs": 1700000000,
+            "incident": "5bf06d58f96ae26b74893056086a0aa2",
+            "operation": "delete_credential",
+            "phase": "resolved",
+            "resolution": "acknowledged_unknown",
+            "schema": 1
+          },
+          "record_mode": "0600",
+          "root": "~/Library/Containers/eu.fidomanager.desktop.mas1recoverytest/Data/Library/Application Support/eu.fidomanager.desktop.mas1recoverytest/runs/0ce0e735dc8b42069549b7adc64f9c94/acknowledged-unknown",
+          "sha256": "75d7a731c6d8770a017521fd3a3ed1199d2d521db440fcaec9a961e9b62d4662",
+          "step": "reload:acknowledged-unknown",
+          "uid": 501
+        }
+      ]
+    },
+    {
+      "case": "negative-matrix",
+      "result": "PASS",
+      "evidence": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68249,
+          "sandboxed": 1
+        },
+        {
+          "admission": "Barrier",
+          "case": "malformed",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": true
+        },
+        {
+          "barrier": true,
+          "case": "malformed",
+          "event": "negative",
+          "ordinary_workflows_refused": 6,
+          "record_unchanged": true
+        },
+        {
+          "admission": "Barrier",
+          "case": "corrupted-utf8",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": true
+        },
+        {
+          "barrier": true,
+          "case": "corrupted-utf8",
+          "event": "negative",
+          "ordinary_workflows_refused": 6,
+          "record_unchanged": true
+        },
+        {
+          "admission": "Barrier",
+          "case": "empty",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": true
+        },
+        {
+          "barrier": true,
+          "case": "empty",
+          "event": "negative",
+          "ordinary_workflows_refused": 6,
+          "record_unchanged": true
+        },
+        {
+          "admission": "Barrier",
+          "case": "oversized",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": true
+        },
+        {
+          "barrier": true,
+          "case": "oversized",
+          "event": "negative",
+          "ordinary_workflows_refused": 6,
+          "record_unchanged": true
+        },
+        {
+          "admission": "Barrier",
+          "case": "unknown-field",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": true
+        },
+        {
+          "barrier": true,
+          "case": "unknown-field",
+          "event": "negative",
+          "ordinary_workflows_refused": 6,
+          "record_unchanged": true
+        },
+        {
+          "admission": "Barrier",
+          "case": "unsupported-schema",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": true
+        },
+        {
+          "barrier": true,
+          "case": "unsupported-schema",
+          "event": "negative",
+          "ordinary_workflows_refused": 6,
+          "record_unchanged": true
+        },
+        {
+          "admission": "Barrier",
+          "case": "inconsistent-resolution",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": true
+        },
+        {
+          "barrier": true,
+          "case": "inconsistent-resolution",
+          "event": "negative",
+          "ordinary_workflows_refused": 6,
+          "record_unchanged": true
+        },
+        {
+          "admission": "Barrier",
+          "case": "invalid-incident",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": true
+        },
+        {
+          "barrier": true,
+          "case": "invalid-incident",
+          "event": "negative",
+          "ordinary_workflows_refused": 6,
+          "record_unchanged": true
+        },
+        {
+          "admission": "Barrier",
+          "case": "unknown-operation",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": true
+        },
+        {
+          "barrier": true,
+          "case": "unknown-operation",
+          "event": "negative",
+          "ordinary_workflows_refused": 6,
+          "record_unchanged": true
+        },
+        {
+          "admission": "Barrier",
+          "case": "wrong-application",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": true
+        },
+        {
+          "barrier": true,
+          "case": "wrong-application",
+          "event": "negative",
+          "ordinary_workflows_refused": 6,
+          "record_unchanged": true
+        },
+        {
+          "admission": "Barrier",
+          "case": "unresolved-tombstone",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": true
+        },
+        {
+          "barrier": true,
+          "case": "unresolved-tombstone",
+          "event": "negative",
+          "ordinary_workflows_refused": 6,
+          "record_unchanged": true
+        },
+        {
+          "admission": "Barrier",
+          "case": "unreadable",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": true
+        },
+        {
+          "barrier": true,
+          "case": "unreadable",
+          "event": "negative",
+          "ordinary_workflows_refused": 6
+        },
+        {
+          "admission": "Barrier",
+          "case": "permissive-record",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": true
+        },
+        {
+          "barrier": true,
+          "case": "permissive-record",
+          "event": "negative",
+          "ordinary_workflows_refused": 6
+        },
+        {
+          "admission": "Barrier",
+          "case": "record-symlink",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": true
+        },
+        {
+          "barrier": true,
+          "case": "record-symlink",
+          "event": "negative",
+          "ordinary_workflows_refused": 6
+        },
+        {
+          "admission": "Barrier",
+          "case": "record-hardlink",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": true
+        },
+        {
+          "barrier": true,
+          "case": "record-hardlink",
+          "event": "negative",
+          "ordinary_workflows_refused": 6
+        },
+        {
+          "admission": "Barrier",
+          "case": "record-directory",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": true
+        },
+        {
+          "barrier": true,
+          "case": "record-directory",
+          "event": "negative",
+          "ordinary_workflows_refused": 6
+        },
+        {
+          "admission": "Barrier",
+          "case": "permissive-namespace",
+          "event": "authority",
+          "initialization": "unavailable",
+          "journal_present": false,
+          "phase": null,
+          "poisoned": null
+        },
+        {
+          "barrier": true,
+          "case": "permissive-namespace",
+          "event": "negative",
+          "ordinary_workflows_refused": 6
+        },
+        {
+          "admission": "Barrier",
+          "case": "namespace-symlink",
+          "event": "authority",
+          "initialization": "unavailable",
+          "journal_present": false,
+          "phase": null,
+          "poisoned": null
+        },
+        {
+          "barrier": true,
+          "case": "namespace-symlink",
+          "event": "negative",
+          "ordinary_workflows_refused": 6
+        },
+        {
+          "admission": "Barrier",
+          "case": "permissive-root",
+          "event": "authority",
+          "initialization": "unavailable",
+          "journal_present": false,
+          "phase": null,
+          "poisoned": null
+        },
+        {
+          "barrier": true,
+          "case": "permissive-root",
+          "event": "negative",
+          "ordinary_workflows_refused": 6
+        },
+        {
+          "admission": "Barrier",
+          "case": "failed-acknowledgement",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": "dispatch_capable",
+          "poisoned": false
+        },
+        {
+          "case": "failed-acknowledgement",
+          "event": "negative",
+          "injection": "after successful production replace, not a real kernel sync failure",
+          "no_dispatch_receipt": true,
+          "restart_barrier": true,
+          "runtime_barrier": true
+        },
+        {
+          "admission": "Open",
+          "case": "write-denied-after-pending",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": "pending",
+          "poisoned": false
+        },
+        {
+          "case": "write-denied-after-pending",
+          "event": "negative",
+          "fault": "real owner-write permission denial at production temporary-file creation",
+          "no_dispatch_receipt": true,
+          "record_unchanged": true,
+          "restart_admission": "Open",
+          "restart_phase": "pending",
+          "runtime_barrier": true
+        }
+      ]
+    },
+    {
+      "case": "G5-synthetic-storage-separation",
+      "result": "PASS",
+      "evidence": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68256,
+          "sandboxed": 1
+        },
+        {
+          "admission": "Open",
+          "case": "g5-continuity",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": false
+        },
+        {
+          "actual_channel_migration_tested": false,
+          "container_admission": "Open",
+          "container_record_missing": true,
+          "denial_errno": 1,
+          "event": "g5",
+          "external_synthetic_marker_denied": true
+        }
+      ],
+      "external_synthetic_marker_unchanged": true,
+      "real_channel_journals_accessed": false
+    },
+    {
+      "case": "singleton-crash-and-CLOEXEC",
+      "result": "PASS",
+      "holder": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68257,
+          "sandboxed": 1
+        },
+        {
+          "admission": "Open",
+          "case": "lock",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": false
+        },
+        {
+          "child_pid": 68258,
+          "event": "lock-held",
+          "journal_initialized": true
+        },
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68258,
+          "sandboxed": 1
+        },
+        {
+          "event": "child-ready",
+          "pid": 68258
+        }
+      ],
+      "second_process": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68259,
+          "sandboxed": 1
+        },
+        {
+          "before_journal_open": true,
+          "event": "lock-refused"
+        }
+      ],
+      "restart": [
+        {
+          "cs_flags": 570495761,
+          "cs_status": 0,
+          "event": "kernel",
+          "pid": 68261,
+          "sandboxed": 1
+        },
+        {
+          "admission": "Open",
+          "case": "lock",
+          "event": "authority",
+          "initialization": "loaded",
+          "journal_present": true,
+          "phase": null,
+          "poisoned": false
+        },
+        {
+          "event": "lock-reacquired",
+          "journal_initialized": true
+        }
+      ],
+      "inherit_child_alive_during_reacquisition": true
+    }
+  ],
+  "power_loss_tested": false,
+  "physical_fido_operations": false,
+  "synchronization_evidence": {
+    "implementation": "unchanged production DurableRecoveryFile::replace",
+    "successful_path": "write/flush -> F_FULLFSYNC -> renameat -> fsync(directory) -> F_FULLFSYNC",
+    "basis": "successful production return plus hashed source with mandatory error propagation",
+    "syscall_trace_collected": false,
+    "power_loss_tested": false
+  }
+}
