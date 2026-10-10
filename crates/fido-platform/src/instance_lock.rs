@@ -59,6 +59,17 @@ impl InstanceLock {
         if metadata.uid() != uid || metadata.mode() & 0o022 != 0 {
             return Err(io::Error::other("unsafe application data ownership/permissions").into());
         }
+        Self::acquire_in_directory(&directory)
+    }
+
+    /// Existing, already opened root. Never creates or reopens a root path (G5).
+    pub fn acquire_in_directory(directory: &File) -> Result<Self, InstanceLockError> {
+        let metadata = directory.metadata()?;
+        // SAFETY: geteuid has no arguments.
+        let uid = unsafe { libc::geteuid() };
+        if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o022 != 0 {
+            return Err(io::Error::other("unsafe instance root").into());
+        }
         // SAFETY: live directory descriptor and a NUL-terminated relative constant name. The mode
         // applies to O_CREAT only; ownership of the new descriptor moves into `File` exactly once.
         let fd = unsafe {

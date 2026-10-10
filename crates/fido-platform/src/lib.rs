@@ -5,6 +5,8 @@
 //! `macos_code_signing` (ADR-017), compiled only with the `macos-code-signing` feature, which the
 //! service enables and the worker never does.
 
+#[cfg(unix)]
+pub mod authority_root;
 pub mod build_identity;
 #[cfg(unix)]
 pub mod file_once;

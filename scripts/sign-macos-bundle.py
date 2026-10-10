@@ -11,15 +11,22 @@ the bundle contains no dylibs at all (libfido2, OpenSSL and libcbor are statical
 worker), so only the two executables and the bundle seal are signed. The broad
 `com.apple.security.cs.disable-library-validation` entitlement is forbidden.
 
-No entitlements are ever applied. Existing signatures are replaced (`--force`), which also drops
+Developer ID main code receives only the exact approved App Group grant. Workers and ad-hoc
+code receive no entitlements. Existing signatures are replaced (`--force`), which also drops
 any entitlements a previous signer may have embedded.
 """
 
 import argparse
+import importlib.util
 from pathlib import Path
 import plistlib
 import re
 import subprocess
+
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("macos_authority_policy", ROOT / "scripts/macos-authority-policy.py")
+authority_policy = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(authority_policy)
 
 DEVELOPER_ID = re.compile(r"^(?:Developer ID Application: .+ \([A-Z0-9]{10}\)|[0-9A-F]{40})$")
 
@@ -30,7 +37,7 @@ def mach_o(path):
     return magic in (b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca")
 
 
-def codesign(path, identity, *, runtime, identifier=None):
+def codesign(path, identity, *, runtime, identifier=None, entitlements=None):
     command = ["codesign", "--force", "--sign", identity]
     if identity == "-":
         command.append("--timestamp=none")
@@ -40,6 +47,8 @@ def codesign(path, identity, *, runtime, identifier=None):
         command += ["--options", "runtime"]
     if identifier:
         command += ["--identifier", identifier]
+    if entitlements:
+        command += ["--entitlements", str(entitlements)]
     subprocess.run([*command, str(path)], check=True)
 
 
@@ -60,10 +69,18 @@ def sign(app, identity):
         raise RuntimeError("Unexpected nested code or Contents/Frameworks (the bundle carries no dylibs): "
                            + ", ".join(str(path.relative_to(app)) for path in sorted(unexpected)))
 
+    authority_policy.check_source()
+    if bundle_id != authority_policy.DEVELOPER_ID:
+        raise RuntimeError("unreviewed Developer ID bundle identifier")
+    if (authority_policy.MARKER in main.read_bytes()) != runtime:
+        raise RuntimeError("shared authority binary flavor does not match signing channel")
+    if any(authority_policy.MARKER in helper.read_bytes() for helper in helpers):
+        raise RuntimeError("worker must not contain shared authority")
     # Inside-out: helper executables, then the bundle (main executable + seal).
     for helper in helpers:
         codesign(helper, identity, runtime=runtime, identifier=f"{bundle_id}.{helper.name}")
-    codesign(app, identity, runtime=runtime)
+    codesign(app, identity, runtime=runtime, entitlements=
+             authority_policy.DIRECTORY / "developer-id-app.entitlements" if runtime else None)
     subprocess.run(["codesign", "--verify", "--strict", "--deep", "--verbose=2", str(app)], check=True)
     kind = "ad-hoc (no Team ID, no Hardened Runtime; NOT release signing)" if identity == "-" else "Developer ID + Hardened Runtime"
     print(f"Signed inside-out: {len(helpers)} helper(s), bundle; no dylibs; {kind}")

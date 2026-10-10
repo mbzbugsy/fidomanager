@@ -8,11 +8,11 @@ App Store distribution, uploaded to App Store Connect or reviewed by Apple.
 Base: `main` at `9a8a89e` (PR #34, M7.2a worker authenticity merged).
 
 ADR-017 §3.3 says that adopting the App Sandbox "would be a separate ADR". This is that ADR. It
-adds a **second, separate build flavor**. It does not change the Developer ID flavor, which keeps
-every ADR-017 invariant: zero entitlements (D3), `sign-macos-bundle.py` never applying
-entitlements, the bundle overlay `tauri.macos-bundle.conf.json` with
-`signingIdentity: null, entitlements: null`, the checker `check-macos-bundle.py` rejecting any
-entitlement, and the `macos-release-signing` enforcement flavor.
+adds a **second, separate build flavor**. MAS.0/MAS.1 establish the local ad-hoc sandbox
+contract. G5 Phase 1 now amends production main entitlements and authority storage under
+ADR-017 §2.1; workers retain their existing channel-specific entitlement boundaries. The
+credential-free `tauri.macos-bundle.conf.json` overlay remains unsigned with no entitlements,
+and local sandbox packaging remains isolated. The approved production overlays are separate.
 
 ## Evidence labels
 
@@ -226,3 +226,44 @@ hazard; it is not App Group access or signed G5 validation.
   crate fails the renderer-boundary checker and needs an amendment to this ADR.
 - ADR-012 now has two implementations (socket for Developer ID, container lock for the sandbox)
   with the same contract.
+
+### G5 Phase 1 implementation — approved identities, signed gates OPEN
+
+The [maintainer decision](https://github.com/mbzbugsy/fidomanager/pull/40#issuecomment-6102688283)
+approves sole Team `7VGK9SN42B`, group `7VGK9SN42B.eu.fidomanager.authority`, Developer ID app
+`eu.fidomanager.desktop` and store app `eu.fidomanager.desktop.mas`. Approval supersedes the
+previous identity decision boundary; it does not establish Apple registration or signed access.
+
+S2 is amended for production mains only: Developer ID main carries exactly the group grant;
+store main carries that group plus `app-sandbox`, `device.usb`, `network.client`. Worker policies
+stay zero grants for Developer ID and sandbox/inherit for the store-compatible flavor. Test
+identities and their exact grants stay unchanged. No production worker receives an App Group.
+`check-macos-authority-main.py` checks the production main policy only, never full store bundle
+acceptance. G1 profile additions and G4 store worker identity remain separately blocked.
+
+S4 is amended for both production channels: signed main identity/entitlements and actual kernel sandbox state are checked before
+Foundation root resolution; the existing owned `0700` root is opened with all-component
+no-follow and close-on-exec semantics; an extended root ACL or unavailable ACL query is rejected. A shared flock is acquired before recovery, UI, IPC,
+plugins or worker initialization. Root, lock and journal namespace are descriptor-anchored;
+missing/inaccessible/unsafe roots stop startup without a fallback. Only a missing record in the
+successfully opened shared authority may mean NoRecord. Malformed/inaccessible records retain
+the existing poisoned recovery barrier. Durable journal algorithms and schema 1 are preserved.
+
+`macos-release-signing` implies shared authority; the store overlay enables sandbox plus shared
+authority. Unsigned development and ad-hoc fixtures enable neither production selection. The
+store production path loads shared recovery then exits before worker/UI initialization pending
+MAS.2/G4; it never selects an unsigned worker verifier as a substitute. Windows is unchanged.
+
+The original App Group rejection in §4 concerned only a single-instance socket. Issue #38's
+shared recovery authority is now implemented in source and synthetic tests; actual signed
+entitlement/container access remains unproved. Separate roots still hide unresolved incidents
+and permit cross-channel concurrency. No fixture accesses the maintainer's real journal, and no
+production app was launched. That pre-release state still requires a separately reviewed,
+human-controlled transition; no legacy migration engine, sentinel, schema 2 or multi-incident UI
+is included.
+
+G5 remains **OPEN** until signed root access, cross-channel journal visibility, contention,
+restart, denied access and actual container permissions are validated. Apple Development and
+Developer ID feasibility, notarization/Gatekeeper and TestFlight/App Store Connect distribution
+are separate gates. Successful `F_FULLFSYNC` calls do not prove power-loss durability. See
+[Phase 1 evidence](../validation/G5-phase1-shared-authority.md).
