@@ -111,7 +111,10 @@ needs its own ADR. Recorded as future option **X1**; it is not part of this chan
 - Tauri's `app_data_dir()` resolves inside the container, at
   `~/Library/Containers/<id>/Data/Library/Application Support/<id>`. The recovery journal
   (`fido-authority-recovery-v1`, 0700, `F_FULLFSYNC`, `O_NOFOLLOW`, ownership and mode checks) works
-  there unchanged [LOCAL].
+  there unchanged. MAS.0 established initialization only; **MAS.1** establishes synthetic journal
+  replacement, exact-byte process-restart persistence, and authority admission there [LOCAL]. See
+  [MAS.1 recovery validation](../validation/MAS.1-app-sandbox-recovery.md) for the limits of the
+  synchronization evidence (successful production calls, not a power-loss test).
 - The lock (S4) shares that root, is created through the same no-follow, 0700-ancestor primitive,
   and rejects symlinked or permissive files and directories. It is held for the process lifetime
   and is CLOEXEC, so a worker never inherits it. The kernel releases it on any exit, including
@@ -156,11 +159,48 @@ runs. The runtime harness tolerates exactly this denial and fails on anything el
 | G2 | `productbuild` with a Mac Installer Distribution identity; App Store Connect upload validation |
 | G3 | App Review accepting `device.usb` (FIDO2 security keys over USB HID) and `network.client` (WebKit; BooGooCypher status) with their justifications; App Privacy disclosure for the BooGooCypher request |
 | G4 | A Mac App Store worker-authenticity flavor (ADR-017 §5 equivalent). Open question: whether the exact cdhash pin (ADR-017 D14) survives Apple's re-signing of store builds; if Apple re-signs, the expected identity cannot be fixed before submission. Needs a store-signed (TestFlight) build to answer |
-| G5 | Recovery evidence across distribution channels. A Mac App Store install cannot see a Developer ID install's journal in `~/Library/Application Support/eu.fidomanager.desktop`, so an uncertain incident would not raise the recovery barrier there. Decide between Apple's container migration (`container-migration.plist`), a documented "one channel per Mac" rule, or an explicit user-selected import. Until then, do not ship both channels to the same users |
+| G5 | Recovery continuity across distribution channels remains **OPEN**. MAS.1 reproduces the separate-storage hazard using disposable synthetic data, without accessing either real channel's journal. See §5.1: recommend a separate ADR for a quiesced, durable one-way handoff; first-launch migration or a user instruction alone does not prove journal/lock continuity. Until that ADR is implemented and validated, do not ship both channels to the same users |
 | G6 | Privacy manifest (`PrivacyInfo.xcprivacy`) review for required-reason APIs (for example the file-metadata `stat`/`fstat` calls in the recovery and lock code) |
 | G7 | Architecture policy for the store (arm64-only vs universal; ADR-017 M7.1 gate 4) |
 | G8 | A store-signed build exercised through TestFlight on a clean Mac: sandbox, USB, WKWebView and single-instance behaviour under Apple's signature rather than ad-hoc |
 | G9 | Native menus, the PIN prompt and the rendered UI were confirmed by a human operator in this run. An automated check needs Accessibility/Screen Recording grants, which were deliberately not given to the test host |
+
+### 5.1 G5 investigation and recommendation (MAS.1)
+
+[LOCAL] The MAS.1 fixture has a dedicated identity, `eu.fidomanager.desktop.mas1recoverytest`,
+and fresh UUID namespaces. A sandboxed process cannot read a synthetic unresolved marker placed
+by the runner in its own temporary external namespace (`EPERM`). Its separate empty container
+journal initializes with Open admission. The external marker remains unchanged. This establishes
+the storage-separation hazard; it does **not** test real Developer ID/store installations or
+read an existing user journal.
+
+[APPLE] Apple's [container migration documentation](https://developer.apple.com/documentation/security/migrating-your-app-s-files-to-its-app-sandbox-container)
+describes `container-migration.plist` for adopting the sandbox on first launch. It is a file
+migration facility. It does not supply this application's authority-level recovery or singleton
+protocol. A symlink to an external file also does not grant access without additional permission.
+
+[INFERENCE] A one-time copy cannot establish ongoing continuity while the other channel remains
+usable, can create new incidents, or can be restored/downgraded. Independently located locks also
+cannot exclude the other channel. An empty destination, an old Resolved tombstone, or an import
+cancelled by the user must not become evidence that an external unresolved incident never existed.
+The journal represents historical uncertainty, not a portable dispatch/approval capability.
+
+**Recommendation [POLICY, proposed; no migration implemented]:** keep G5 as a distribution blocker
+for existing users and commission a separate ADR for a quiesced, durable one-way channel handoff.
+That ADR must establish exclusion across both channels before reading either journal; validate
+bounded records and ownership without following links; preserve unresolved incidents and unknown
+history; refuse corrupt, conflicting or unavailable evidence; durably publish and reload the
+destination before acknowledging handoff; and prevent the source channel or a rollback from
+silently resuming with independent Open admission. Failure at any cutover stage must retain a
+barrier. A future common journal **and** singleton namespace is another option, but would require
+its own signing/entitlement/storage decision. Neither option changes Developer ID architecture in
+MAS.1.
+
+A documented one-channel restriction is an interim distribution constraint, not enforcement and
+not completion of G5. Apple's migration mechanism may be an input to a reviewed handoff, not its
+entire safety argument. Actual store signatures, provisioning, first-install migration, existing
+containers, reverse switching and conflicting/rollback states still need Apple-dependent and
+cross-channel validation after that design decision.
 
 ## 6. Consequences
 

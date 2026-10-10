@@ -79,6 +79,8 @@ jobs:
         run: cargo test --workspace --all-targets --locked
       - name: Service security contract doctests
         run: cargo test -p fido-service --doc --locked
+      - name: MAS.1 evidence parser negative controls (no container access)
+        run: python3 scripts/test-macos-sandbox-recovery-runner.py
 
   macos-native-auth:
     runs-on: macos-latest
@@ -162,6 +164,8 @@ jobs:
         # flavor signed ad-hoc with the reviewed sandbox entitlements and Hardened Runtime. The
         # checker also proves the inherit-only worker is killed when started outside a sandbox.
         run: python3 scripts/package-macos-sandbox.py
+      - name: MAS.1 disposable recovery fixture packaging (runtime is a local SIP-enabled gate)
+        run: python3 scripts/test-macos-sandbox-recovery.py --build-only
       - name: Packaging leaves the reviewed tree unchanged
         run: |
           git diff --exit-code

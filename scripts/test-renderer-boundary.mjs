@@ -837,6 +837,16 @@ try {
     assert.notEqual(result.status, 0, 'An extra entitlement file must fail.');
     assert.match(result.stderr, /only the two reviewed entitlement files/);
   }
+  mutate(
+    'crates/fido-service/src/recovery.rs',
+    (text) =>
+      text.replace(
+        '#[cfg(all(test, target_os = "macos"))]',
+        '#[cfg(target_os = "macos")]',
+      ),
+    /MAS\.1 recovery fixture must remain macOS test-only/,
+    'MAS.1 fixture compiled into the production service',
+  );
   assert.equal(check().status, 0, 'All restored M4 fixtures must pass.');
   console.log(
     `Renderer boundary regression checks passed (${checks} checker executions; 8 denied crates, command/permission allowlists, service separation and M4 controls).`,

@@ -1054,6 +1054,25 @@ for (const [name, expected] of Object.entries(REVIEWED_SANDBOX_ENTITLEMENTS)) {
     );
   }
 }
+// MAS.1 may exercise private journal transitions only in a macOS libtest fixture. It must
+// disappear entirely from the production service dependency, app and worker.
+if (
+  !/#\[cfg\(all\(test, target_os = "macos"\)\)\]\s*mod sandbox_persistence;/.test(
+    readFileSync('crates/fido-service/src/recovery.rs', 'utf8'),
+  )
+) {
+  throw new Error('MAS.1 recovery fixture must remain macOS test-only.');
+}
+for (const file of [...crateRustFiles, ...rustFiles]) {
+  if (
+    file !== 'crates/fido-service/src/recovery/sandbox_persistence.rs' &&
+    /FIDOMANAGER_MAS1_|MAS1_EVIDENCE/.test(readFileSync(file, 'utf8'))
+  ) {
+    throw new Error(
+      `MAS.1 selectors/evidence must not enter production code: ${file}`,
+    );
+  }
+}
 console.log(
   'Renderer boundary check passed; worker authenticity is backend-only.',
 );
