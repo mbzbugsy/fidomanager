@@ -15,6 +15,9 @@ and a strict extraction contract at the signing boundary (6.5). Revision 5: `pub
 requires the exact draft that `publish-draft` created, bound by the trusted job output
 `draft_release_id`, instead of repeating the "no release exists" check that only the pre-draft
 phase may make (7.6); the external-action allowlist names the pinned token action (6.4).
+Revision 6: `preflight` evaluates eligibility with one isolated, stdlib-only control-plane script,
+`scripts/release-preflight.py`, instead of inline `git`/`jq` (7.1). That script is under the same
+CODEOWNERS rule as the workflow (7.5).
 Base: main `15ae91c71f1531b26ce3a1ce7367659018c8455d` (PR #33, M7.1 static native dependencies
 merged, on top of PR #31, M7.0 packaging foundation).
 
@@ -1001,12 +1004,36 @@ on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+*']
 permissions: {}                      # every job grants its own minimum
-concurrency: { group: release-${{ github.ref }}, cancel-in-progress: false }
+concurrency:                         # block style: preflight rejects flow mappings
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 ```
 
-The `preflight` job (ubuntu; `contents: read`, `checks: read`; no candidate code beyond reading
-files with `git` and `jq`) establishes the release identity and its **eligibility**. Being an
-ancestor of `main` is a sanity condition, not the authorization.
+The `preflight` job (ubuntu; `contents: read`, `checks: read`; no secrets) establishes the release
+identity and its **eligibility**. Being an ancestor of `main` is a sanity condition, not the
+authorization.
+
+**Preflight evaluator (revision 6).** `preflight` runs no build tooling, package manager,
+dependency or candidate binary. Its only code from the tagged commit is
+`scripts/release-preflight.py`. It runs as `python3 -I -S scripts/release-preflight.py eligibility …`
+and is bound by these rules:
+
+- It is a single file that uses only the standard library. `-I` keeps the repository off the
+  import path, so it imports nothing else from the repository.
+- It makes no network calls. The workflow fetches the GitHub API responses below with `gh` or
+  `curl` and its read-only token, then passes them in as files.
+- It reads git objects of the peeled commit with `git` plumbing: tag object, `merge-base`, and
+  blobs addressed as `<commit>:<path>`. It never reads the working tree. System and global git
+  configuration and replace objects are disabled.
+- It accepts only a strict subset of YAML (no anchors, aliases, tags, flow mappings or quoted
+  keys) and a narrow subset of TOML. Anything it cannot read unambiguously fails.
+- It writes the release identity to `$GITHUB_OUTPUT` and the step summary only after every rule
+  has passed. Exit status 1 means ineligible.
+
+This script is release control-plane code, like `release-macos.yml`. Both come from the same
+reviewed commit, and they are under the same CODEOWNERS rule (7.5). It holds no Team ID, signer pin
+or credential. It reads the signer pin from the workflow file. Its regression tests are
+`scripts/test-release-preflight.py`.
 
 Release eligibility, all required:
 
@@ -1163,7 +1190,8 @@ are not changed by this ADR:
   publishing "automatically generates a release attestation";
 - tag ruleset: only maintainers create `v*`; no update, no deletion, no force-push;
 - `main` ruleset: PR review required; CODEOWNERS review required for `.github/**`, the release
-  documents and the release-related scripts;
+  documents and the release-related scripts, including the `preflight` evaluator
+  `scripts/release-preflight.py` and its tests (7.1);
 - the signer repository is protected as in 6.4;
 - Actions setting "Require actions to be pinned to a full-length commit SHA" is on, and the
   `preflight` `uses:` scan covers reusable workflows (6.4);
