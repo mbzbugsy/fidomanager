@@ -190,7 +190,7 @@ def main():
                 raise SystemExit(f"FAIL: {label}: mutated bundle was accepted")
             executed += 1
         try:
-            checker.check(app, signature_mode="developer-id", expected_version=VERSION, execute_worker=False)
+            checker.check_signatures(app, *checker.check_tree(app), "developer-id", "TESTTEAM01")
         except checker.CheckError as error:
             if "not signed with Developer ID" not in str(error):
                 raise SystemExit(f"FAIL: ad-hoc bundle wrong Developer ID rejection: {error}")
