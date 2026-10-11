@@ -241,18 +241,30 @@ identities and their exact grants stay unchanged. No production worker receives 
 `check-macos-authority-main.py` checks the production main policy only, never full store bundle
 acceptance. G1 profile additions and G4 store worker identity remain separately blocked.
 
-S4 is amended for both production channels: signed main identity/entitlements and actual kernel sandbox state are checked before
-Foundation root resolution; the existing owned `0700` root is opened with all-component
-no-follow and close-on-exec semantics; an extended root ACL or unavailable ACL query is rejected. A shared flock is acquired before recovery, UI, IPC,
-plugins or worker initialization. Root, lock and journal namespace are descriptor-anchored;
+The current **store-main predicate is a temporary fail-closed placeholder**. Its leaf
+`subject.OU` Team check is a Developer ID rule that cannot accept Apple-re-signed App Store or
+TestFlight binaries; its exact four-grant parser also rejects additional profile-derived grants.
+A real store-signed build is rejected **before shared App Group resolution, flock acquisition
+or recovery loading**. G1/G5 must implement and validate the correct store-main signing
+requirement, Team ID binding and exact profile-derived entitlements. MAS.2/G4 separately owns
+worker authenticity. No TestFlight or store-signed success is claimed, and the final store-main
+predicate is not implemented in this PR.
+
+S4 is amended for both production selections: main identity/entitlements are checked before
+Foundation root resolution. Developer ID uses the shared strict ADR-017 APP_REQ builder with
+both Developer ID OIDs; the store selection additionally requires actual kernel sandbox state.
+The existing owned `0700` root is opened with all-component no-follow and close-on-exec semantics;
+an extended root ACL or unavailable ACL query is rejected. A shared flock is acquired before
+recovery, UI, IPC, plugins or worker initialization. Root, lock and journal namespace are descriptor-anchored;
 missing/inaccessible/unsafe roots stop startup without a fallback. Only a missing record in the
 successfully opened shared authority may mean NoRecord. Malformed/inaccessible records retain
 the existing poisoned recovery barrier. Durable journal algorithms and schema 1 are preserved.
 
 `macos-release-signing` implies shared authority; the store overlay enables sandbox plus shared
 authority. Unsigned development and ad-hoc fixtures enable neither production selection. The
-store production path loads shared recovery then exits before worker/UI initialization pending
-MAS.2/G4; it never selects an unsigned worker verifier as a substitute. Windows is unchanged.
+store production path has a further unconditional worker/UI refusal pending MAS.2/G4 if the
+temporary main predicate is ever satisfied; this is not a claim that real store-signed code can
+load recovery. It never selects an unsigned worker verifier as a substitute. Windows is unchanged.
 
 The original App Group rejection in §4 concerned only a single-instance socket. Issue #38's
 shared recovery authority is now implemented in source and synthetic tests; actual signed
@@ -263,7 +275,9 @@ human-controlled transition; no legacy migration engine, sentinel, schema 2 or m
 is included.
 
 G5 remains **OPEN** until signed root access, cross-channel journal visibility, contention,
-restart, denied access and actual container permissions are validated. Apple Development and
-Developer ID feasibility, notarization/Gatekeeper and TestFlight/App Store Connect distribution
-are separate gates. Successful `F_FULLFSYNC` calls do not prove power-loss durability. See
+restart, denied access, first-launch group-root availability, real root permissions/ACLs and
+behavior on supported macOS versions are validated. Apple Development feasibility must not
+weaken the production Developer ID requirement. Developer ID group access, notarization/Gatekeeper
+and TestFlight/App Store Connect distribution are separate gates. Successful `F_FULLFSYNC` calls
+do not prove power-loss durability. See
 [Phase 1 evidence](../validation/G5-phase1-shared-authority.md).

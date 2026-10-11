@@ -49,13 +49,8 @@ impl SharedAuthority {
             )
         };
         let team = crate::worker_authenticity::MACOS_RELEASE_TEAM_ID.ok_or_else(failure)?;
-        let identifier = if sandbox {
-            crate::shared_authority_policy::STORE_IDENTIFIER
-        } else {
-            crate::worker_authenticity::APP_IDENTIFIER
-        };
-        let requirement = Requirement::compile(&format!("anchor apple generic and identifier \"{identifier}\" and certificate leaf[subject.OU] = \"{team}\""))
-            .map_err(|_| failure())?;
+        let requirement = production_main_requirement(sandbox, team).ok_or_else(failure)?;
+        let requirement = Requirement::compile(&requirement).map_err(|_| failure())?;
         let me = RunningCode::current_process().map_err(|_| failure())?;
         let network = fido_platform::os_version::current()
             .and_then(fido_platform::os_version::DynamicNetworkPolicy::for_version)
@@ -88,6 +83,24 @@ impl SharedAuthority {
     }
 }
 
+/// Developer ID uses ADR-017 APP_REQ before any shared storage access. The store branch is
+/// only a fail-closed placeholder: G1/G5 must replace/validate its signing and entitlement
+/// policy against Apple-re-signed code. It does not establish store distribution support.
+#[cfg(any(test, all(target_os = "macos", feature = "macos-shared-authority")))]
+fn production_main_requirement(sandbox: bool, team: &str) -> Option<String> {
+    if sandbox {
+        let identifier = crate::shared_authority_policy::STORE_IDENTIFIER;
+        Some(format!(
+            "anchor apple generic and identifier \"{identifier}\" and certificate leaf[subject.OU] = \"{team}\""
+        ))
+    } else {
+        crate::worker_authenticity::developer_id_requirement(
+            crate::worker_authenticity::APP_IDENTIFIER,
+            team,
+        )
+    }
+}
+
 #[cfg(all(target_os = "macos", feature = "macos-shared-authority"))]
 fn require_kernel_sandbox() -> io::Result<()> {
     unsafe extern "C" {
@@ -110,6 +123,42 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::PathBuf;
+
+    #[test]
+    fn developer_id_authority_requires_app_req_before_storage() {
+        let team = crate::worker_authenticity::MACOS_RELEASE_TEAM_ID
+            .unwrap_or_else(|| panic!("reviewed Team ID"));
+        let requirement = production_main_requirement(false, team)
+            .unwrap_or_else(|| panic!("Developer ID authority requirement"));
+        assert_eq!(
+            Some(requirement.clone()),
+            crate::worker_authenticity::developer_id_requirement(
+                crate::worker_authenticity::APP_IDENTIFIER,
+                team,
+            )
+        );
+        for clause in [
+            "anchor apple generic",
+            "identifier \"eu.fidomanager.desktop\"",
+            "certificate 1[field.1.2.840.113635.100.6.2.6]",
+            "certificate leaf[field.1.2.840.113635.100.6.1.13]",
+            "certificate leaf[subject.OU] = \"7VGK9SN42B\"",
+        ] {
+            assert!(
+                requirement.contains(clause),
+                "missing APP_REQ clause: {clause}"
+            );
+        }
+        assert!(!requirement.contains(" or "));
+        assert!(!requirement.contains(crate::shared_authority_policy::STORE_IDENTIFIER));
+    }
+
+    #[test]
+    fn developer_id_authority_rejects_invalid_team_instead_of_weakening_requirement() {
+        for team in ["", "lowercase1", "7VGK9SN42B\" or anchor apple"] {
+            assert!(production_main_requirement(false, team).is_none());
+        }
+    }
 
     struct Disposable(PathBuf);
     impl Disposable {

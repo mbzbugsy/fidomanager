@@ -1121,6 +1121,28 @@ const sharedCode = readFileSync(
   'crates/fido-service/src/shared_authority.rs',
   'utf8',
 ).split('#[cfg(test)]')[0];
+const mainRequirement = sharedCode.indexOf(
+  'production_main_requirement(sandbox, team)',
+);
+const mainValidity = sharedCode.indexOf('me.check_validity(');
+const groupResolution = sharedCode.indexOf('macos_app_group::resolve(');
+const authorityAcquisition = sharedCode.indexOf('Self::acquire(root)');
+if (
+  !sharedCode.includes('Requirement::compile(&requirement)') ||
+  !/crate::worker_authenticity::developer_id_requirement\(\s*crate::worker_authenticity::APP_IDENTIFIER,\s*team,?\s*\)/.test(
+    sharedCode,
+  ) ||
+  !(
+    mainRequirement >= 0 &&
+    mainRequirement < mainValidity &&
+    mainValidity < groupResolution &&
+    groupResolution < authorityAcquisition
+  )
+) {
+  throw new Error(
+    'G5 Developer ID APP_REQ must use the shared strict builder before group/lock/storage access',
+  );
+}
 if (
   /std::env|app_data_dir|initialize_recovery_at|create_dir/.test(sharedCode) ||
   sharedCode.indexOf('me.check_validity(') >

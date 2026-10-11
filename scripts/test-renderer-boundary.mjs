@@ -893,8 +893,53 @@ try {
   );
   mutate(
     'crates/fido-service/src/shared_authority.rs',
+    (text) =>
+      text.replace(
+        /crate::worker_authenticity::developer_id_requirement\(\s*crate::worker_authenticity::APP_IDENTIFIER,\s*team,?\s*\)/,
+        'Some(format!("anchor apple generic and certificate leaf[subject.OU] = \\"{team}\\""))',
+      ),
+    /G5 Developer ID APP_REQ/,
+    'G5 Developer ID authority weakened to a Team-ID-only publisher check',
+  );
+  mutate(
+    'crates/fido-service/src/shared_authority.rs',
+    (text) =>
+      text.replace(
+        'production_main_requirement(sandbox, team)',
+        'unreviewed_requirement(sandbox, team)',
+      ),
+    /G5 Developer ID APP_REQ/,
+    'G5 production path disconnected from the strict requirement builder',
+  );
+  mutate(
+    'crates/fido-service/src/shared_authority.rs',
+    (text) =>
+      text
+        .replace(
+          /        let root =\s*crate::macos_app_group::resolve\(crate::shared_authority_policy::GROUP_IDENTIFIER\)\?;\n/,
+          '',
+        )
+        .replace(
+          '        let requirement = production_main_requirement(sandbox, team)',
+          '        let root = crate::macos_app_group::resolve(crate::shared_authority_policy::GROUP_IDENTIFIER)?;\n        let requirement = production_main_requirement(sandbox, team)',
+        ),
+    /G5 Developer ID APP_REQ/,
+    'G5 shared group queried before strict signature validation',
+  );
+  mutate(
+    'crates/fido-service/src/shared_authority.rs',
+    (text) =>
+      text.replace(
+        'me.check_validity(network, &requirement)',
+        'unreviewed_validity(network, &requirement)',
+      ),
+    /G5 Developer ID APP_REQ/,
+    'G5 signature validation omitted before shared storage',
+  );
+  mutate(
+    'crates/fido-service/src/shared_authority.rs',
     (text) => text.replace('me.check_validity(', 'std::env::var('),
-    /G5 production resolution/,
+    /G5 Developer ID APP_REQ|G5 production resolution/,
     'runtime environment authority selection',
   );
   assert.equal(check().status, 0, 'All restored M4 fixtures must pass.');

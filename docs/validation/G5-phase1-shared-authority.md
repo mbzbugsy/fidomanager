@@ -24,10 +24,24 @@ from the store app ID.
 
 Both production channel selections use one Foundation-resolved group root, one existing
 `fido-authority-recovery-v1/incident.json` schema-1 journal and one `single-instance.lock` flock.
-The service validates its current Apple-issued identity, fixed app ID/Team, Hardened Runtime,
-dynamic valid/kill status and strictly typed exact main grants before requesting the group URL.
+The Developer ID service uses the existing shared
+`worker_authenticity::developer_id_requirement(APP_IDENTIFIER, team)` APP_REQ builder: Apple
+generic anchor, fixed main ID/Team, Developer ID CA OID `1.2.840.113635.100.6.2.6` and Developer ID
+Application leaf OID `1.2.840.113635.100.6.1.13`. It validates this strict requirement, Hardened
+Runtime, dynamic valid/kill status and strictly typed exact main grants before requesting the
+group URL, acquiring the flock or accessing recovery. Apple Development feasibility must not
+weaken this production requirement.
 The store selection also requires actual kernel sandbox state. Root paths are never constructed
 from HOME, an environment variable, arguments or an inferred bundle ID.
+
+The current **store-main predicate is a temporary fail-closed placeholder**. Its Developer
+ID-style leaf `subject.OU` Team rule cannot accept Apple-re-signed App Store/TestFlight code;
+its exact four-grant parser also rejects additional profile-derived entitlements. A real
+store-signed build is rejected **before shared App Group resolution, flock acquisition or
+recovery loading**. G1/G5 must implement and validate the correct store-main signing requirement,
+Team ID binding and exact profile-derived entitlements. MAS.2/G4 separately owns worker
+authenticity. No TestFlight or store-signed success is claimed, including by mocked checker
+tests. This delta does not implement the final store-main predicate.
 
 `AuthorityRoot` opens the existing root with `O_NOFOLLOW_ANY | O_DIRECTORY | O_CLOEXEC` on Darwin,
 requires ownership by the effective user, mode `0700`, and no extended ACL. Query errors fail
@@ -41,8 +55,9 @@ entrypoint; the existing development entrypoint reuses it.
 
 The production overlays pin channel IDs, features and main grants. `macos-release-signing` implies
 shared authority, and shared authority alone is an app compilation error. The store overlay
-selects sandbox plus shared authority, but deliberately exits before worker/UI initialization
-until G4 establishes store worker authenticity. This prevents an unsigned-development verifier
+selects sandbox plus shared authority, but additionally refuses worker/UI initialization if the
+temporary main predicate is satisfied, until G4 establishes store worker authenticity. Real
+store-signed builds are refused earlier as described above. This prevents an unsigned-development verifier
 from becoming production store authority. Developer ID publisher/per-release checks and zero
 worker grants remain intact. Workers never depend on the new Foundation resolver; the platform
 crate's dependency set remains unchanged. Windows behavior is unchanged.
@@ -53,7 +68,55 @@ No signing credential/profile/secret, real incident journal or physical FIDO/PIN
 accessed; no production app was launched. No migration engine, downgrade sentinel, schema 2 or
 multi-incident UI was added.
 
-## Locally verified results
+## B1/B2 review delta — locally verified on 2026-10-11
+
+Baseline: reviewed HEAD `54ea7af6501d6989e1aaacae7e9c3474ffee8710`. B1 replaces the independent
+Developer ID publisher text with the shared APP_REQ builder at the early authority check. Two
+focused Rust tests pin both Developer ID OIDs, the fixed app ID/Team and invalid-input rejection.
+Four new boundary mutations reject a Team-ID-only replacement, a disconnected builder, missing
+signature validation and group resolution before validation. B2 changes documentation only:
+the store signing/entitlement predicate remains the same temporary fail-closed placeholder.
+
+All checks below were genuinely rerun locally in the existing worktree. Final frontend checks
+used bundled Node 24.19.0 and pnpm 11.25.0 with existing dependencies. The ad-hoc packaging
+scripts used the default Node 22.19.0; their generated frontend asset names/content match the
+subsequent Node 24 build. No production-channel app, signing identity or profile was used.
+
+| Delta check | Result |
+| --- | --- |
+| Focused Developer ID authority regressions | PASS: 2 tests |
+| Rust formatting; all-feature workspace Clippy with warnings denied | PASS |
+| Workspace/all-target Rust tests, final full rerun | PASS: 508 passed, 0 failed, 3 ignored |
+| Shared-authority service feature; service doctests | PASS: 185 passed, 2 ignored; 8 doctests |
+| Both production app flavors, compile only; shared-only negative | PASS; shared-only selection rejected with the expected compilation error |
+| Frontend lint, typecheck, tests, build | PASS: 0 type errors/warnings, 45 tests |
+| Renderer boundary and mutation suite | PASS: 171 checker executions |
+| Exact authority policy/main-checker/signing-command controls | PASS: 4 test methods; signing calls mocked |
+| MAS.1 evidence parser | PASS: 14 tests |
+| Both macOS ad-hoc packaging paths | PASS: Developer ID-path app/DMG and isolated sandbox app |
+| Bundle negatives; packaged worker health | PASS: 33 mutations rejected; 1 synthetic handshake/health test |
+
+The first full Rust run failed the existing
+`process_worker::tests::worker_identity::path_checks_run_again_on_every_launch` assertion:
+`HandshakeTimeout` instead of `SpawnFailed` for a child exiting without a handshake. That test
+passed in isolation and the subsequent entire suite passed. No worker code or timing was changed.
+This transient failure is recorded rather than counted as an initial pass.
+
+The runtime fixture, persistence algorithms and source files hashed by the committed sandbox
+report are unchanged by B1/B2. The SIP-enabled fixture and native archive rebuilds were **not**
+rerun for this delta; the original report below retains its original run ID/date and is not
+relabeled as new runtime evidence. Apple-signed and TestFlight gates remain blocked. New-head
+CI status is reported on PR #40 after push; local passes do not establish a CI result.
+
+Reproduce the focused regression separately with:
+
+```sh
+cargo test -p fido-service --features macos-shared-authority --locked --offline \
+  shared_authority::tests::developer_id_authority
+pnpm security:renderer-boundary
+```
+
+## Initial Phase 1 locally verified results
 
 Validation ran locally in `/private/tmp/fidomanager-g5` on arm64 macOS 26.5.2, SIP enabled. Final
 frontend checks used Node 24.19.0; the available pnpm 11.25.0 ran existing installed dependencies
@@ -153,11 +216,13 @@ python3 scripts/verify-libfido2-linkage.py target/debug/fido-worker
 ## Remaining gates and independent review
 
 - **Apple-signed — BLOCKED, not passed:** registration/entitlement access with the approved
-  identities, actual group root permissions/ACLs, supported-OS behavior, journal sharing,
-  cross-channel contention/restart/denials, Apple Development feasibility, Developer ID
+  identities, first-launch group-root availability, actual root permissions/ACLs, behavior on
+  supported macOS versions, journal sharing, cross-channel contention/restart/denials,
+  Apple Development feasibility without relaxing production APP_REQ, Developer ID
   notarization/Gatekeeper and the protected signing driver's exact main-only grant policy.
-- **TestFlight/App Store Connect — BLOCKED, not passed:** store provisioning/profile additions
-  (G1), coinstallation/reinstallation, store/Developer ID sharing and MAS.2/G4 store worker
+- **TestFlight/App Store Connect — BLOCKED, not passed:** correct store-main signing requirement,
+  Team ID binding and exact profile-derived entitlements (G1/G5), coinstallation/reinstallation,
+  store/Developer ID sharing and MAS.2/G4 store worker
   authenticity. The current production store executable intentionally cannot start UI/workers.
 - **Maintainer state — separately reviewed human transition required:** independent journals can
   hide unresolved incidents and separate locks permit concurrency. The real pre-release journal

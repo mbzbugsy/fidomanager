@@ -144,17 +144,33 @@ is a compilation error. The store overlay selects sandbox plus shared authority 
 refuses worker/UI startup until G4 is implemented. Ad-hoc packaging selects neither production
 feature and retains zero Developer ID-path grants and disposable sandbox identities.
 
-Production self-validation before group resolution requires an Apple-issued signature with the
-approved identifier and Team, Hardened Runtime, dynamic valid/kill flags, and exact main grants.
-ADR-017's stronger Developer ID leaf requirement and authenticated per-release worker record
-continue at launcher initialization. That self-check now admits precisely the main group grant;
-all worker checks still reject entitlements. Shared-root acquisition and recovery loading precede
-launcher initialization. No runtime environment/renderer/bundle-ID inference selects authority.
+Developer ID self-validation before group resolution uses the shared
+`worker_authenticity::developer_id_requirement(APP_IDENTIFIER, team)` builder for **APP_REQ**:
+the Apple generic anchor, fixed main identifier/Team, Developer ID CA OID
+`1.2.840.113635.100.6.2.6` and Developer ID Application leaf OID
+`1.2.840.113635.100.6.1.13`. Hardened Runtime, dynamic valid/kill flags and exact main grants
+are also mandatory. This strict requirement is enforced before App Group resolution, flock
+acquisition or journal access; it is not weakened for Apple Development feasibility tests.
+The authenticated per-release worker record continues at launcher initialization. The main
+self-check admits precisely the group grant; all Developer ID worker checks reject entitlements.
+No runtime environment/renderer/bundle-ID inference selects authority.
+
+The current **store-main predicate is a temporary fail-closed placeholder**, not a store signing
+contract. Its Developer ID-style leaf `subject.OU` Team rule cannot accept Apple-re-signed
+App Store/TestFlight code, and its exact four-grant parser also rejects additional profile-derived
+entitlements. A real store-signed build is rejected **before shared App Group resolution, flock
+acquisition or recovery loading**. G1/G5 must implement and validate the correct store-main
+signing requirement, Team ID binding and exact profile-derived entitlement policy. MAS.2/G4
+separately owns worker authenticity; the later worker/UI refusal is an additional gate, not
+proof that a store binary can reach shared recovery today. No TestFlight or store-signed success
+is claimed, including by the production main bundle checker. This PR does not implement the
+final store-main predicate.
 
 The root comes from Foundation, is opened without following symlinks and is pinned for the flock
 and existing journal namespace. Durable replacement/synchronization algorithms and schema 1 are
-unchanged. Signed permissions/root traversal, Apple Development feasibility, Developer ID group
-access/notarization/Gatekeeper and store provisioning/sharing remain validation gates. G5 stays
+unchanged. First-launch group-root availability, real root permissions/ACLs and traversal on
+supported macOS versions, Apple Development feasibility without relaxing APP_REQ, Developer ID
+group access/notarization/Gatekeeper and store provisioning/sharing remain validation gates. G5 stays
 OPEN; implementation tests cannot substitute for them. The maintainer's old unresolved state
 needs a separately reviewed human-controlled transition before launch against a new authority.
 
