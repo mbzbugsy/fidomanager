@@ -11,6 +11,9 @@ pub mod inspection;
 pub mod mutation;
 pub mod presentation;
 pub mod recovery;
+#[cfg(all(unix, any(test, feature = "macos-shared-authority")))]
+pub mod shared_authority;
+mod shared_authority_policy;
 
 /// ADR-012 single-instance authority lock used by the App Sandbox flavor (ADR-018), where the
 /// single-instance plugin's `/tmp` socket is denied by the sandbox.
@@ -581,3 +584,6 @@ mod tests {
         ));
     }
 }
+
+#[cfg(all(target_os = "macos", feature = "macos-shared-authority"))]
+mod macos_app_group;

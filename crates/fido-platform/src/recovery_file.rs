@@ -110,18 +110,43 @@ impl DurableRecoveryFile {
                 "unsafe application data ownership/permissions",
             ));
         }
-        let namespace = application_data.join("fido-authority-recovery-v1");
-        let mut builder = fs::DirBuilder::new();
-        builder.mode(0o700);
-        match builder.create(&namespace) {
-            Ok(()) => sync_directory(&parent)?,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
+        Self::open_in_directory(&parent)
+    }
+
+    /// Open the fixed journal namespace relative to a pinned existing authority root (G5).
+    /// The root is never created or looked up again. Replacement/synchronization is unchanged.
+    pub fn open_in_directory(parent: &File) -> io::Result<Self> {
+        let metadata = parent.metadata()?;
+        // SAFETY: geteuid has no arguments.
+        if !metadata.is_dir()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err(io::Error::other("unsafe recovery root"));
         }
-        let directory = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-            .open(namespace)?;
+        let namespace = c"fido-authority-recovery-v1";
+        // SAFETY: pinned directory and constant relative name; no symlink is followed.
+        if unsafe { libc::mkdirat(parent.as_raw_fd(), namespace.as_ptr(), 0o700) } == 0 {
+            sync_directory(parent)?;
+        } else {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::AlreadyExists {
+                return Err(error);
+            }
+        }
+        // SAFETY: same pinned directory/name; returned descriptor adopted once below.
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                namespace.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: fresh owned descriptor from openat.
+        let directory = unsafe { File::from_raw_fd(fd) };
         validate(&directory, true)?;
         Ok(Self { directory })
     }

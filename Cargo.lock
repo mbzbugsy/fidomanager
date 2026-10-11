@@ -1044,6 +1044,7 @@ dependencies = [
  "fido-platform",
  "fido-worker-protocol",
  "getrandom 0.3.4",
+ "objc2-foundation",
  "serde",
  "serde_json",
  "sha2",

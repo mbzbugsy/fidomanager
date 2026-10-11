@@ -13,13 +13,23 @@ mod native_ui_spike;
     target_os = "macos"
 ))]
 mod pin_mutation;
-#[cfg(feature = "macos-app-sandbox")]
+#[cfg(all(feature = "macos-app-sandbox", not(feature = "macos-shared-authority")))]
 mod sandbox_instance;
 
 #[cfg(all(feature = "macos-app-sandbox", not(target_os = "macos")))]
 compile_error!("the macos-app-sandbox flavor is macOS-only (ADR-018)");
+#[cfg(all(feature = "macos-shared-authority", not(target_os = "macos")))]
+compile_error!("macos-shared-authority is macOS-only");
 use std::sync::{Arc, Mutex};
 
+#[cfg(any(
+    not(feature = "macos-shared-authority"),
+    all(
+        feature = "native-pin",
+        not(feature = "native-ui-spike"),
+        target_os = "macos"
+    )
+))]
 use tauri::Manager;
 
 /// Discovery authority. It supervises a killable child worker process: the application process
@@ -51,7 +61,45 @@ pub(crate) struct AppState {
     authentication_menu: Mutex<Option<authentication::AuthenticationMenu>>,
 }
 
+fn enforce_store_worker_gate() {
+    #[cfg(all(feature = "macos-shared-authority", feature = "macos-app-sandbox"))]
+    {
+        eprintln!("production sandbox worker authenticity remains unvalidated (ADR-018 G4)");
+        std::process::exit(1);
+    }
+}
+
 pub fn run() {
+    // Production identity validation and OS-resolved shared flock precede recovery, UI, IPC,
+    // plugins, discovery and worker initialization. No legacy or empty per-channel fallback.
+    #[cfg(all(target_os = "macos", feature = "macos-shared-authority"))]
+    let mut shared_authority = match fido_service::shared_authority::SharedAuthority::production(
+        cfg!(feature = "macos-app-sandbox"),
+    ) {
+        Ok(authority) => authority,
+        Err(fido_service::shared_authority::SharedAuthorityError::AlreadyHeld) => {
+            std::process::exit(0)
+        }
+        Err(_) => {
+            eprintln!("shared recovery authority unavailable; startup refused");
+            std::process::exit(1);
+        }
+    };
+    let authentication_authority = Arc::new(
+        fido_service::authentication::AuthenticationAuthority::awaiting_recovery_startup(),
+    );
+    #[cfg(all(target_os = "macos", feature = "macos-shared-authority"))]
+    if shared_authority
+        .initialize(&authentication_authority)
+        .is_err()
+    {
+        eprintln!("shared recovery initialization unavailable; startup refused");
+        std::process::exit(1);
+    }
+    // MAS.2/G4 must independently establish store worker authenticity. Never launch a
+    // production sandbox worker using UnsignedDevelopment while that gate remains open.
+    enforce_store_worker_gate();
+
     // The worker executable is resolved from the directory of this executable (the place a Tauri
     // sidecar is bundled, and where Cargo puts the sibling binary in development). It is never
     // read from PATH, the environment, or any value the renderer can influence, and it is started
@@ -79,9 +127,6 @@ pub fn run() {
         }
     };
 
-    let authentication_authority = Arc::new(
-        fido_service::authentication::AuthenticationAuthority::awaiting_recovery_startup(),
-    );
     let auth_for_events = Arc::clone(&authentication_authority);
     #[cfg(not(all(
         feature = "native-pin",
@@ -91,7 +136,7 @@ pub fn run() {
     let auth_for_startup = Arc::clone(&authentication_authority);
     let builder = tauri::Builder::default();
     // Security invariant: single-instance is registered before any future plugin.
-    #[cfg(not(feature = "macos-app-sandbox"))]
+    #[cfg(not(any(feature = "macos-app-sandbox", feature = "macos-shared-authority")))]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
         // Second-launch arguments are intentionally ignored: they are untrusted input.
         if let Some(window) = app.get_webview_window("main") {
@@ -101,7 +146,7 @@ pub fn run() {
         }
     }));
     // ADR-018: the plugin's /tmp socket is denied inside the App Sandbox; use the container lock.
-    #[cfg(feature = "macos-app-sandbox")]
+    #[cfg(all(feature = "macos-app-sandbox", not(feature = "macos-shared-authority")))]
     let builder = builder.plugin(sandbox_instance::init());
     let builder = builder
         .manage(AppState {
@@ -140,6 +185,7 @@ pub fn run() {
     ))]
     let builder = builder
         .setup(|app| {
+            #[cfg(not(feature = "macos-shared-authority"))]
             initialize_recovery(app, &app.state::<AppState>().authentication);
             fido_service::authentication::install_lifecycle(Arc::clone(
                 &app.state::<AppState>().authentication.epoch,
@@ -186,7 +232,10 @@ pub fn run() {
         target_os = "macos"
     )))]
     let builder = builder.setup(move |app| {
+        #[cfg(not(feature = "macos-shared-authority"))]
         initialize_recovery(app, &auth_for_startup);
+        #[cfg(feature = "macos-shared-authority")]
+        let _ = (app, &auth_for_startup);
         Ok(())
     });
     let built = builder.build(tauri::generate_context!());
@@ -229,10 +278,13 @@ pub fn run() {
             }
         }
     });
+    #[cfg(all(target_os = "macos", feature = "macos-shared-authority"))]
+    std::process::exit(0); // kernel releases shared authority only at actual process termination
 }
 
 // Framework-derived application data location only. Storage errors leave ordinary sensitive
 // admission blocked while passive discovery remains available. No recovery data crosses IPC.
+#[cfg(not(feature = "macos-shared-authority"))]
 fn initialize_recovery(
     app: &tauri::App,
     authority: &fido_service::authentication::AuthenticationAuthority,

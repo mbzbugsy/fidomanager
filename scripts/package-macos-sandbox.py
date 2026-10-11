@@ -16,7 +16,8 @@ distributed or submitted. Mac App Store distribution signing is a separate, cred
 this script refuses to perform.
 
 The Developer ID path (scripts/package-macos.py, scripts/sign-macos-bundle.py, ADR-017) is not
-changed by this script: that path still applies zero entitlements.
+changed by this script: ad-hoc packaging still applies zero entitlements; the protected Developer ID main policy now
+requires the G5 App Group grant (workers still have no entitlements).
 """
 
 import argparse

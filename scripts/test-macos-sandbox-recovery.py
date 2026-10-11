@@ -111,7 +111,7 @@ def build():
         dependencies = run(["otool", "-L", binary]).stdout
         require(not any(name in dependencies for name in ("libfido2", "libcrypto", "libssl", "libcbor")),
                 "recovery fixture unexpectedly links a native FIDO library")
-    sources = ("crates/fido-platform/src/recovery_file.rs", "crates/fido-platform/src/instance_lock.rs",
+    sources = ("crates/fido-platform/src/authority_root.rs", "crates/fido-platform/src/recovery_file.rs", "crates/fido-platform/src/instance_lock.rs",
                "crates/fido-service/src/recovery.rs", "crates/fido-service/src/authentication.rs",
                "crates/fido-service/src/recovery/sandbox_persistence.rs")
     summary = {"identifier": IDENTIFIER, "app_entitlements": app_grants, "child_entitlements": child_grants,

@@ -4,12 +4,13 @@
 use super::*;
 use crate::authentication::AuthenticationAuthority;
 use fido_core::SensitiveWorkflowKind;
+use fido_platform::authority_root::AuthorityRoot;
 use fido_platform::instance_lock::{InstanceLock, InstanceLockError};
 use fido_platform::recovery_file::DurableRecoveryFile;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -66,13 +67,21 @@ fn context() -> Result<(PathBuf, String), Box<dyn std::error::Error>> {
 }
 
 fn lock(root: &Path) -> Result<InstanceLock, io::Error> {
-    InstanceLock::acquire(root).map_err(|error| io::Error::other(format!("{error:?}")))
+    // Disposable fixture setup stands in for a pre-existing OS-owned container. Production
+    // group acquisition NEVER creates its root. Exercise the G5 descriptor-based lock API.
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(root)?;
+    let pinned = AuthorityRoot::open_resolved(root)?;
+    InstanceLock::acquire_in_directory(pinned.directory())
+        .map_err(|error| io::Error::other(format!("{error:?}")))
 }
 
 fn journal(root: &Path) -> io::Result<RecoveryJournal> {
-    Ok(RecoveryJournal::load(Box::new(DurableRecoveryFile::open(
-        root,
-    )?)))
+    let pinned = AuthorityRoot::open_resolved(root)?;
+    Ok(RecoveryJournal::load(Box::new(
+        DurableRecoveryFile::open_in_directory(pinned.directory())?,
+    )))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -115,7 +124,10 @@ fn assert_authority(
             .recovery_admission(),
         RecoveryAdmission::Barrier
     );
-    let initialized = authority.initialize_recovery_at(root);
+    let initialized = AuthorityRoot::open_resolved(root)
+        .and_then(|pinned| DurableRecoveryFile::open_in_directory(pinned.directory()))
+        .map_err(|_| JournalError::Unavailable)
+        .and_then(|storage| authority.initialize_recovery(Box::new(storage)));
     let (admission, initialization) = match expected {
         ExpectedInitialization::Loaded {
             admission,
@@ -511,7 +523,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if action == "contend" {
         assert_eq!(case, "lock");
         assert!(matches!(
-            InstanceLock::acquire(&root),
+            InstanceLock::acquire_in_directory(AuthorityRoot::open_resolved(&root)?.directory()),
             Err(InstanceLockError::AlreadyHeld)
         ));
         emit(serde_json::json!({"event": "lock-refused", "before_journal_open": true}))?;

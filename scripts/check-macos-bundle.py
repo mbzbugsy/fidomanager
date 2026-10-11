@@ -7,6 +7,7 @@ placement, native linkage and signature *shape*; it never proves notarization or
 
 import argparse
 import json
+import importlib.util
 from pathlib import Path
 import plistlib
 import re
@@ -15,6 +16,9 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("macos_authority_policy", ROOT / "scripts/macos-authority-policy.py")
+authority_policy = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(authority_policy)
 BUNDLE_ID = "eu.fidomanager.desktop"
 PRODUCT_NAME = "Fido Manager"
 MAIN_EXECUTABLE = "fidomanager-app"
@@ -225,12 +229,12 @@ def check_frontend(main, dist):
 
 
 def check_signatures(app, main, worker, mode):
+    authority_policy.check_source()
     for binary in (main, worker):
         fields = signature(binary)
         granted = entitlements(binary)
         for key in FORBIDDEN_ENTITLEMENTS:
             require(key not in granted, f"{binary.name}: forbidden entitlement {key}")
-        require(not granted, f"{binary.name}: unexpected entitlements {sorted(granted)}")
         flags = " ".join(fields.get("CodeDirectory v", []))
         if mode == "adhoc":
             require(fields.get("Signature") == ["adhoc"], f"{binary.name}: expected ad-hoc signature")
@@ -240,10 +244,16 @@ def check_signatures(app, main, worker, mode):
         else:
             require(fields.get("Authority", [""])[0].startswith("Developer ID Application:"),
                     f"{binary.name}: not signed with Developer ID")
-            require(fields.get("TeamIdentifier", ["not set"]) != ["not set"], f"{binary.name}: no Team ID")
+            require(fields.get("TeamIdentifier") == [authority_policy.TEAM], f"{binary.name}: unreviewed Team ID")
             require("Timestamp" in fields, f"{binary.name}: no secure timestamp")
             if binary in (main, worker):
                 require("runtime" in flags, f"{binary.name}: Hardened Runtime missing")
+        expected = authority_policy.DEVELOPER_GRANTS if mode == "developer-id" and binary == main else {}
+        require(authority_policy.exact(granted) if expected else not granted,
+                f"{binary.name}: unexpected entitlements {sorted(granted)}")
+    require((authority_policy.MARKER in main.read_bytes()) == (mode == "developer-id"),
+            "main executable shared-authority feature does not match signing channel")
+    require(authority_policy.MARKER not in worker.read_bytes(), "worker contains shared authority")
     require(signature(main).get("Identifier") == [BUNDLE_ID], "main executable signing identifier mismatch")
     require(signature(worker).get("Identifier") == [WORKER_IDENTIFIER], "worker signing identifier mismatch")
     if mode != "adhoc":

@@ -54,6 +54,7 @@ def reviewed(name):
 
 
 def check_reviewed_files():
+    base.authority_policy.check_source()
     app, worker = reviewed("app.entitlements"), reviewed("worker.entitlements")
     require(set(app) == APP_KEYS, f"app.entitlements is not the reviewed set: {sorted(app)}")
     require(set(worker) == WORKER_KEYS, f"worker.entitlements is not the reviewed set: {sorted(worker)}")
@@ -81,6 +82,7 @@ def check_info(app, expected_identifier, expected_name, expected_version):
 def check_signatures(app, main, worker, expected_identifier, app_entitlements, worker_entitlements):
     for binary, expected, identifier in ((main, app_entitlements, expected_identifier),
                                          (worker, worker_entitlements, f"{expected_identifier}.{WORKER}")):
+        require(base.authority_policy.MARKER not in binary.read_bytes(), "local sandbox code contains production shared authority")
         fields = base.signature(binary)
         granted = base.entitlements(binary)
         require(granted == expected, f"{binary.name}: entitlements {sorted(granted)} != reviewed {sorted(expected)}")

@@ -136,6 +136,12 @@ unsafe extern "C" {
         value_callbacks: *const CFDictionaryValueCallBacks,
     ) -> CFTypeRef;
     fn CFDictionaryGetValue(dictionary: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
+    fn CFDictionaryGetCount(dictionary: CFTypeRef) -> CFIndex;
+    fn CFArrayGetTypeID() -> CFTypeID;
+    fn CFArrayGetCount(array: CFTypeRef) -> CFIndex;
+    fn CFArrayGetValueAtIndex(array: CFTypeRef, index: CFIndex) -> CFTypeRef;
+    fn CFBooleanGetTypeID() -> CFTypeID;
+    fn CFBooleanGetValue(value: CFTypeRef) -> Boolean;
 }
 
 #[link(name = "Security", kind = "framework")]
@@ -681,6 +687,23 @@ impl RunningCode {
         )
     }
 
+    /// Exact G5 main-process policy. Workers continue to reject ALL entitlements.
+    /// Missing, malformed, additional or incorrectly typed grants fail closed.
+    pub fn has_exact_authority_entitlements(&self, group: &str, sandbox: bool) -> Result<bool> {
+        // SAFETY: self is live; the returned signing dictionary follows the Copy rule.
+        let info = copy_out(|out| unsafe {
+            SecCodeCopySigningInformation(self.0.as_ptr(), K_SEC_CS_SIGNING_INFORMATION, out)
+        })?;
+        if !type_is(info.as_ptr(), dictionary_type_id) {
+            return Err(CodeSigningError::MalformedInformation);
+        }
+        // SAFETY: exported immutable key; borrowed dictionary lives until method return.
+        let Some(grants) = dictionary_value(&info, unsafe { kSecCodeInfoEntitlementsDict }) else {
+            return Ok(false);
+        };
+        exact_authority_entitlements(grants, group, sandbox)
+    }
+
     /// `SecCodeCopyStaticCode`: for an application's main executable, the whole bundle.
     pub fn static_code(&self) -> Result<StaticCode> {
         // SAFETY: `self` is live; the out-parameter follows the Copy rule.
@@ -691,9 +714,181 @@ impl RunningCode {
     }
 }
 
+/// All values are borrowed while the owning signing-information dictionary is live.
+fn exact_authority_entitlements(grants: CFTypeRef, group: &str, sandbox: bool) -> Result<bool> {
+    if !type_is(grants, dictionary_type_id) {
+        return Err(CodeSigningError::MalformedInformation);
+    }
+    // SAFETY: grants is a checked, live CFDictionary.
+    if unsafe { CFDictionaryGetCount(grants) } != if sandbox { 4 } else { 1 } {
+        return Ok(false);
+    }
+    let key = cf_string("com.apple.security.application-groups")?;
+    // SAFETY: grants and key are live; Get-rule array is borrowed from grants.
+    let array = unsafe { CFDictionaryGetValue(grants, key.as_ptr()) };
+    // SAFETY: type ID functions take no arguments and return constants.
+    if !type_is(array, || unsafe { CFArrayGetTypeID() }) {
+        return Ok(false);
+    }
+    // SAFETY: checked array, index 0 is accessed only when count is 1.
+    if unsafe { CFArrayGetCount(array) } != 1
+        || string_value(unsafe { CFArrayGetValueAtIndex(array, 0) })? != group
+    {
+        return Ok(false);
+    }
+    if sandbox {
+        for name in [
+            "com.apple.security.app-sandbox",
+            "com.apple.security.device.usb",
+            "com.apple.security.network.client",
+        ] {
+            let key = cf_string(name)?;
+            // SAFETY: grants/key are live; value remains owned by grants.
+            let value = unsafe { CFDictionaryGetValue(grants, key.as_ptr()) };
+            // SAFETY: type-ID query takes no arguments; checked CFBoolean before value access.
+            if !type_is(value, || unsafe { CFBooleanGetTypeID() })
+                || unsafe { CFBooleanGetValue(value) } == 0
+            {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[repr(C)]
+    struct CFArrayCallBacks {
+        _opaque: [u8; 0],
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static kCFTypeArrayCallBacks: CFArrayCallBacks;
+        static kCFBooleanTrue: CFTypeRef;
+        fn CFArrayCreate(
+            allocator: CFTypeRef,
+            values: *const CFTypeRef,
+            count: CFIndex,
+            callbacks: *const CFArrayCallBacks,
+        ) -> CFTypeRef;
+    }
+
+    // Synthetic CF values exercise the same parser used for real signing information.
+    fn grants(
+        group: &str,
+        sandbox: bool,
+        extra: bool,
+        integer_boolean: bool,
+        duplicate: bool,
+    ) -> Owned {
+        let group = cf_string(group).unwrap_or_else(|_| panic!("synthetic CF fixture"));
+        let groups = [group.as_ptr(), group.as_ptr()];
+        // SAFETY: live input strings, retaining CFType callbacks, Create rule adopted once.
+        let array = unsafe {
+            Owned::adopt(CFArrayCreate(
+                ptr::null(),
+                groups.as_ptr(),
+                if duplicate { 2 } else { 1 },
+                &raw const kCFTypeArrayCallBacks,
+            ))
+        }
+        .unwrap_or_else(|| panic!("synthetic CF allocation"));
+        let mut keys = vec![
+            cf_string("com.apple.security.application-groups")
+                .unwrap_or_else(|_| panic!("synthetic CF fixture")),
+        ];
+        let mut values = vec![array.as_ptr()];
+        let one: i32 = 1;
+        // SAFETY: readable i32 input, Create rule adopted once.
+        let number = unsafe {
+            Owned::adopt(CFNumberCreate(
+                ptr::null(),
+                K_CF_NUMBER_SINT32_TYPE,
+                (&raw const one).cast(),
+            ))
+        }
+        .unwrap_or_else(|| panic!("synthetic CF allocation"));
+        if sandbox {
+            for key in [
+                "com.apple.security.app-sandbox",
+                "com.apple.security.device.usb",
+                "com.apple.security.network.client",
+            ] {
+                keys.push(cf_string(key).unwrap_or_else(|_| panic!("synthetic CF fixture")));
+                // SAFETY: immutable framework constant, retained by dictionary below.
+                values.push(if integer_boolean {
+                    number.as_ptr()
+                } else {
+                    unsafe { kCFBooleanTrue }
+                });
+            }
+        }
+        if extra {
+            keys.push(
+                cf_string("com.apple.security.network.server")
+                    .unwrap_or_else(|_| panic!("synthetic CF fixture")),
+            );
+            // SAFETY: immutable framework constant.
+            values.push(unsafe { kCFBooleanTrue });
+        }
+        let key_refs: Vec<_> = keys.iter().map(Owned::as_ptr).collect();
+        // SAFETY: equal-sized live key/value arrays, CFType callbacks retain values, Create rule.
+        unsafe {
+            Owned::adopt(CFDictionaryCreate(
+                ptr::null(),
+                key_refs.as_ptr(),
+                values.as_ptr(),
+                keys.len() as CFIndex,
+                &raw const kCFTypeDictionaryKeyCallBacks,
+                &raw const kCFTypeDictionaryValueCallBacks,
+            ))
+        }
+        .unwrap_or_else(|| panic!("synthetic CF allocation"))
+    }
+
+    #[test]
+    fn authority_entitlements_are_exact_and_strictly_typed() {
+        const GROUP: &str = "synthetic-team.synthetic-group";
+        for sandbox in [false, true] {
+            let valid = grants(GROUP, sandbox, false, false, false);
+            assert_eq!(
+                exact_authority_entitlements(valid.as_ptr(), GROUP, sandbox),
+                Ok(true)
+            );
+            assert_eq!(
+                exact_authority_entitlements(valid.as_ptr(), "wrong-group", sandbox),
+                Ok(false)
+            );
+            for invalid in [
+                grants(GROUP, sandbox, true, false, false),
+                grants(GROUP, sandbox, false, false, true),
+            ] {
+                assert_eq!(
+                    exact_authority_entitlements(invalid.as_ptr(), GROUP, sandbox),
+                    Ok(false)
+                );
+            }
+        }
+        let integer = grants(GROUP, true, false, true, false);
+        assert_eq!(
+            exact_authority_entitlements(integer.as_ptr(), GROUP, true),
+            Ok(false)
+        );
+        let developer = grants(GROUP, false, false, false, false);
+        assert_eq!(
+            exact_authority_entitlements(developer.as_ptr(), GROUP, true),
+            Ok(false)
+        );
+        let wrong =
+            cf_string("not a dictionary").unwrap_or_else(|_| panic!("synthetic CF fixture"));
+        assert_eq!(
+            exact_authority_entitlements(wrong.as_ptr(), GROUP, false),
+            Err(CodeSigningError::MalformedInformation)
+        );
+    }
 
     #[test]
     fn malformed_requirement_text_is_a_typed_error() {

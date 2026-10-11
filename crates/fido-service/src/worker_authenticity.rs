@@ -27,8 +27,8 @@ pub(crate) const APP_IDENTIFIER: &str = "eu.fidomanager.desktop";
 
 /// The one reviewed Apple Developer Team ID for release enforcement (ADR-017 §5.1).
 ///
-/// **Not provisioned.** No Developer ID identity exists for this project yet, so no Team ID is
-/// invented here. While this is `None`:
+/// Approved by the maintainer in Issue #38 / PR #40 as source policy only, not signed proof.
+/// No certificate, key or profile is loaded. If this were `None`:
 ///
 /// * development and M7.1 ad-hoc builds are unaffected;
 /// * a debug build of the `macos-release-signing` flavor compiles but release startup
@@ -36,10 +36,10 @@ pub(crate) const APP_IDENTIFIER: &str = "eu.fidomanager.desktop";
 /// * an optimized (`--release`) build of the flavor does not compile (assertion below), so a
 ///   shippable enforcing binary cannot exist with a placeholder.
 ///
-/// Setting it is a reviewed release-configuration change, validated against a real Developer
-/// ID-signed worker first (ADR-017 E1). It is never read from the environment, `Info.plist`, the
+/// Setting it is a reviewed source-configuration decision. ADR-017 E1 still requires validation
+/// against real Developer ID-signed code before distribution. It is never read from the environment, `Info.plist`, the
 /// renderer, arguments or the worker.
-pub(crate) const MACOS_RELEASE_TEAM_ID: Option<&str> = None;
+pub(crate) const MACOS_RELEASE_TEAM_ID: Option<&str> = Some("7VGK9SN42B");
 
 const _: () = assert!(
     match MACOS_RELEASE_TEAM_ID {
@@ -490,7 +490,12 @@ pub(crate) mod macos {
             if running
                 .signature_flags
                 .is_none_or(|flags| flags & SIGNATURE_FLAG_RUNTIME == 0)
-                || running.has_entitlements
+                || !me
+                    .has_exact_authority_entitlements(
+                        crate::shared_authority_policy::GROUP_IDENTIFIER,
+                        false,
+                    )
+                    .map_err(identity)?
             {
                 return Err(StartupRejection::ApplicationIdentity);
             }
@@ -614,9 +619,9 @@ mod tests {
     const TEST_TEAM: &str = "TESTONLY01";
 
     #[test]
-    fn team_id_constant_is_unprovisioned_and_never_invented() {
+    fn team_id_constant_matches_maintainer_approved_identity() {
         // Changing this is a reviewed release-configuration step (ADR-017 E1), not a code fix.
-        assert_eq!(MACOS_RELEASE_TEAM_ID, None);
+        assert_eq!(MACOS_RELEASE_TEAM_ID, Some("7VGK9SN42B"));
     }
 
     #[test]
@@ -707,7 +712,7 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "FIDOMANAGER-RELEASE-ENFORCING-MARKER/1;team=UNPROVISIONED;version={};commit={};end",
+                "FIDOMANAGER-RELEASE-ENFORCING-MARKER/1;team=7VGK9SN42B;version={};commit={};end",
                 fido_platform::build_identity::RELEASE_VERSION,
                 fido_platform::build_identity::RELEASE_SOURCE_COMMIT.unwrap_or("UNPROVISIONED"),
             )
@@ -1113,10 +1118,10 @@ mod tests {
         }
 
         #[test]
-        fn release_startup_fails_closed_without_a_provisioned_team_id() {
+        fn release_startup_fails_closed_without_a_provisioned_source_commit() {
             assert!(matches!(
                 super::super::macos::authenticate_release_startup(),
-                Err(crate::release_identity::StartupRejection::TeamIdUnprovisioned)
+                Err(crate::release_identity::StartupRejection::SourceCommitUnprovisioned)
             ));
         }
     }
