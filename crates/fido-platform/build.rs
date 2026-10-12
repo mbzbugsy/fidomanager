@@ -1,6 +1,6 @@
 //! Compile-time build identity (ADR-017 §5.6, §5.8).
 //!
-//! Only the `macos-release-signing` flavor compiles a release source commit in. The commit is read
+//! Only the Developer ID or MAS signing flavor compiles a release source commit in. The commit is read
 //! from `FIDOMANAGER_RELEASE_SOURCE_COMMIT` at *compile time* only; nothing reads it at runtime.
 //! A malformed value fails the build. A missing value in the release flavor yields the label
 //! `unprovisioned`, which release enforcement rejects at runtime, and which an optimized build
@@ -19,7 +19,9 @@ fn is_commit(value: &str) -> bool {
 
 fn main() {
     println!("cargo:rerun-if-env-changed={COMMIT_VARIABLE}");
-    let release_flavor = env::var_os("CARGO_FEATURE_MACOS_RELEASE_SIGNING").is_some();
+    let developer_id = env::var_os("CARGO_FEATURE_MACOS_RELEASE_SIGNING").is_some();
+    let mas = env::var_os("CARGO_FEATURE_MACOS_MAS_SIGNING").is_some();
+    let release_flavor = developer_id || mas;
     let label = if !release_flavor {
         "development".to_owned()
     } else {

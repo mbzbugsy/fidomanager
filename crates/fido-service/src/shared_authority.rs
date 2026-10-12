@@ -48,6 +48,9 @@ impl SharedAuthority {
                 "FIDOMANAGER-SHARED-AUTHORITY/1: production App Group identity unavailable",
             )
         };
+        if !crate::worker_authenticity::signing_flavors_match() {
+            return Err(failure().into());
+        }
         let team = crate::worker_authenticity::MACOS_RELEASE_TEAM_ID.ok_or_else(failure)?;
         let requirement = production_main_requirement(sandbox, team).ok_or_else(failure)?;
         let requirement = Requirement::compile(&requirement).map_err(|_| failure())?;

@@ -69,6 +69,9 @@ use crate::{WorkerEndpoint, WorkerEndpointError, WorkerLauncher};
 
 const REAP_POLL_INTERVAL: Duration = Duration::from_millis(2);
 
+#[cfg(all(test, target_os = "macos"))]
+mod mas2_sandbox_fixture;
+
 /// Frames the worker may have queued toward the service before the reader thread stops reading and
 /// lets pipe back-pressure throttle a misbehaving worker.
 const READER_QUEUE_FRAMES: usize = 2;
@@ -320,7 +323,25 @@ impl ProcessWorkerLauncher {
     /// reports the terminal `WorkerIdentityRejected`, so the application runs without FIDO
     /// functionality and shows the integrity error. It never downgrades to development behavior.
     pub fn beside_current_exe() -> Result<Self, LaunchError> {
-        #[cfg(feature = "macos-release-signing")]
+        if !crate::worker_authenticity::signing_flavors_match() {
+            return Ok(Self::with_authenticity(
+                None,
+                ProcessWorkerConfig::default(),
+                WorkerAuthenticity::StartupRejected,
+            ));
+        }
+        #[cfg(feature = "macos-mas-signing")]
+        {
+            let authenticity = crate::worker_authenticity::mas_startup();
+            let executable =
+                ResolvedWorkerExecutable::beside_current_exe(Self::DEFAULT_WORKER_FILE_NAME).ok();
+            Ok(Self::with_authenticity(
+                executable,
+                ProcessWorkerConfig::default(),
+                authenticity,
+            ))
+        }
+        #[cfg(all(feature = "macos-release-signing", not(feature = "macos-mas-signing")))]
         {
             let authenticity = crate::worker_authenticity::release_startup();
             let executable =
@@ -335,7 +356,7 @@ impl ProcessWorkerLauncher {
                 authenticity,
             ))
         }
-        #[cfg(not(feature = "macos-release-signing"))]
+        #[cfg(not(any(feature = "macos-release-signing", feature = "macos-mas-signing")))]
         {
             let executable =
                 ResolvedWorkerExecutable::beside_current_exe(Self::DEFAULT_WORKER_FILE_NAME)?;
@@ -353,11 +374,25 @@ impl ProcessWorkerLauncher {
         executable: ResolvedWorkerExecutable,
         config: ProcessWorkerConfig,
     ) -> Result<Self, ProcessWorkerConfigError> {
-        Ok(Self::with_authenticity(
-            Some(executable),
-            config.validate()?,
-            WorkerAuthenticity::UnsignedDevelopment,
-        ))
+        // This development-tool entrypoint cannot select a weaker verifier in a production
+        // MAS library. Unit fixtures remain cfg(test); Developer ID's existing API is unchanged.
+        #[cfg(all(feature = "macos-mas-signing", not(test)))]
+        {
+            let _ = executable;
+            Ok(Self::with_authenticity(
+                None,
+                config.validate()?,
+                WorkerAuthenticity::StartupRejected,
+            ))
+        }
+        #[cfg(any(not(feature = "macos-mas-signing"), test))]
+        {
+            Ok(Self::with_authenticity(
+                Some(executable),
+                config.validate()?,
+                WorkerAuthenticity::UnsignedDevelopment,
+            ))
+        }
     }
 
     fn with_authenticity(
@@ -538,15 +573,27 @@ impl ProcessWorkerEndpoint {
         verification_display_scope: Option<[u8; 32]>,
     ) -> Result<Self, LaunchError> {
         // Steps 1-2, repeated on every spawn.
-        let path = executable.revalidate(authenticity.enforces_release_layout())?;
+        let path = match executable.revalidate(authenticity.enforces_release_layout()) {
+            Ok(path) => path,
+            Err(_) if authenticity.latches_path_failure() => {
+                latch.set();
+                return Err(LaunchError::WorkerIdentityRejected {
+                    quiescence: ExecutionQuiescence::Quiescent,
+                });
+            }
+            Err(error) => return Err(error),
+        };
         // Step 3: static validation of exactly this file, before exec. Nothing was spawned, so
         // the rejection is latched and trivially contained.
-        if authenticity.verify_before_spawn(&path).is_err() {
-            latch.set();
-            return Err(LaunchError::WorkerIdentityRejected {
-                quiescence: ExecutionQuiescence::Quiescent,
-            });
-        }
+        let spawn_identity = match authenticity.verify_before_spawn(&path) {
+            Ok(token) => token,
+            Err(_) => {
+                latch.set();
+                return Err(LaunchError::WorkerIdentityRejected {
+                    quiescence: ExecutionQuiescence::Quiescent,
+                });
+            }
+        };
 
         let mut command = Command::new(&path);
         command
@@ -571,7 +618,18 @@ impl ProcessWorkerEndpoint {
             None
         };
 
-        let mut child = command.spawn().map_err(|_| LaunchError::SpawnFailed)?;
+        let mut child = command.spawn().map_err(|_error| {
+            // MAS has not obtained a verified child. A post-static path/signature change can
+            // make exec itself fail; never retry that uncertainty as unsigned/transient work.
+            if authenticity.latches_path_failure() {
+                latch.set();
+                LaunchError::WorkerIdentityRejected {
+                    quiescence: ExecutionQuiescence::Quiescent,
+                }
+            } else {
+                LaunchError::SpawnFailed
+            }
+        })?;
         let pid = child.id();
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
             // Unreachable with piped stdio, but never leave a spawned process behind.
@@ -595,7 +653,9 @@ impl ProcessWorkerEndpoint {
         };
         // From here on every early return drops or explicitly fails `endpoint`, which kills and
         // reaps the child: a failed launch never leaves a process behind.
-        endpoint.establish(authenticity, latch, move || spawn_reader(stdout, events_tx))
+        endpoint.establish(authenticity, latch, &spawn_identity, move || {
+            spawn_reader(stdout, events_tx)
+        })
     }
 
     /// Everything after the spawn, in the ADR-017 §5.3 order: dynamic identity of the running
@@ -617,9 +677,10 @@ impl ProcessWorkerEndpoint {
         mut self,
         authenticity: &dyn WorkerIdentityCheck,
         latch: &IdentityLatch,
+        spawn_identity: &crate::worker_authenticity::VerifiedSpawn,
         start_reader: impl FnOnce() -> io::Result<()>,
     ) -> Result<Self, LaunchError> {
-        self.authenticate_running_child(authenticity, latch)?;
+        self.authenticate_running_child(authenticity, latch, spawn_identity)?;
         if start_reader().is_err() {
             return Err(self.fail_launch(LaunchError::SpawnFailed));
         }
@@ -635,8 +696,9 @@ impl ProcessWorkerEndpoint {
         &mut self,
         authenticity: &dyn WorkerIdentityCheck,
         latch: &IdentityLatch,
+        spawn_identity: &crate::worker_authenticity::VerifiedSpawn,
     ) -> Result<(), LaunchError> {
-        let verified = match authenticity.verify_running_child(self.pid) {
+        let verified = match authenticity.verify_running_child(self.pid, spawn_identity) {
             Ok(ChildVerification::NotRequired) => return Ok(()),
             Ok(ChildVerification::Verified) => true,
             Err(_) => false,
@@ -1378,6 +1440,27 @@ mod tests {
 
         const BUILD: &str = "0.1.0+0123456789abcdef0123456789abcdef01234567";
 
+        #[test]
+        fn unified_or_conflicting_signing_features_never_select_development()
+        -> Result<(), Box<dyn std::error::Error>> {
+            if !crate::worker_authenticity::signing_flavors_match() {
+                let mut launcher = ProcessWorkerLauncher::beside_current_exe()?;
+                assert!(matches!(
+                    launcher.authenticity,
+                    WorkerAuthenticity::StartupRejected
+                ));
+                assert!(launcher.executable.is_none());
+                assert_eq!(
+                    launcher.launch(WorkerGeneration(1)).err(),
+                    Some(LaunchError::WorkerIdentityRejected {
+                        quiescence: ExecutionQuiescence::Quiescent
+                    })
+                );
+                assert!(launcher.identity_latch.is_set());
+            }
+            Ok(())
+        }
+
         /// Records what had happened at the moment the running child was verified.
         struct FakeIdentity {
             verdict: Result<ChildVerification, IdentityRejection>,
@@ -1391,12 +1474,16 @@ mod tests {
             fn enforces_release_layout(&self) -> bool {
                 false
             }
-            fn verify_before_spawn(&self, _path: &Path) -> Result<(), IdentityRejection> {
-                Ok(())
+            fn verify_before_spawn(
+                &self,
+                _path: &Path,
+            ) -> Result<crate::worker_authenticity::VerifiedSpawn, IdentityRejection> {
+                Ok(crate::worker_authenticity::VerifiedSpawn::Development)
             }
             fn verify_running_child(
                 &self,
                 _pid: u32,
+                _spawn: &crate::worker_authenticity::VerifiedSpawn,
             ) -> Result<ChildVerification, IdentityRejection> {
                 let written = self.sink.0.lock().map(|bytes| bytes.len()).ok();
                 if let Ok(mut slot) = self.bytes_written_at_verification.lock() {
@@ -1486,10 +1573,15 @@ mod tests {
                 kills_with_latch_set,
             } = h;
             let started = Arc::clone(&identity.reader_started);
-            let result = endpoint.establish(&identity, &latch, move || {
-                started.store(true, Ordering::SeqCst);
-                Ok(())
-            });
+            let result = endpoint.establish(
+                &identity,
+                &latch,
+                &crate::worker_authenticity::VerifiedSpawn::Development,
+                move || {
+                    started.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+            );
             (
                 result,
                 Harness2 {

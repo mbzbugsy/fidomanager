@@ -179,6 +179,38 @@ Their signing-driver/preflight policies must reconcile the main-only grant while
 worker grants, publisher and exact-release checks. Neither PR nor the release-signer repository
 was modified. See [Phase 1 evidence](../validation/G5-phase1-shared-authority.md).
 
+### 2.2 MAS.2 isolation amendment
+
+The [Issue #41 architecture](https://github.com/mbzbugsy/fidomanager/issues/41) adds
+`macos-mas-signing` as a separate app/service/platform/worker feature. The MAS worker identifier
+is `eu.fidomanager.desktop.mas.fido-worker.<version>.<40-lower-hex-source-commit>.mas`, using the
+same sole Team constant. Its `ChildHello` consistency identity is `<version>+<commit>.mas`.
+Developer ID retains `eu.fidomanager.desktop.fido-worker`, its exact APP_REQ/publisher OIDs,
+sealed release-worker record, file digest, per-release cdhash and `<version>+<commit>` build ID.
+Unsigned development retains `<version>+development`. No runtime, renderer or environment value
+selects a verification flavor.
+
+The launcher-facing API now returns a private immutable per-spawn token. Developer ID still
+checks against its startup-authenticated immutable EXPECTED; MAS instead captures C_s only
+after exact release/publisher/static fact validation, then requires the live child's cdhash to
+equal that token before ParentHello. Policy provenance is bound by an immutable Arc; tokens are
+not cloneable and no mutable last-hash cache exists. This mechanical API change does not alter
+Developer ID's authentication or release record algorithms.
+
+Cargo feature unification is checked against the platform's compiled flags. A mismatch or both
+signing features yields terminal startup rejection; optimized mixed-feature builds cannot
+compile. Debug `--all-features` checks compile but cannot start production authority. The
+production store startup refusal now precedes App Group resolution, flock and journal access,
+in addition to the unchanged temporary G1/G5 main predicate. It remains unconditional pending
+signed gates, even though MAS.2's worker verifier is wired in source. No Apple Development,
+TestFlight or store-main acceptance exception is introduced.
+
+Protected signing remains the trust root for which binary receives a release identifier.
+The data-only MAS signing/checker contract is not an authenticator, does not infer expected
+release inputs from a candidate worker, and does not modify the parked release-signing pipeline.
+M1–M6 and G1/G5/G8 remain **BLOCKED**; see
+[MAS.2 validation](../validation/MAS.2-worker-authenticity.md).
+
 ## 3. Code set and nested code
 
 ### 3.1 What gets signed
@@ -359,8 +391,9 @@ and certificate leaf[subject.OU] = TEAMID)`. The OIDs mean, in order: Mac App St
 Developer ID CA issuer, Developer ID Application leaf. `subject.OU` holds the Team ID. The OID
 checks are meaningful only under `anchor apple generic`.
 
-[POLICY] The worker requirement drops the Mac App Store branch. We do not ship through the Mac
-App Store, and accepting a store-signed binary would widen the set of signers for no reason.
+[POLICY] The **Developer ID** worker requirement drops the Mac App Store branch. This contract
+never accepts a store-signed binary. MAS.2 has a distinct compile-time policy under ADR-018 G4;
+its existence does not widen this requirement or change this release-record contract.
 
 ```text
 anchor apple generic

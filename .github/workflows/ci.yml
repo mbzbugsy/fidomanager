@@ -81,6 +81,8 @@ jobs:
         run: cargo test -p fido-service --doc --locked
       - name: G5 exact production authority policies (credential-free)
         run: python3 scripts/test-macos-authority-policy.py
+      - name: MAS.2 signing contract, checker and runtime evidence parser (mocked, no credentials)
+        run: python3 scripts/test-mas-worker-policy.py
       - name: MAS.1 evidence parser negative controls (no container access)
         run: python3 scripts/test-macos-sandbox-recovery-runner.py
 
@@ -106,8 +108,11 @@ jobs:
       - name: Compile both G5 production authority flavors without signing or launching
         run: |
           cargo check -p fidomanager-app --features macos-release-signing --locked
-          cargo check -p fidomanager-app --features macos-app-sandbox,macos-shared-authority --locked
+          cargo check -p fidomanager-app --features macos-mas-signing --locked
           cargo test -p fido-service --features macos-shared-authority --locked
+          cargo test -p fido-service --features macos-mas-signing --locked
+          cargo test -p fido-service --features macos-release-signing,macos-mas-signing --locked
+          cargo clippy -p fido-service --all-targets --all-features --locked -- -D warnings
       - name: Deterministic macOS auth and process tests (no hardware claim)
         run: cargo test --workspace --all-targets --locked
       - name: Service security contract doctests
@@ -173,6 +178,8 @@ jobs:
         run: python3 scripts/package-macos-sandbox.py
       - name: MAS.1 disposable recovery fixture packaging (runtime is a local SIP-enabled gate)
         run: python3 scripts/test-macos-sandbox-recovery.py --build-only
+      - name: MAS.2 disposable worker authenticity fixture packaging (no Apple signing claim)
+        run: python3 scripts/test-macos-mas-worker.py --build-only
       - name: Packaging leaves the reviewed tree unchanged
         run: |
           git diff --exit-code

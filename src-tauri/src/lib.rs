@@ -62,6 +62,8 @@ pub(crate) struct AppState {
 }
 
 fn enforce_store_worker_gate() {
+    // MAS.2 now wires a distinct enforcing verifier, but M1–M6 signed evidence and the
+    // independent G1/G5 main predicate remain blocked. This hard refusal stays in place.
     #[cfg(all(feature = "macos-shared-authority", feature = "macos-app-sandbox"))]
     {
         eprintln!("production sandbox worker authenticity remains unvalidated (ADR-018 G4)");
@@ -70,6 +72,9 @@ fn enforce_store_worker_gate() {
 }
 
 pub fn run() {
+    // Until G1/G5 and MAS.2 signed gates are validated, refuse the production store selection
+    // BEFORE even resolving shared authority. Local ad-hoc sandbox fixtures are unaffected.
+    enforce_store_worker_gate();
     // Production identity validation and OS-resolved shared flock precede recovery, UI, IPC,
     // plugins, discovery and worker initialization. No legacy or empty per-channel fallback.
     #[cfg(all(target_os = "macos", feature = "macos-shared-authority"))]
@@ -96,10 +101,6 @@ pub fn run() {
         eprintln!("shared recovery initialization unavailable; startup refused");
         std::process::exit(1);
     }
-    // MAS.2/G4 must independently establish store worker authenticity. Never launch a
-    // production sandbox worker using UnsignedDevelopment while that gate remains open.
-    enforce_store_worker_gate();
-
     // The worker executable is resolved from the directory of this executable (the place a Tauri
     // sidecar is bundled, and where Cargo puts the sibling binary in development). It is never
     // read from PATH, the environment, or any value the renderer can influence, and it is started

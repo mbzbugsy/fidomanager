@@ -426,6 +426,9 @@ pub struct SigningInformation {
     pub dynamic_status: Option<u32>,
     /// Whether any entitlements (`kSecCodeInfoEntitlements` or `…EntitlementsDict`) are present.
     pub has_entitlements: bool,
+    /// Exactly `{app-sandbox: true, inherit: true}`, typed CFBooleans, no additional key.
+    /// This is not publisher authentication; callers must authenticate the code object first.
+    pub exact_inherited_worker_entitlements: bool,
 }
 
 fn signing_information(code: CFTypeRef, flags: SecCSFlags) -> Result<SigningInformation> {
@@ -462,7 +465,36 @@ fn signing_information(code: CFTypeRef, flags: SecCSFlags) -> Result<SigningInfo
         dynamic_status: dictionary_value(&info, status).map(u32_value).transpose()?,
         has_entitlements: dictionary_value(&info, entitlements).is_some()
             || dictionary_value(&info, entitlements_dict).is_some(),
+        exact_inherited_worker_entitlements: dictionary_value(&info, entitlements_dict)
+            .map(exact_inherited_worker_entitlements)
+            .transpose()?
+            .unwrap_or(false),
     })
+}
+
+fn exact_inherited_worker_entitlements(grants: CFTypeRef) -> Result<bool> {
+    if !type_is(grants, dictionary_type_id) {
+        return Ok(false);
+    }
+    // SAFETY: grants is a live, checked CFDictionary, borrowed from signing information.
+    if unsafe { CFDictionaryGetCount(grants) } != 2 {
+        return Ok(false);
+    }
+    for name in [
+        "com.apple.security.app-sandbox",
+        "com.apple.security.inherit",
+    ] {
+        let key = cf_string(name)?;
+        // SAFETY: both dictionary and key are live; the value is borrowed until return.
+        let value = unsafe { CFDictionaryGetValue(grants, key.as_ptr()) };
+        // SAFETY: constant type ID; only checked CFBooleans are read.
+        if !type_is(value, || unsafe { CFBooleanGetTypeID() })
+            || unsafe { CFBooleanGetValue(value) } == 0
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// A compiled code requirement (`SecRequirementRef`). Compiled once and kept.
@@ -768,12 +800,79 @@ mod tests {
     unsafe extern "C" {
         static kCFTypeArrayCallBacks: CFArrayCallBacks;
         static kCFBooleanTrue: CFTypeRef;
+        static kCFBooleanFalse: CFTypeRef;
         fn CFArrayCreate(
             allocator: CFTypeRef,
             values: *const CFTypeRef,
             count: CFIndex,
             callbacks: *const CFArrayCallBacks,
         ) -> CFTypeRef;
+    }
+
+    #[test]
+    fn inherited_worker_grants_require_two_exact_typed_true_booleans() -> Result<()> {
+        let sandbox = cf_string("com.apple.security.app-sandbox")?;
+        let inherit = cf_string("com.apple.security.inherit")?;
+        let extra = cf_string("com.apple.security.device.usb")?;
+        let one = 1i32;
+        // SAFETY: readable i32, Create rule adopted once; Boolean keys are exported constants.
+        let number = unsafe {
+            Owned::adopt(CFNumberCreate(
+                ptr::null(),
+                K_CF_NUMBER_SINT32_TYPE,
+                (&raw const one).cast(),
+            ))
+        }
+        .ok_or(CodeSigningError::InvalidInput)?;
+        let (yes, no) = unsafe { (kCFBooleanTrue, kCFBooleanFalse) };
+        let cases = [
+            (
+                vec![sandbox.as_ptr(), inherit.as_ptr()],
+                vec![yes, yes],
+                true,
+            ),
+            (
+                vec![sandbox.as_ptr(), inherit.as_ptr()],
+                vec![yes, no],
+                false,
+            ),
+            (
+                vec![sandbox.as_ptr(), inherit.as_ptr()],
+                vec![yes, number.as_ptr()],
+                false,
+            ),
+            (
+                vec![sandbox.as_ptr(), inherit.as_ptr(), extra.as_ptr()],
+                vec![yes, yes, yes],
+                false,
+            ),
+            (vec![sandbox.as_ptr()], vec![yes], false),
+            (
+                vec![sandbox.as_ptr(), extra.as_ptr()],
+                vec![yes, yes],
+                false,
+            ),
+        ];
+        for (keys, values, expected) in cases {
+            // SAFETY: equal-length arrays of live CF objects; retaining callbacks and Create rule.
+            let dictionary = unsafe {
+                Owned::adopt(CFDictionaryCreate(
+                    ptr::null(),
+                    keys.as_ptr(),
+                    values.as_ptr(),
+                    keys.len() as CFIndex,
+                    &raw const kCFTypeDictionaryKeyCallBacks,
+                    &raw const kCFTypeDictionaryValueCallBacks,
+                ))
+            }
+            .ok_or(CodeSigningError::InvalidInput)?;
+            assert_eq!(
+                exact_inherited_worker_entitlements(dictionary.as_ptr())?,
+                expected
+            );
+        }
+        assert!(!exact_inherited_worker_entitlements(number.as_ptr())?);
+        Ok(())
     }
 
     // Synthetic CF values exercise the same parser used for real signing information.

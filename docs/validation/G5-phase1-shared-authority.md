@@ -1,5 +1,9 @@
 # G5 Phase 1 — shared macOS recovery authority
 
+> Historical Phase 1 / PR #40 evidence. G5 Phase 1 is merged. MAS.2 changes the production store
+> feature selection and moves its unconditional refusal before shared storage; see
+> [MAS.2 validation](MAS.2-worker-authenticity.md) for the current source and signed gates.
+
 Status: implemented for independent review; **G5 remains OPEN** for signed validation. This
 supersedes the earlier [decision-boundary snapshot](G5-phase1-decision-boundary.md). Base is
 `a661d4c7b055f5c2e88adb2dbeb9ca2c7c4e5b57` (merged MAS.0/MAS.1). PR #40 remains draft.

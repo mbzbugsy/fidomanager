@@ -16,6 +16,7 @@ native-libfido2 = ["fido-libfido2/native-libfido2"]
 # ADR-017 §5.6 compile-time release flavor: compiles the release source commit into the build
 # identity the worker reports in ChildHello. No runtime switch exists.
 macos-release-signing = ["fido-platform/macos-release-signing"]
+macos-mas-signing = ["fido-platform/macos-mas-signing"]
 
 [dependencies]
 fido-auth = { path = "../fido-auth" }

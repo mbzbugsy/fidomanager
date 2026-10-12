@@ -16,6 +16,7 @@ native-ui-spike = ["fido-native-ui/modality-spike"]
 # authentication (S1–S8) and per-spawn exact worker validation in the single launcher
 # construction site. There is no runtime, environment, argument or renderer switch.
 macos-release-signing = ["fido-platform/macos-release-signing"]
+macos-mas-signing = ["fido-platform/macos-mas-signing"]
 macos-shared-authority = ["dep:objc2-foundation"]
 
 [dependencies]

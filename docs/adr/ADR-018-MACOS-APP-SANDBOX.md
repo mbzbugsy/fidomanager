@@ -125,7 +125,7 @@ needs its own ADR. Recorded as future option **X1**; it is not part of this chan
   start a second process. Only `open -n` or a direct exec reaches the lock, and that process exits.
   Second-launch arguments are never read, as before.
 
-### 2.5 Worker authenticity (ADR-017 §5)
+### 2.5 Worker authenticity (ADR-017 §5; MAS.0 scope)
 
 The sandbox flavor builds `WorkerAuthenticity::UnsignedDevelopment`: per-spawn path checks and
 the `build_id` consistency check, the same as every non-release build today. The
@@ -133,6 +133,68 @@ the `build_id` consistency check, the same as every non-release build today. The
 Mac App Store branch. A Mac App Store distribution build therefore needs its own enforcing flavor
 before it may ship (gate **G4**). Nothing in this ADR weakens or bypasses ADR-017; the two
 flavors are separate features.
+
+### 2.6 MAS.2 — release-specific store worker authenticity
+
+[POLICY] [Issue #41](https://github.com/mbzbugsy/fidomanager/issues/41) approves the production
+worker prefix `eu.fidomanager.desktop.mas.fido-worker`. The exact identifier is
+`<prefix>.<version>.<40-lower-hex-source-commit>.mas`, bound to compiled source metadata and the
+distribution flavor. The existing reviewed Team `7VGK9SN42B` is the sole authority. Developer
+ID's identifier and ADR-017 release-record verification remain separate and unchanged.
+
+`macos-mas-signing` is compile-time only. The app feature implies sandbox and shared authority;
+the service/worker forward the corresponding platform build flavor. No local ad-hoc packaging
+selects it. Cargo feature unification mismatches and conflicting production flavors are rejected
+before shared storage or worker initialization. Optimized conflicting builds are compilation
+errors; debug all-feature checks retain a refusing startup path.
+
+Every MAS spawn repeats canonical path, regular-file/layout and executable/non-writable checks.
+Only thin little-endian arm64 (`CPU_SUBTYPE_ARM64_ALL`, `MH_EXECUTE`) is admitted. Static
+Security.framework validation requires the exact release identifier and
+`anchor apple generic` plus Mac App Store leaf OID `1.2.840.113635.100.6.1.9`, as documented in
+[Apple TN3127](https://developer.apple.com/documentation/technotes/tn3127-inside-code-signing-requirements).
+Team binding comes from authenticated CodeDirectory signing information, not Developer ID's
+certificate `subject.OU` rule. Worker entitlements must be exactly two typed true CFBooleans:
+`app-sandbox` and `inherit`. Hardened Runtime is mandatory; the conservative initial signature
+flag mask admits runtime and optional kill only. Unknown flags are rejected pending M5 review.
+
+C_s is extracted only after static authentication and all fact checks. An immutable, private,
+non-cloneable per-spawn token owns C_s and a compiled dynamic requirement containing that exact
+hash. It also retains immutable policy provenance; a token from another verifier is refused.
+There is no shared mutable last-hash cache. The owned, still-unreaped child PID must satisfy
+that requirement, exact identifier/Team/grants/flags, valid/kill dynamic status and cdhash C_s
+before any stdout reader, ParentHello or secret payload. The endpoint then checks that the child
+has not exited without reaping. Static/path or dynamic identity failures latch
+WorkerIdentityRejected permanently, containing any spawned child by kill/reap. Post-static exec
+refusal also latches MAS: no verified child exists and a substituted path or signature could have
+caused the refusal. Developer ID retains its existing spawn-error behavior. ChildHello.build_id
+is only a consistency check after authenticity; its mismatch also latches and contains.
+
+[TRUST ASSUMPTION] Protected signing must assign each release-specific identifier only to the
+reviewed compiled artifact. A bare marker, unauthenticated candidate hash or arbitrary identifier
+string is not an independent trust root. The data-only checker pins release inputs from trusted
+build/tag context, Team, grants, thin arm64 and the post-Apple-signing publisher requirement.
+It does not sign or execute code. The parked release-signer repository and PRs #20/#35/#36 are
+unchanged; integrating this contract there requires separate review.
+
+[LOCAL] Disposable ad-hoc fixtures use a dedicated parent identity/container and a private
+libtest-only verifier policy, with no production app entrypoint, App Group grant, journal or
+native FIDO linkage. They prove static-to-running cdhash binding and the launch ordering under a
+kernel-enforced sandbox; they cannot prove Apple's publisher, re-signing or TestFlight behavior.
+The sandboxed fixture does not create executable copies: macOS quarantines those copies. A
+bounded external test runner prepares/replaces the already signed fixtures, modeling the
+external replacement threat without changing entitlements or removing quarantine.
+
+[OPEN] M1–M6 remain **BLOCKED**: preservation of worker ID/Team/grants/flags after Apple re-signing;
+App Store Connect acceptance/upgrades with changing helper IDs; actual MAS/TestFlight leaf OIDs
+and an explicit TestFlight acceptance decision; offline bounded static/dynamic PID verification
+on supported sandboxed macOS versions; runtime/kill flag semantics; and genuine signed negative
+controls. G1/G5's store-main requirement/profile grants and shared-root validation are separate.
+The main predicate remains an unchanged temporary fail-closed placeholder. The unconditional
+production store startup refusal now runs before App Group resolution, lock or recovery loading,
+even if that placeholder unexpectedly matches. G8 full TestFlight/App Store runtime remains
+blocked. No store or TestFlight success is claimed. See
+[MAS.2 evidence](../validation/MAS.2-worker-authenticity.md).
 
 ## 3. Rejected alternatives
 
@@ -262,9 +324,10 @@ the existing poisoned recovery barrier. Durable journal algorithms and schema 1 
 
 `macos-release-signing` implies shared authority; the store overlay enables sandbox plus shared
 authority. Unsigned development and ad-hoc fixtures enable neither production selection. The
-store production path has a further unconditional worker/UI refusal pending MAS.2/G4 if the
-temporary main predicate is ever satisfied; this is not a claim that real store-signed code can
-load recovery. It never selects an unsigned worker verifier as a substitute. Windows is unchanged.
+store production path retains an unconditional startup refusal pending MAS.2/G4 signed evidence
+and G1/G5 main validation. MAS.2 moves that refusal before group resolution or recovery, even
+if the temporary predicate unexpectedly matches. It never selects an unsigned worker verifier
+as a substitute. Windows is unchanged.
 
 The original App Group rejection in §4 concerned only a single-instance socket. Issue #38's
 shared recovery authority is now implemented in source and synthetic tests; actual signed

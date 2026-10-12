@@ -946,7 +946,15 @@ const processWorkerSource = readFileSync(
 if (
   (processWorkerSource.match(/worker_authenticity::release_startup\(\)/g) ?? [])
     .length !== 1 ||
-  !/pub fn beside_current_exe\(\) -> Result<Self, LaunchError> \{\s*#\[cfg\(feature = "macos-release-signing"\)\]\s*\{\s*let authenticity = crate::worker_authenticity::release_startup\(\);/.test(
+  !/#\[cfg\(all\(feature = "macos-release-signing", not\(feature = "macos-mas-signing"\)\)\)\]\s*\{\s*let authenticity = crate::worker_authenticity::release_startup\(\);/.test(
+    processWorkerSource,
+  ) ||
+  !processWorkerSource.includes(
+    'if !crate::worker_authenticity::signing_flavors_match()',
+  ) ||
+  (processWorkerSource.match(/worker_authenticity::mas_startup\(\)/g) ?? [])
+    .length !== 1 ||
+  !/#\[cfg\(feature = "macos-mas-signing"\)\]\s*\{\s*let authenticity = crate::worker_authenticity::mas_startup\(\);/.test(
     processWorkerSource,
   )
 ) {
@@ -955,7 +963,7 @@ if (
   );
 }
 const forbiddenAuthenticity =
-  /\b(?:WorkerAuthenticity|WorkerIdentityCheck|WorkerCodeVerifier|MACOS_RELEASE_TEAM_ID|IdentityLatch|ReleaseWorkerIdentity|macos_code_signing|release_identity|worker_authenticity|cdhash|build_id|buildId|teamId|team_id|SecCode|SecStaticCode|SecRequirement|FidoManagerReleaseWorkerIdentitySHA256|verification_mode|verificationMode)\b|release-worker-identity|macos-release-signing/;
+  /\b(?:WorkerAuthenticity|WorkerIdentityCheck|WorkerCodeVerifier|MasWorkerVerifier|MasSpawnToken|VerifiedSpawn|MACOS_RELEASE_TEAM_ID|IdentityLatch|ReleaseWorkerIdentity|macos_code_signing|release_identity|worker_authenticity|mas_worker_authenticity|cdhash|build_id|buildId|teamId|team_id|SecCode|SecStaticCode|SecRequirement|FidoManagerReleaseWorkerIdentitySHA256|verification_mode|verificationMode)\b|release-worker-identity|macos-(?:release-signing|mas-signing)/;
 for (const file of [...rendererFiles, ...rustFiles]) {
   const hit = readFileSync(file, 'utf8').match(forbiddenAuthenticity);
   if (hit) {
@@ -967,7 +975,7 @@ for (const file of [...rendererFiles, ...rustFiles]) {
 const appManifest = readFileSync('src-tauri/Cargo.toml', 'utf8');
 const defaultFeatures =
   appManifest.match(/^default\s*=\s*\[([^\]]*)\]/m)?.[1] ?? '';
-if (/macos-release-signing/.test(defaultFeatures)) {
+if (/macos-(?:release-signing|mas-signing)/.test(defaultFeatures)) {
   throw new Error(
     'The macos-release-signing flavor must never be a default feature.',
   );
@@ -975,7 +983,7 @@ if (/macos-release-signing/.test(defaultFeatures)) {
 for (const file of listFiles('crates', (path) => path.endsWith('Cargo.toml'))) {
   const manifest = readFileSync(file, 'utf8');
   const defaults = manifest.match(/^default\s*=\s*\[([^\]]*)\]/m)?.[1] ?? '';
-  if (/macos-release-signing/.test(defaults)) {
+  if (/macos-(?:release-signing|mas-signing)/.test(defaults)) {
     throw new Error(
       `The macos-release-signing flavor must never be a default feature: ${file}`,
     );
@@ -1102,9 +1110,10 @@ const workerStart = appLib.indexOf(
 if (
   !(
     sharedStart >= 0 &&
+    storeGate >= 0 &&
+    storeGate < sharedStart &&
     sharedStart < sharedInit &&
-    sharedInit < storeGate &&
-    storeGate < workerStart
+    sharedInit < workerStart
   ) ||
   !appLib.includes(
     'std::process::exit(0); // kernel releases shared authority only at actual process termination',
@@ -1144,6 +1153,15 @@ if (
   );
 }
 if (
+  !sharedCode.includes(
+    'if !crate::worker_authenticity::signing_flavors_match()',
+  )
+) {
+  throw new Error(
+    'MAS.2 conflicting/unified signing features must refuse before group access',
+  );
+}
+if (
   /std::env|app_data_dir|initialize_recovery_at|create_dir/.test(sharedCode) ||
   sharedCode.indexOf('me.check_validity(') >
     sharedCode.indexOf('macos_app_group::resolve(') ||
@@ -1163,5 +1181,63 @@ if (
 ) {
   throw new Error(
     'G5 group root must come exclusively from the trusted macOS API',
+  );
+}
+
+// MAS.2: immutable per-spawn binding and compile-time-only selection. These structural controls
+// complement runtime substitution tests; they are not Apple publisher/signing evidence.
+const masCode = readFileSync(
+  'crates/fido-service/src/mas_worker_authenticity.rs',
+  'utf8',
+);
+if (
+  !readFileSync(
+    'crates/fido-service/src/worker_authenticity.rs',
+    'utf8',
+  ).includes('!build::CONFLICTING_SIGNING_FLAVORS') ||
+  !masCode.includes('Arc::ptr_eq(&self.0, &token.policy)') ||
+  !masCode.includes('&token.dynamic_requirement') ||
+  !masCode.includes('Some(&token.cdhash[..])') ||
+  !masCode.includes('if !info.exact_inherited_worker_entitlements') ||
+  /(?:Mutex|RwLock|static\s+mut|thread_local!)/.test(masCode) ||
+  /#\[derive\([^\]]*Clone[^\]]*\)\]\s*pub\(crate\) struct MasSpawnToken/.test(
+    masCode,
+  ) ||
+  !/#\[cfg\(test\)\]\s*pub\(crate\) fn ad_hoc_for_test/.test(masCode) ||
+  !processWorkerSource.includes(
+    'let spawn_identity = match authenticity.verify_before_spawn(&path)',
+  ) ||
+  !processWorkerSource.includes(
+    'authenticity.verify_running_child(self.pid, spawn_identity)',
+  ) ||
+  !processWorkerSource.includes(
+    'self.authenticate_running_child(authenticity, latch, spawn_identity)?;',
+  ) ||
+  !processWorkerSource.includes(
+    '#[cfg(all(feature = "macos-mas-signing", not(test)))]',
+  )
+) {
+  throw new Error(
+    'MAS.2 requires private immutable per-spawn identity before ParentHello; no hash cache or production test policy',
+  );
+}
+const masFixture = readFileSync(
+  'crates/fido-service/src/process_worker/mas2_sandbox_fixture.rs',
+  'utf8',
+);
+if (
+  !processWorkerSource.includes(
+    '#[cfg(all(test, target_os = "macos"))]\nmod mas2_sandbox_fixture;',
+  ) ||
+  !masFixture.includes(
+    'MAS.2 fixture refuses storage without a kernel sandbox',
+  ) ||
+  !masFixture.includes('eu.fidomanager.desktop.mas2authtest') ||
+  /SharedAuthority::production|initialize_recovery|JournalStorage|NativeAdapter/.test(
+    masFixture,
+  )
+) {
+  throw new Error(
+    'MAS.2 runtime fixture must stay test-only, isolated and recovery/device-free',
   );
 }

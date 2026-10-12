@@ -26,8 +26,19 @@ mod discovery;
 mod process_worker;
 // ADR-017 release-identity code is exercised by tests everywhere but only *used* by the macOS
 // `macos-release-signing` flavor.
+#[cfg(all(target_os = "macos", any(test, feature = "macos-mas-signing")))]
+mod mas_worker_authenticity;
 #[cfg_attr(
-    not(all(target_os = "macos", feature = "macos-release-signing")),
+    not(all(target_os = "macos", feature = "macos-mas-signing")),
+    allow(dead_code)
+)]
+mod mas_worker_policy;
+#[cfg_attr(
+    not(all(
+        target_os = "macos",
+        feature = "macos-release-signing",
+        not(feature = "macos-mas-signing")
+    )),
     allow(dead_code)
 )]
 mod release_identity;
@@ -35,7 +46,11 @@ mod supervisor;
 #[cfg(test)]
 mod test_support;
 #[cfg_attr(
-    not(all(target_os = "macos", feature = "macos-release-signing")),
+    not(all(
+        target_os = "macos",
+        feature = "macos-release-signing",
+        not(feature = "macos-mas-signing")
+    )),
     allow(dead_code)
 )]
 mod worker_authenticity;
