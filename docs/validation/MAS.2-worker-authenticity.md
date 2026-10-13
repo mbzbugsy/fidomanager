@@ -1,7 +1,9 @@
 # MAS.2 — release-specific worker authenticity
 
 Status: credential-free implementation for independent review. **M1–M6, G1/G5 and G8 remain
-BLOCKED** for Apple-signed/TestFlight evidence. This does not establish App Store compatibility.
+BLOCKED**. M6 / ADR-017 E6 also blocks release of both Developer ID and MAS worker paths for
+the unmitigated exec-trampoline inherited-channel attack, not just missing Apple evidence.
+No maintainer risk acceptance exists. This does not establish App Store compatibility.
 Base: main `e8f4280b066c60d2fbbc580e837828317f78952c`.
 [Issue #41](https://github.com/mbzbugsy/fidomanager/issues/41) is the approved architecture.
 
@@ -32,6 +34,14 @@ unreaped child PID and requires the same release requirement AND C_s, matching r
 grants/Team/flags and valid/kill status before ParentHello or any secret. Identity failure latches
 permanently and contains the child; no retry or unsigned fallback is possible. ChildHello.build_id
 is the compiled `<version>+<commit>.mas` consistency check after authentication.
+
+These checks authenticate the **current executable image** of the PID. They do not prove that
+no unverified instructions previously ran or that no descendant inherited IPC descriptors.
+A substituted trampoline can fork a descendant retaining stdin/stdout/FD3, then exec genuine W
+in the verified PID. Dynamic verification can accept W and the parent can subsequently send
+ParentHello or secrets to channels still held by the unverified descendant. The existing
+Developer ID path shares this limitation. Neither handshake success, inode equality nor
+independent C_s tokens closes it. See the mandatory BLOCKED M6/E6 control below.
 
 The conservative initial publisher policy uses Apple's documented Mac App Store leaf OID
 `1.2.840.113635.100.6.1.9` under the Apple generic anchor; Team comes from CodeDirectory rather
@@ -69,13 +79,15 @@ The 22 scenarios cover:
   unreviewed flags and a real fat arm64/x86_64 binary rejected before ParentHello.
 - The production publisher policy rejecting the ad-hoc worker without fallback.
 - World/group writable, symlink, directory and missing paths permanently rejected.
-- Authenticated A substituted with differently signed bytes B before spawn, dynamically rejected
-  before ParentHello and contained; terminal latch remains set.
+- Authenticated A substituted with differently signed bytes B before spawn, where B remains the
+  running image: dynamically rejected before ParentHello and contained; terminal latch remains
+  set. This does not cover B forking a descendant and execing A before dynamic verification.
 - Removal after authenticated static validation causing exec refusal, also permanently latched
   before any ParentHello. This conservative MAS rule does not alter Developer ID spawn errors.
 - Correctly authenticated code reporting the wrong build ID rejected after hello and contained.
-- Unsigned-token substitution refused; two concurrent valid tokens accepting their own children,
-  rejecting crossed hashes and a foreign verifier token, without ParentHello.
+- Unsigned-token substitution refused; two simultaneously live independent valid tokens accepting
+  their own children, rejecting crossed hashes and a foreign verifier token, without ParentHello.
+  This is token/provenance evidence, not two concurrent production endpoint launches.
 
 The parser requires the exact scenario set, actual admission/hello/latch/containment outcomes,
 distinct authenticated C_s values, completion, and kernel sandbox/runtime/kill evidence from
@@ -99,8 +111,52 @@ with SIP enabled. All eight reported Rust source hashes match the committed sour
 scenarios pass, including the real post-static removal/exec refusal. It records parent and
 inherited-child kernel evidence, two distinct authenticated static hashes, per-case outcomes,
 the unsandboxed refusal and the synthetic build label. This is ad-hoc mechanics, not Apple proof.
+This report predates the review delta and was not rerun or relabeled. It does not include an
+exec-trampoline control or demonstrate prevention of inherited-channel access.
 
-## Checks actually executed
+## BLOCKED exec-trampoline negative control (M6/E6)
+
+This is a precise scenario for a separately reviewed disposable harness, **not an executed or
+passing prevention test**. Do not launch the production app or use any recovery storage, physical
+device, PIN, credential, signing identity or profile. Use a UUID fixture directory, health-only
+worker W, synthetic requests/secret-channel markers and libtest-only coordination. Ad-hoc runs
+can explore mechanics; closure also requires signed evidence for both affected production paths.
+
+1. Statically authenticate W and retain the exact immutable expected identity/C_s. Keep a genuine
+   copy at a separate fixture path with the same authenticated image. Pause the test parent before
+   spawn using an external fixture control, without adding production hooks.
+2. Atomically substitute a disposable executable M at the worker path. M receives the normal
+   stdin/stdout and authentication FD3 hand-off. Before executing W, M forks D; D retains copies
+   of all three descriptors. A separate disposable control pipe reports D's PID and descriptor
+   readiness to the harness, independently of application IPC.
+3. M execs genuine W from the preserved fixture path **in the same PID**. Coordinate the test
+   parent's dynamic verification after this exec. Record acceptance of W's exact running identity
+   and hash, while independently confirming D is still live with the retained descriptors.
+4. Only after that acceptance, send uniquely tagged synthetic ParentHello/request bytes over
+   stdin and a synthetic marker over FD3, with no real PIN/PUAT or device command. The harness
+   must instrument D's reads on both channels, collect the bytes through its separate control
+   pipe, and observe whether D can inject synthetic stdout replies. A health-only protocol peer
+   and transport-only FD3 probe must not invoke any authenticator operation.
+5. The required prevention assertion is: **D never executes with usable communication descriptors
+   and receives none of the ParentHello/request/FD3 markers**. Any observed marker at D after W's
+   acceptance is a security failure, even if W also receives traffic or a handshake succeeds.
+   Missing readiness, timeouts, competing readers consuming all bytes, or absent D observations
+   are inconclusive/failing evidence, never proof of prevention. Bound all waits and kill/reap
+   both W and D explicitly, closing all fixture descriptors on every exit.
+
+The current architecture may accept W and expose synthetic traffic to D. A deterministic channel
+capture/coordination fixture and its descriptor containment require separate review; this small
+delta documents the control instead of introducing a misleading green regression. The existing
+22 cases remain evidence of current-image binding only.
+
+Preferred mitigation investigation: reviewed `posix_spawn` with `POSIX_SPAWN_START_SUSPENDED`,
+verification before unverified execution/dyld and release only after acceptance, with safe file
+actions, descriptor inheritance and failure containment on supported macOS versions. No such
+production implementation is included here. **M6/E6 stays a release blocker for Developer ID and
+MAS** until a separately reviewed mitigation plus signed prevention evidence closes it, or a
+separately documented explicit maintainer risk-acceptance decision is granted. None is granted.
+
+## Checks actually executed at reviewed HEAD 934de01
 
 Validation ran locally in `/private/tmp/fidomanager-mas2`. Frontend checks and final packaging
 used Node 24.19.0 and pnpm 11.25.0 with existing installed dependencies. Native source archives
@@ -136,6 +192,50 @@ ran the parser test. All-feature Clippy initially found legacy-only dead-code an
 test-module placement issue; both were corrected and the full check passed. No blocked check is
 marked PASS. `--build-only` and mocked signing/checker tests prove packaging/parser coverage only.
 New-head CI status is reported on the draft PR after push, separately from these local results.
+
+## Opus review delta validation
+
+B1 corrects the current-image claim in ADR-017/018 and this document, and adds the mandatory
+BLOCKED M6/E6 prevention gate and synthetic negative-control specification above. No production
+spawn redesign or risk acceptance is included. Independent token evidence is explicitly narrower
+than concurrent production endpoint launches. The optional header fd-versus-path consistency
+change is deferred; inode equality would not close the trampoline gate.
+
+The G5 correction is confined to `#[cfg(test)]` shared-authority reacquisitions after a prior
+holder was dropped or killed/reaped. It retries only `AlreadyHeld`, with a five-second deadline
+and five-millisecond sleeps; all other errors return immediately with their original error value.
+Timeout diagnostics include the synthetic path, attempt count, elapsed time and `AlreadyHeld`.
+Initial acquisitions and simultaneous-holder rejection assertions retain immediate behavior.
+Both loop iterations, the malformed/inaccessible namespace and synthetic subprocess restart
+sites were reviewed. Production authority/recovery/flock code is byte-identical to reviewed HEAD.
+
+Extra parallel stress initially failed at synthetic directory creation, before any lock check.
+Diagnostics confirmed `AlreadyExists` collisions in timestamp-only fixture names. The same
+test-only fixtures now include process ID and a per-process atomic counter, and preserve creation
+errors in diagnostics. The failed stress attempts are not counted as passes. Final stress ran
+the mixed-feature libtest's `shared_authority` filter **40 times with four concurrent copies and
+16 test threads each: 240 passed, zero failed**; all 40 subprocess holder/restart controls ran.
+
+Final delta checks actually rerun:
+
+| Check | Result |
+| --- | --- |
+| Formatting; all-target/all-feature workspace Clippy with warnings denied | PASS |
+| Workspace/all-target tests | PASS: 514 passed, zero failed, 4 intentionally ignored |
+| Shared-authority service flavor | PASS: 190 unit tests and 8 doctests |
+| MAS-only and mixed service flavors | PASS: 189 unit tests, 1 constructor integration test and 8 doctests each |
+| Focused G5 suite and parallel stress | PASS: 6 focused tests; 240 stress passes as described above |
+| Service doctests separately; both production app flavors | PASS: 8 doctests; compile only, no signing or app launch |
+| Frontend lint/typecheck/tests/build; renderer boundary/mutations | PASS: 45 tests, zero type errors/warnings, 179 checker executions |
+| MAS policy/checker/parser; G5 policy; MAS.1 evidence parser | PASS: 4, 4 and 14 test methods; signing calls mocked |
+| Native source/input controls and release-worker linkage | PASS: credential-free checks; separate-path native rebuild controls not rerun locally in this delta |
+| Both ad-hoc packaging paths and unsigned DMG; bundle negatives; packaged worker health | PASS: 33 mutated bundles rejected and 1 synthetic handshake/health test |
+| MAS.2 fixture build-only | PASS: packaging only; no new runtime or Apple-signature evidence |
+| Exec-trampoline prevention control; Apple-signed/TestFlight gates | **BLOCKED:** not executed; no prevention or signed success claimed |
+
+The historical SIP-enabled runtime JSON remains unchanged. No real recovery record, certificate,
+profile, signing credential or physical authenticator was accessed. CI for the delta is reported
+on draft PR #42 after push; the initial reviewed HEAD's native-auth flake is not new-head evidence.
 
 ## Reproduce without credentials
 
@@ -184,7 +284,7 @@ python3 scripts/check-macos-mas-worker.py <signed-app>/Contents/MacOS/fido-worke
 | M3 | **BLOCKED:** genuine MAS/TestFlight leaf OID(s), CodeDirectory Team semantics and explicit TestFlight acceptance decision |
 | M4 | **BLOCKED:** static/dynamic Security.framework and owned-PID verification inside genuine sandbox, offline with bounded latency on supported macOS versions |
 | M5 | **BLOCKED:** runtime/kill and allowed signature-flag semantics after Apple re-signing |
-| M6 | **BLOCKED:** genuine signed older/wrong-team/publisher/identifier/Developer ID/ad-hoc/swap negatives before ParentHello with terminal containment |
+| M6 / ADR-017 E6 | **BLOCKED security release gate for Developer ID and MAS:** exec-trampoline inherited-channel prevention control above; separately reviewed mitigation and signed evidence, or explicit separately documented maintainer risk acceptance (none granted). Also genuine signed older/wrong-team/publisher/identifier/Developer ID/ad-hoc/direct-swap negatives with terminal containment |
 | G1/G5 | **BLOCKED:** correct store-main predicate, exact profile-derived grants, first-launch App Group availability, real permissions/ACLs, supported OS behavior, shared journal/lock validation |
 | G8 | **BLOCKED:** full TestFlight/App Store Connect runtime path |
 
@@ -193,8 +293,10 @@ migrated, cleared or bypassed by launching a new production app. Its transition 
 separately reviewed human-controlled decision. No migration engine or new journal schema exists.
 PRs #20/#35/#36 and the release-signer repository are untouched.
 
-Independent Opus review should focus on immutable per-spawn C_s/policy provenance and concurrent
-spawns; child ownership/unreaped PID and containment ordering; static-to-spawn races and thin-arm64
+Independent Opus review should focus on immutable per-spawn C_s/policy provenance (the token
+fixture is not concurrent production endpoint evidence); child ownership/unreaped PID and
+containment ordering; the blocked exec-trampoline scenario and current-image limitation;
+static-to-spawn races and thin-arm64
 checks; exact CF grant types/ownership; publisher versus CodeDirectory Team binding; compile-time
 feature unification and early store refusal; protected identifier assignment assumptions; and
 whether fixture/checker results support precisely the claims made. Keep the PR draft; do not merge.

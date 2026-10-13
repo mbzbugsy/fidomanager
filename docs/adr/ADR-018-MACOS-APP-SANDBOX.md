@@ -170,6 +170,21 @@ refusal also latches MAS: no verified child exists and a substituted path or sig
 caused the refusal. Developer ID retains its existing spawn-error behavior. ChildHello.build_id
 is only a consistency check after authenticity; its mismatch also latches and contains.
 
+Dynamic verification authenticates only the PID's **current executable image**. It does not
+prove that no unverified instructions previously ran or that no descendant inherited communication
+descriptors. A worker-path writer can substitute M for verified W; M forks an IPC-owning descendant
+and execs genuine W. The PID/hash check may then accept W while the descendant can receive later
+ParentHello, request or fd-3 traffic. Existing direct-swap negatives do not test this trampoline.
+This residual limitation affects both MAS and Developer ID, independently of token isolation.
+
+**M6 / ADR-017 E6 is a BLOCKED security release gate for both worker paths**, not an optional
+hardening note. Closure requires a separately reviewed mitigation and signed evidence preventing
+the inherited-channel attack, or explicit, separately documented maintainer risk acceptance.
+No risk acceptance has been granted. Investigate `POSIX_SPAWN_START_SUSPENDED` with reviewed
+`posix_spawn` descriptor handling and pre-execution verification before releasing the worker;
+this delta does not implement that architecture. The synthetic negative control remains
+[BLOCKED](../validation/MAS.2-worker-authenticity.md#blocked-exec-trampoline-negative-control-m6e6).
+
 [TRUST ASSUMPTION] Protected signing must assign each release-specific identifier only to the
 reviewed compiled artifact. A bare marker, unauthenticated candidate hash or arbitrary identifier
 string is not an independent trust root. The data-only checker pins release inputs from trusted
@@ -189,7 +204,8 @@ external replacement threat without changing entitlements or removing quarantine
 App Store Connect acceptance/upgrades with changing helper IDs; actual MAS/TestFlight leaf OIDs
 and an explicit TestFlight acceptance decision; offline bounded static/dynamic PID verification
 on supported sandboxed macOS versions; runtime/kill flag semantics; and genuine signed negative
-controls. G1/G5's store-main requirement/profile grants and shared-root validation are separate.
+controls, including the mandatory inherited-channel trampoline prevention gate M6/E6 above.
+G1/G5's store-main requirement/profile grants and shared-root validation are separate.
 The main predicate remains an unchanged temporary fail-closed placeholder. The unconditional
 production store startup refusal now runs before App Group resolution, lock or recovery loading,
 even if that placeholder unexpectedly matches. G8 full TestFlight/App Store runtime remains

@@ -108,7 +108,7 @@ at `15ae91c` [REPO]:
 | D2 | Sign inside-out: worker, then the release-worker identity record (D14), then bundle, then DMG. Never sign with `--deep`. | [APPLE] + [POLICY] |
 | D3 | Hardened Runtime on both executables. **Exact App Group grant on the main app (section 2.1); zero entitlements on the worker**. No exception entitlement may be added without its own ADR. | [APPLE] requirement + [POLICY] |
 | D4 | Every signature carries a secure timestamp from `timestamp.apple.com`. Without one, signing fails; there is no unsigned fallback. | [APPLE] + [POLICY] |
-| D5 | Before **every** spawn, the app validates the worker against a compiled-in **publisher** requirement (Apple-issued Developer ID Application, a fixed Team ID, identifier `eu.fidomanager.desktop.fido-worker`) **and** against the exact per-release worker identity from D14. It validates statically before exec, then dynamically against the running child before any message is sent. | [POLICY], built on [APPLE] APIs |
+| D5 | Before **every** spawn, the app validates the worker against a compiled-in **publisher** requirement (Apple-issued Developer ID Application, a fixed Team ID, identifier `eu.fidomanager.desktop.fido-worker`) **and** against the exact per-release worker identity from D14. It validates statically before exec, then dynamically against the running child before any message is sent. Dynamic verification authenticates the current image only; inherited-channel trampoline prevention remains the BLOCKED E6 release gate (5.5). | [POLICY], built on [APPLE] APIs |
 | D6 | The verification mode is fixed at compile time. Release builds enforce it, and the release checks prove the shipped binary is an enforcing build. Nothing at runtime can select a weaker mode. | [POLICY] |
 | D7 | Release builds run only in a dedicated tag-triggered workflow. They are never built from a PR, and a PR artifact is never signed. The protected workflow builds the bundle again from the reviewed tag. | [POLICY] |
 | D8 | The protected workflow splits into: a build job with no secrets; a signing/notarization job that holds secrets and **executes no candidate code at all**; a verification job with no secrets; and publication jobs. Jobs hand off by SHA-256 digest. | [POLICY] |
@@ -196,6 +196,8 @@ after exact release/publisher/static fact validation, then requires the live chi
 equal that token before ParentHello. Policy provenance is bound by an immutable Arc; tokens are
 not cloneable and no mutable last-hash cache exists. This mechanical API change does not alter
 Developer ID's authentication or release record algorithms.
+Current-image authentication does not establish execution history or exclusive IPC descriptor
+possession; the inherited-channel exec-trampoline release blocker E6 in 5.5 applies to both flavors.
 
 Cargo feature unification is checked against the platform's compiled flags. A mismatch or both
 signing features yields terminal startup rejection; optimized mixed-feature builds cannot
@@ -580,8 +582,9 @@ No. [INFERENCE from APPLE facts, with an EMPIRICAL residue]:
    for app bundles. [POLICY] We treat these as helpful but **do not rely on them**: they depend
    on the OS version and are outside our control.
 
-So the seal and Gatekeeper protect the **distribution**, and the per-spawn requirement protects
-the **execution**. The seal does matter at **startup**: there it authenticates the release-worker
+So the seal and Gatekeeper protect the **distribution**, and the per-spawn requirement authenticates
+the **current process image**, with the execution-history limitation in 5.5. The seal matters at
+**startup**: there it authenticates the release-worker
 identity record (5.8), which then pins the exact worker for every spawn.
 
 ### 5.5 TOCTOU between validation and exec
@@ -589,31 +592,36 @@ identity record (5.8), which then pins the exact worker for every spawn.
 - Window: between step 3 (static validation of the file) and the kernel mapping the file in step
   4, the file could be replaced. [APPLE] says static validation is valid only while the code stays
   unmodified.
-- Closure: step 5 validates the **running** process through the kernel's view of it. [APPLE] says
-  `SecCodeCheckValidity` is secure against modification of the file-system source. A swap in the
-  window therefore fails step 5, and the child is contained before it receives `ParentHello`, a
-  request, or any PIN/PUAT material. Secrets are only ever sent after a successful handshake
-  (ADR-009, M2).
-- Residual (accepted, documented): in a swap race the attacker's binary has **already run** from
-  exec until step 5 kills it. It runs as the same user, with stdin/stdout pipes and (in
-  authentication mode) the fd-3 socket, but **with no secret yet sent on it**. To win the race the
-  attacker must already be able to write to `Contents/MacOS/` as this user. That same write access
-  already lets it replace the main executable instead, which the per-spawn check cannot see.
-  SECURITY_MODEL treats same-user software as an in-scope actor but says native defences "are not
-  a universal defense against every same-user process". So the race window gives the attacker
-  nothing that bundle write access does not already give. It is still logged as an integrity
-  failure.
+- Current-image check: step 5 validates the **current executable image** of the owned, unreaped
+  PID through the kernel's view of it. A replacement that remains the running image and fails
+  the exact requirement/cdhash check is contained before the parent writes `ParentHello`.
+  This does **not** prove that no unverified instructions previously ran in that process or that
+  no descendant inherited stdin, stdout or the authentication fd-3 socket.
+- Unmitigated exec trampoline: an attacker with worker-path write access can replace statically
+  verified W with M. M forks a descendant retaining those communication descriptors, then execs
+  genuine W in the same PID. Step 5 can now accept W, while the unverified descendant retains
+  the channels and can receive subsequent `ParentHello`, requests or synthetic/real secret
+  traffic. A successful handshake does not establish exclusive channel possession. CLOEXEC on
+  unrelated descriptors and killing/reaping a rejected child do not prevent this accepted-image
+  case. Both the Developer ID EXPECTED binding and MAS per-spawn C_s binding share this limitation.
+  No maintainer risk acceptance has been granted; bundle write access does not waive the gate.
 - `kill` status: if the running worker carries the `kill` status, pages that fail validation later
   terminate it [APPLE]. [EMPIRICAL E4] checks whether Hardened Runtime alone sets it. If it does
   not, the worker is signed with `--options runtime,kill` and step 5 requires the bit.
-- Optional hardening, evaluated during M7.2 implementation and **not** a gate: spawn the worker
-  suspended (`posix_spawn` with Apple's `POSIX_SPAWN_START_SUSPENDED` attribute), run step 5 on the
-  suspended process, then `SIGCONT` or kill and reap. That would remove even the brief execution in
-  the race. It means replacing `std::process::Command` with a `posix_spawn` path, which also
-  replaces the `pre_exec` fd-3 hand-off with `posix_spawn_file_actions_adddup2` plus
-  `POSIX_SPAWN_CLOEXEC_DEFAULT`. That is a separate reviewable change with its own risks.
-  [EMPIRICAL E6] checks whether the Security framework can validate a guest that is suspended
-  before dyld has run.
+- **BLOCKED security release gate E6 / MAS.2 M6:** both affected production worker paths must
+  not ship until a separately reviewed mitigation and signed evidence demonstrate that the
+  inherited-channel trampoline attack is prevented, or an explicit, separately documented
+  maintainer risk-acceptance decision is granted. There is no such decision today.
+  The preferred direction is to investigate a reviewed `posix_spawn` implementation using
+  `POSIX_SPAWN_START_SUSPENDED`, authenticating before any unverified execution and releasing
+  the worker only after acceptance. Review descriptor actions/ownership, fd-3 hand-off,
+  `POSIX_SPAWN_CLOEXEC_DEFAULT`, failure containment and supported macOS behavior. Empirical
+  evidence must establish pre-execution suspension and Security.framework verification before
+  dyld, plus absence of inherited descendant traffic; flags alone do not establish prevention.
+  No new production spawn architecture is implemented in this MAS.2 review delta.
+  The precise credential-free negative control and expected assertion are recorded as
+  **BLOCKED**, not a passing prevention test, in
+  [MAS.2 validation](../validation/MAS.2-worker-authenticity.md#blocked-exec-trampoline-negative-control-m6e6).
 - Launch constraints (macOS 14+: self, parent and responsible constraints in the worker's
   signature) were considered. A parent constraint would stop *other* processes launching our
   worker, which is not the threat here. Apple documents spawn constraints only for `launchd`
@@ -810,7 +818,7 @@ another release; the worker on disk does not match `BUF`.
 
 | Substitution | Where it fails |
 | --- | --- |
-| Older worker W_old (same Team ID, same identifier, valid Developer ID signature) put in `Contents/MacOS/` after startup | per-spawn step 3: cdhash and file SHA-256 ≠ `EXPECTED`; and if raced in after step 3, step 5: running cdhash ≠ `EXPECTED` and `WORKER_EXACT_REQ` fails. Contained before `ParentHello` |
+| Older worker W_old (same Team ID, same identifier, valid Developer ID signature) put in `Contents/MacOS/` after startup | per-spawn step 3: cdhash and file SHA-256 ≠ `EXPECTED`; if raced in after step 3 and W_old remains the current image, step 5 rejects its running cdhash and `WORKER_EXACT_REQ`, containing it before `ParentHello`. A trampoline that execs genuine W with an IPC-owning descendant is the separate BLOCKED E6 case (5.5) |
 | W_old put in place before startup | S7: cdhash and file SHA-256 ≠ the authenticated record. No launcher. S3's nested-code check may also fail, but the design does not depend on it (E17) |
 | W_old plus a record edited to name W_old's cdhash | Rejected at S3 (the resource seal is broken) or at S5 (the edited record does not hash to the `RID` in the signed `Info.plist`). Either is enough. No launcher, and no `EXPECTED` from the edited bytes |
 | W_old plus an edited record swapped in only while S4 reads it | S5 fails on the swapped bytes; the genuine file is never re-read (race model above) |
@@ -1813,7 +1821,7 @@ exists. "Gate" says what an unfavourable or missing answer means:
 | E3 | Does validation succeed offline with bounded latency on **both** dynamic flag paths: no flags on macOS 11.0–11.2, `noNetworkAccess` on 11.3 or later? Confirm from the SDK header that `kSecCSNoNetworkAccess` is unavailable for dynamic validation before 11.3, as the independent review reports | Clean Macs on 11.0–11.2 and on 11.3 or later, network off; SDK header | Release gate (both paths) |
 | E4 | Does Hardened Runtime alone set the dynamic `kill` status on the worker? | `SecCodeCopySigningInformation(kSecCSDynamicInformation)` on the running worker | Release gate (decides whether `kill` is added to the signing options) |
 | E5 | Per-spawn validation cost on the slowest supported Mac | Measure steps 3 and 5 | Evidence (feeds Part C) |
-| E6 | Can a suspended (`POSIX_SPAWN_START_SUSPENDED`) process be validated before dyld has run? | Prototype | Optional hardening |
+| E6 | **BLOCKED:** prevent M from forking an IPC-owning descendant and execing genuine W before current-image verification accepts W. Can reviewed `POSIX_SPAWN_START_SUSPENDED` spawning verify before dyld/unverified execution and safely release only W? | Separately reviewed mitigation, disposable synthetic channel-observation control and signed supported-macOS evidence (MAS.2 M6); alternatively explicit separately documented maintainer risk acceptance, not granted | Security release blocker for Developer ID and MAS |
 | E7 | Does any TCC prompt appear for the signed app or worker (HID, Input Monitoring)? | Clean Mac matrix | Release gate |
 | E8 | Does an app copied out of a stapled DMG launch offline **without** its own staple? It only explains the D9 choice | Clean Mac, network off | Non-gating (explanatory) |
 | E9 | Does `codesign --keychain` find an identity in a keychain that is not in the search list? | First signing run | Operational (fallback in 3.2) |
