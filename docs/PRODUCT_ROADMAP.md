@@ -1,6 +1,7 @@
 # Fido Manager Product Roadmap
 
 Status: active product roadmap  
+Baseline updated: 2026-10-16 (main `e8f4280`)  
 Scope: macOS-first security-key management platform  
 Principle: vendor parity is the floor; Fido Manager should go beyond vendor tools in inspection quality, trust boundaries, destructive-operation clarity, diagnostics, recovery semantics, and cross-vendor support.
 
@@ -113,21 +114,46 @@ It must never become proof of physical-device identity or mutation authority.
 
 ## 3. Current baseline
 
-Completed macOS milestones include:
+"Merged" means implemented on `main` with deterministic tests. On its own it does not imply
+hardware validation, signing or release readiness. No signed, notarized or public release exists.
+
+Merged macOS milestones:
 
 - M1 read-only authenticator discovery;
 - M1.5 killable child-process worker containment and libfido2 fit work;
 - M2 native authentication foundation;
 - M3 production read-only credential inspection;
-- M4 production FIDO2 PIN set/change and recovery acknowledgement.
+- M4 production FIDO2 PIN set/change and recovery acknowledgement (hardware: Change PIN
+  validated; Set PIN and recovery fault scenarios not hardware-validated);
+- M5 credential deletion, including trusted user.id retention and exact credential binding
+  (PR #29; sacrificial-hardware deletion validation not performed);
+- M6.0 FIDO2 reset architecture only: ADR-011 (proposed) and the non-destructive H0 timing
+  tool, which found Option A viable for one YubiKey 5 model on one Mac (PR #30). No Reset
+  capability exists;
+- M7.0 unsigned packaging foundation, M7.1 pinned private static native dependencies,
+  M7.2 signing/notarization design (ADR-017, proposed) and validation plan, and M7.2a runtime
+  worker-authenticity enforcement. No Developer ID signing, notarization, stapling or
+  clean-machine validation has been performed;
+- MAS.0/MAS.1 App Sandbox flavor (ADR-018, proposed), validated locally with ad-hoc signing
+  only; no Mac App Store signing, submission or review;
+- G5 Phase 1 shared App Group recovery authority (PR #40). G5 remains open pending
+  Apple-signed validation; the store-main predicate is a fail-closed placeholder.
 
-The next security-critical FIDO milestones remain:
+Open, unmerged:
 
-- M5 credential deletion;
-- M6 FIDO2 reset;
-- M7 mutation-capable public alpha.
+- MAS.2 release-specific store worker authenticity (PR #42). Its exec-trampoline gate
+  (ADR-017 E6) is blocked for both worker paths;
+- M7.2 release eligibility preflight (draft PR #36) and release verification/provenance
+  (draft PR #35);
+- Windows broker runtime evidence (draft PR #20, gate incomplete).
 
-Linux and Windows mutation paths remain separate platform work. Windows broker work remains a distinct feasibility track.
+Remaining security-critical FIDO milestones:
+
+- M6 FIDO2 reset implementation and multi-vendor hardware validation;
+- M7 mutation-capable public alpha, which depends on M6 and the open signing, notarization
+  and hardware gates.
+
+Linux and Windows mutation paths remain separate platform work. Linux keeps a discovery-only build. Windows broker work remains a distinct feasibility track.
 
 ## 4. Workstream A — FIDO2 over-and-beyond
 
@@ -481,6 +507,10 @@ Fido Manager.app
 
 The packaged worker must preserve exact backend-owned resolution and executable authenticity guarantees.
 
+Status: packaging foundation and sandbox work (M7.0–M7.2a, MAS.0–MAS.1, G5 Phase 1) has
+proceeded in parallel with M6 design. The signing, notarization, stapling and
+clean-machine steps above have not been performed (see section 3).
+
 No updater should be added merely as part of first packaging.
 
 ## 14. Target architecture
@@ -527,10 +557,13 @@ This is a direction, not permission to prematurely duplicate infrastructure. New
 
 Current priority order:
 
-1. Credential Detail Foundation, including user.id support.
-2. M5 credential deletion.
-3. M6 FIDO2 reset.
-4. macOS packaging/signing/notarization.
+1. Credential Detail Foundation, including user.id support. *Partial: trusted user.id and
+   exact identity merged with M5; detail query/UI and reveal/copy (section 16, steps 4–6)
+   not implemented.*
+2. M5 credential deletion. *Merged; sacrificial-hardware validation not performed.*
+3. M6 FIDO2 reset. *Design and H0 timing merged; no implementation.*
+4. macOS packaging/signing/notarization. *Foundation and design merged; signing and
+   notarization not performed.*
 5. Device/Application domain model.
 6. Device Experience 2.0.
 7. YubiKey application/transport toggles.
@@ -550,6 +583,10 @@ Each item is an epic/workstream, not necessarily one pull request.
 Security-critical mutations should continue to use small reviewable PRs, deterministic fault testing, explicit hardware gates, and independent review before merge.
 
 ## 16. Near-term M5 entry plan
+
+Status: M5 merged in PR #29. Steps 1–3 and 7–9 are implemented. Steps 4–6 (credential-detail
+query, detail UI with identifiers, reveal/copy semantics) are not. Step 10 (sacrificial-hardware
+deletion validation) has not been performed. The plan below is kept as written.
 
 The immediate implementation branch should begin by extending the M3 inventory safely so M5 deletion has exact trusted identity available.
 
