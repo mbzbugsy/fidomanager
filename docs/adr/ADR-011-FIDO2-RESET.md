@@ -1,15 +1,16 @@
 # ADR-011: FIDO2 authenticator Reset ceremony
 
-Status: Proposed for independent review (M6.0: architecture and non-destructive H0 timing
-spike only).
-Base: main `f444caa`, after merged PR #28. M5 credential deletion (Draft PR #29, head
-`aaf64d0`) is still in progress and is not modified by this ADR's change.
+Status: Accepted (M6.0: architecture and non-destructive H0 timing spike; M6.1: non-dispatching
+authority foundation).
+Base: written on main `f444caa`, after merged PR #28, while M5 credential deletion (PR #29)
+was in progress; M5 has since merged. M6.1 is based on main `49397c3`.
 
-**No Reset capability exists after M6.0.** This ADR documents intended interfaces; it does not
-implement `ResetIntent`, `ResetCeremonyGrant`, `ResetDispatchPermit`, a Reset journal operation,
-Reset recovery, a Reset worker protocol, a native Reset call or any Reset UI. The only code added
-by M6.0 is the H0 timing tool (`crates/fido-h0-timing`), which is structurally incapable of Reset
-(see [M6.0 H0 validation](../validation/M6.0-h0-reset-timing.md)).
+**No Reset capability exists after M6.1.** M6.0 added only the H0 timing tool
+(`crates/fido-h0-timing`), which is structurally incapable of Reset (see
+[M6.0 H0 validation](../validation/M6.0-h0-reset-timing.md)). M6.1 added only pure,
+non-dispatching types (see "M6.1 implementation" below). Neither implements
+`ResetDispatchPermit`, a Reset journal operation, Reset recovery, a Reset worker protocol, a
+native Reset call or any Reset UI.
 
 This ADR fills the slot reserved in the architecture plan (section 25 and the ADR list), and
 supersedes the plan where they differ (see "Changes to the architecture plan").
@@ -196,6 +197,27 @@ aborts as `NotDispatched` instead of being sent late.
   `fido_dev_reset` gets exactly one call site, enforced by linkage checks.
 - Native budget for the call: above the strictest documented touch timeout (Yubico 30 s), below
   `NativeDeadline::MAX_BUDGET`.
+
+## M6.1 implementation
+
+M6.1 implements the first two interface bullets above as pure types with crate-private
+constructors and no production caller:
+
+- `fido-auth::reset`: `ResetCommandOutcome` and `reset_call_outcome` (conservative rule above).
+  `ResetCommandOutcome` has **no `Rejected` variant**; it is added together with the first status
+  accepted under unresolved decision 5, so no rejection is representable before evidence exists.
+  `ResetExecutionBinding` is deferred to M6.2 with the worker protocol that carries it.
+- `fido-service::reset`: `ResetIntent` (own domain-tagged canonical encoding), `ResetCeremonyGrant`
+  and the typestate `ArmedCeremony → AwaitingReinsertion → InsertedCandidate →
+  CandidateValidated`. `InsertedCandidate` separates the candidate's first observation (which
+  starts the runtime budget) from its fresh-open/GetInfo validation. `CandidateValidated` has no
+  transition and records `min(ceremony expiry, first_seen + runtime budget)` for the M6.2 permit.
+  `PostResetObservation` has no conversion into any outcome.
+- Every deadline uses the caller's monotonic time and a `ResetCeremonyPolicy` of phase
+  durations; no timing window is a constant until unresolved decisions 1 and 3 are closed.
+
+M6.2 adds `ResetDispatchPermit` (minted only by durable `DispatchCapable`), the journal operation,
+the recovery family with the routing fix below, the reset worker protocol and the native call.
 
 ## Reset recovery family and the M5 routing hazard
 

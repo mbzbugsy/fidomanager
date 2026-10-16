@@ -685,7 +685,7 @@ for (const file of [
 }
 for (const file of rendererFiles) {
   if (
-    /\b(?:OperationPermit|OperationIntent|DeleteCredentialIntent|DeleteCredentialPermit|ExactCredentialTarget|DeletionIdentity|DeletionRecoveryCompletion|RecoverableOperation|CredentialDeletionDispatchPermit|DurableCredentialDeletionDispatch|PinMutationSecrets|PinMutationDispatchPermit|MutationCompletion|WorkflowId|PromptInstanceId|recovery_journal|journal_path|dispatch_capable|current_pin|new_pin|confirm_pin)\b/.test(
+    /\b(?:OperationPermit|OperationIntent|DeleteCredentialIntent|DeleteCredentialPermit|ExactCredentialTarget|DeletionIdentity|DeletionRecoveryCompletion|RecoverableOperation|CredentialDeletionDispatchPermit|DurableCredentialDeletionDispatch|PinMutationSecrets|PinMutationDispatchPermit|MutationCompletion|ResetIntent|ResetSubject|ResetCeremonyGrant|ArmedCeremony|AwaitingReinsertion|InsertedCandidate|CandidateValidated|ResetDispatchPermit|ExecuteReset|WorkflowId|PromptInstanceId|recovery_journal|journal_path|dispatch_capable|current_pin|new_pin|confirm_pin)\b/.test(
       readFileSync(file, 'utf8'),
     )
   ) {
@@ -722,6 +722,12 @@ for (const [file, name] of [
   ['crates/fido-service/src/deletion.rs', 'DeleteCredentialPermit'],
   ['crates/fido-service/src/deletion.rs', 'CredentialDeletionDispatchPermit'],
   ['crates/fido-service/src/recovery.rs', 'DurableCredentialDeletionDispatch'],
+  ['crates/fido-service/src/reset.rs', 'ResetIntent'],
+  ['crates/fido-service/src/reset.rs', 'ResetCeremonyGrant'],
+  ['crates/fido-service/src/reset.rs', 'ArmedCeremony'],
+  ['crates/fido-service/src/reset.rs', 'AwaitingReinsertion'],
+  ['crates/fido-service/src/reset.rs', 'InsertedCandidate'],
+  ['crates/fido-service/src/reset.rs', 'CandidateValidated'],
 ]) {
   const text = readFileSync(file, 'utf8');
   const unsafeDerive = new RegExp(

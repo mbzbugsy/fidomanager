@@ -752,8 +752,8 @@ mod tests {
         assert!(latch.is_set());
     }
 
-    /// ADR-017 §12 step 4(c), at the current M6 boundary. M6.0 merged no Reset dispatch, Reset
-    /// journal operation or Reset recovery family (ADR-011), so this proves what exists today:
+    /// ADR-017 §12 step 4(c), at the current M6 boundary. M6.0 and M6.1 merged no Reset dispatch,
+    /// Reset journal operation or Reset recovery family (ADR-011), so this proves what exists today:
     /// a worker identity failure cannot admit a `Reset` workflow past an existing uncertain-
     /// mutation barrier, cannot rewrite that durable evidence, and cannot release a `Reset`-class
     /// admission while the rejected worker is not proven stopped.

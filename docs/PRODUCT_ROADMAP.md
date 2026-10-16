@@ -127,8 +127,10 @@ Merged macOS milestones:
   validated; Set PIN and recovery fault scenarios not hardware-validated);
 - M5 credential deletion, including trusted user.id retention and exact credential binding
   (PR #29; sacrificial-hardware deletion validation not performed);
-- M6.0 FIDO2 reset architecture only: ADR-011 (proposed) and the non-destructive H0 timing
-  tool, which found Option A viable for one YubiKey 5 model on one Mac (PR #30). No Reset
+- M6.0 FIDO2 reset architecture only: ADR-011 and the non-destructive H0 timing
+  tool, which found Option A viable for one YubiKey 5 model on one Mac (PR #30);
+- M6.1 FIDO2 reset authority foundation: pure, non-dispatching intent, ceremony grant,
+  reconnect typestate and conservative outcome classifier (ADR-011, accepted). No Reset
   capability exists;
 - M7.0 unsigned packaging foundation, M7.1 pinned private static native dependencies,
   M7.2 signing/notarization design (ADR-017, proposed) and validation plan, and M7.2a runtime
@@ -561,7 +563,8 @@ Current priority order:
    exact identity merged with M5; detail query/UI and reveal/copy (section 16, steps 4–6)
    not implemented.*
 2. M5 credential deletion. *Merged; sacrificial-hardware validation not performed.*
-3. M6 FIDO2 reset. *Design and H0 timing merged; no implementation.*
+3. M6 FIDO2 reset. *Design, H0 timing and the non-dispatching M6.1 foundation merged; no
+   dispatch, recovery, worker protocol or UI.*
 4. macOS packaging/signing/notarization. *Foundation and design merged; signing and
    notarization not performed.*
 5. Device/Application domain model.
