@@ -11,6 +11,10 @@ pub mod inspection;
 pub mod mutation;
 pub mod presentation;
 pub mod recovery;
+// M6.1 Reset foundation: constructors stay crate-private and have no production caller until
+// M6.2 wires the ceremony, so only tests exercise them.
+#[cfg_attr(not(test), allow(dead_code))]
+pub mod reset;
 #[cfg(all(unix, any(test, feature = "macos-shared-authority")))]
 pub mod shared_authority;
 mod shared_authority_policy;

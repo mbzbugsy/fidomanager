@@ -423,6 +423,12 @@ try {
     /authority or recovery data must not enter renderer/,
     'renderer permit reference',
   );
+  mutate(
+    'src/App.svelte',
+    (text) => text + '\n<script>let ResetCeremonyGrant = true;</script>\n',
+    /authority or recovery data must not enter renderer/,
+    'renderer reset grant reference',
+  );
   for (const [path, type] of [
     ['crates/fido-auth/src/mutation.rs', 'PinMutationSecrets'],
     ['crates/fido-service/src/mutation.rs', 'OperationPermit'],
@@ -434,6 +440,12 @@ try {
       'crates/fido-service/src/recovery.rs',
       'DurableCredentialDeletionDispatch',
     ],
+    ['crates/fido-service/src/reset.rs', 'ResetIntent'],
+    ['crates/fido-service/src/reset.rs', 'ResetCeremonyGrant'],
+    ['crates/fido-service/src/reset.rs', 'ArmedCeremony'],
+    ['crates/fido-service/src/reset.rs', 'AwaitingReinsertion'],
+    ['crates/fido-service/src/reset.rs', 'InsertedCandidate'],
+    ['crates/fido-service/src/reset.rs', 'CandidateValidated'],
   ]) {
     for (const trait of ['Serialize', 'Clone', 'Debug']) {
       mutate(

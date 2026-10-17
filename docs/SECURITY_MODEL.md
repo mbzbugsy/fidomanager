@@ -606,7 +606,8 @@ Post-reset state may support reconciliation, but an empty key does not prove tha
 
 ## 21. Reset-specific threats and authorization model
 
-Reset carries unique identity and timing hazards.
+Reset carries unique identity and timing hazards. [ADR-011](adr/ADR-011-FIDO2-RESET.md) is
+normative for the Reset ceremony and supersedes this section where they differ.
 
 Threats:
 
@@ -628,8 +629,8 @@ It binds:
 - reset workflow identity;
 - canonical operation description/digest;
 - pre-disconnect non-authoritative safety snapshot;
-- cancellation generation;
-- finite wall-clock ceremony expiry.
+- cancellation generation and lifecycle epoch (lock, suspend or authority restart aborts);
+- finite ceremony expiry measured on the authority's monotonic clock, never the wall clock.
 
 It may survive exactly the expected reset disconnect/reconnect transition, but it **cannot** dispatch reset.
 
@@ -643,7 +644,7 @@ It binds:
 - the existing unexpired `ResetCeremonyGrant`;
 - candidate-validation result;
 - the current timed attempt;
-- a very short single-use TTL.
+- a single-use expiry of `min(ceremony expiry, first_seen + runtime budget)`.
 
 It is the sole object that can authorize `fido_dev_reset()`.
 
@@ -668,9 +669,9 @@ The reviewed CTAP baseline requires the reset request for a displayless authenti
 
 The timed path must account for USB enumeration/OS notification delay, open latency, required candidate validation, durable journal transition, and dispatch. Nonessential refresh/logging/network work is excluded.
 
-The ceremony has an explicit maximum reconnect duration. At most one timed retry may reuse the same unexpired grant and only if no candidate/topology/safety evidence changed; otherwise fresh impact acknowledgement is required.
+The ceremony has an explicit maximum reconnect duration. There is no automatic or grant-reusing retry: not on timeout, error, `NOT_ALLOWED`, crash or restart. A new attempt requires a new ceremony from the beginning, with fresh impact acknowledgement (ADR-011 decision 10).
 
-A compatibility spike may determine that some devices can attempt reset on the still-open current handle first. Such an attempt is itself a real mutation and follows the same permit/journal/evidence rules.
+Reset is never attempted on the still-open pre-disconnect handle. The 1 → 0 → 1 replug is always required (ADR-011).
 
 ## 22. RP identity / incomplete enumeration
 
@@ -978,7 +979,7 @@ Before the relevant features ship, test at least:
 - two identical keys during reset;
 - second key appears during timed reset stage;
 - reset candidate replacement after ceremony grant;
-- reset grant expiry/timed retry;
+- reset grant expiry and refused retry (a new attempt needs a new ceremony);
 - two application launches;
 - external browser/vendor contention;
 - malformed counts/deceptive Unicode reaching native UI/native allocation paths;

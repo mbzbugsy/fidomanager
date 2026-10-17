@@ -3,6 +3,7 @@
 
 pub mod deletion;
 pub mod mutation;
+pub mod reset;
 
 use fido_core::{DeviceGeneration, PromptInstanceId, WorkflowId};
 use serde::{Deserialize, Serialize};

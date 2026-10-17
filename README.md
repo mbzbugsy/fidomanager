@@ -19,8 +19,9 @@ Merged on `main`:
   ([report](docs/validation/M4-pin-mutation-macos.md)).
 - **M5:** macOS passkey deletion with durable recovery and native confirmation.
   Sacrificial-hardware deletion validation has not been performed.
-- **M6.0:** FIDO2 Reset **design only**: [ADR-011](docs/adr/ADR-011-FIDO2-RESET.md)
-  (proposed) and a non-destructive timing tool. **No Reset capability exists.**
+- **M6.0–M6.1:** FIDO2 Reset design ([ADR-011](docs/adr/ADR-011-FIDO2-RESET.md),
+  accepted), a non-destructive timing tool and a pure, non-dispatching authority foundation.
+  **No Reset capability exists.**
 - **M7.0–M7.2a:** unsigned/ad-hoc `.app` and DMG, pinned private static native
   dependencies, release-signing design
   ([ADR-017](docs/adr/ADR-017-MACOS-RELEASE-SIGNING.md), proposed) and runtime
