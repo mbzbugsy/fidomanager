@@ -943,6 +943,70 @@ try {
     'runtime environment authority selection',
   );
   assert.equal(check().status, 0, 'All restored M4 fixtures must pass.');
+  mutate(
+    'crates/fido-service/src/process_worker.rs',
+    (text) =>
+      text.replace(
+        'crate::worker_authenticity::mas_startup()',
+        'WorkerAuthenticity::UnsignedDevelopment',
+      ),
+    /Release startup authentication/,
+    'MAS flavor downgraded to unsigned development',
+  );
+  mutate(
+    'crates/fido-service/src/shared_authority.rs',
+    (text) =>
+      text.replace(
+        'if !crate::worker_authenticity::signing_flavors_match()',
+        'if false',
+      ),
+    /conflicting\/unified signing features/,
+    'unified signing features allowed into shared storage',
+  );
+  mutate(
+    'crates/fido-service/src/mas_worker_authenticity.rs',
+    (text) => text.replace('Arc::ptr_eq(&self.0, &token.policy)', 'true'),
+    /MAS\.2 requires private immutable/,
+    'cross-verifier token provenance removed',
+  );
+  mutate(
+    'crates/fido-service/src/mas_worker_authenticity.rs',
+    (text) =>
+      text.replace('&token.dynamic_requirement', '&self.0.static_requirement'),
+    /MAS\.2 requires private immutable/,
+    'dynamic cdhash requirement replaced by publisher-only check',
+  );
+  mutate(
+    'crates/fido-service/src/mas_worker_authenticity.rs',
+    (text) =>
+      text.replace(
+        'if !info.exact_inherited_worker_entitlements',
+        'if !info.has_entitlements',
+      ),
+    /MAS\.2 requires private immutable/,
+    'any worker entitlements accepted',
+  );
+  mutate(
+    'crates/fido-service/src/mas_worker_authenticity.rs',
+    (text) =>
+      text.replace(
+        '#[cfg(test)]\n    pub(crate) fn ad_hoc_for_test',
+        'pub(crate) fn ad_hoc_for_test',
+      ),
+    /MAS\.2 requires private immutable/,
+    'ad-hoc verifier factory enabled in production',
+  );
+  mutate(
+    'crates/fido-service/src/process_worker.rs',
+    (text) =>
+      text.replace(
+        '#[cfg(all(test, target_os = "macos"))]\nmod mas2_sandbox_fixture;',
+        '#[cfg(target_os = "macos")]\nmod mas2_sandbox_fixture;',
+      ),
+    /MAS\.2 runtime fixture must stay test-only/,
+    'sandbox fixture compiled into production',
+  );
+  assert.equal(check().status, 0, 'All restored MAS.2 fixtures must pass.');
   console.log(
     `Renderer boundary regression checks passed (${checks} checker executions; 8 denied crates, command/permission allowlists, service separation and M4 controls).`,
   );

@@ -48,6 +48,9 @@ impl SharedAuthority {
                 "FIDOMANAGER-SHARED-AUTHORITY/1: production App Group identity unavailable",
             )
         };
+        if !crate::worker_authenticity::signing_flavors_match() {
+            return Err(failure().into());
+        }
         let team = crate::worker_authenticity::MACOS_RELEASE_TEAM_ID.ok_or_else(failure)?;
         let requirement = production_main_requirement(sandbox, team).ok_or_else(failure)?;
         let requirement = Requirement::compile(&requirement).map_err(|_| failure())?;
@@ -115,6 +118,34 @@ fn require_kernel_sandbox() -> io::Result<()> {
     }
 }
 
+// Synthetic reacquisitions only: concurrent tests can fork with a CLOEXEC lock descriptor
+// still open, retaining its open file description until exec. Never used by production or
+// by assertions that a simultaneous holder is rejected immediately.
+#[cfg(test)]
+fn acquire_after_release(path: &std::path::Path) -> Result<SharedAuthority, InstanceLockError> {
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(5);
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match AuthorityRoot::open_resolved(path)
+            .map_err(InstanceLockError::from)
+            .and_then(SharedAuthority::acquire)
+        {
+            Err(InstanceLockError::AlreadyHeld) => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "synthetic post-release acquisition at {}: AlreadyHeld after {attempts} attempts ({:?})",
+                    path.display(),
+                    started.elapsed(),
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            result => return result,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +154,9 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
 
     #[test]
     fn developer_id_authority_requires_app_req_before_storage() {
@@ -166,19 +200,25 @@ mod tests {
             let path = fs::canonicalize(std::env::temp_dir())
                 .unwrap_or_else(|_| panic!("synthetic fixture"))
                 .join(format!(
-                    "fidomanager-g5-synthetic-{}",
+                    "fidomanager-g5-synthetic-{}-{}-{}",
+                    std::process::id(),
+                    NEXT_ROOT.fetch_add(1, Ordering::SeqCst),
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_else(|_| panic!("synthetic fixture"))
                         .as_nanos()
                 ));
-            fs::create_dir(&path).unwrap_or_else(|_| panic!("synthetic fixture"));
+            fs::create_dir(&path)
+                .unwrap_or_else(|error| panic!("create synthetic root {path:?}: {error:?}"));
             fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
                 .unwrap_or_else(|_| panic!("synthetic fixture"));
             Self(path)
         }
         fn acquire(&self) -> Result<SharedAuthority, InstanceLockError> {
             SharedAuthority::acquire(AuthorityRoot::open_resolved(&self.0)?)
+        }
+        fn acquire_after_release(&self) -> Result<SharedAuthority, InstanceLockError> {
+            super::acquire_after_release(&self.0)
         }
     }
     impl Drop for Disposable {
@@ -205,7 +245,7 @@ mod tests {
     #[test]
     fn both_channels_reload_the_same_schema1_record_and_barrier_after_restart() {
         let root = Disposable::new();
-        for (phase, resolution, expected) in [
+        for (iteration, (phase, resolution, expected)) in [
             (
                 "dispatch_capable",
                 serde_json::Value::Null,
@@ -216,10 +256,21 @@ mod tests {
                 serde_json::json!("acknowledged_unknown"),
                 RecoveryAdmission::Open,
             ),
-        ] {
-            let mut developer = root
-                .acquire()
-                .unwrap_or_else(|_| panic!("synthetic fixture"));
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut developer = if iteration == 0 {
+                root.acquire()
+            } else {
+                root.acquire_after_release()
+            }
+            .unwrap_or_else(|error| {
+                panic!(
+                    "synthetic Developer ID acquisition at {:?}: {error:?}",
+                    root.0
+                )
+            });
             seed(&mut developer, &record(phase, resolution));
             assert!(matches!(
                 root.acquire(),
@@ -227,9 +278,9 @@ mod tests {
             ));
             drop(developer);
             // Channel-independent acquisition uses the SAME root and storage entrypoints.
-            let mut store = root
-                .acquire()
-                .unwrap_or_else(|_| panic!("synthetic fixture"));
+            let mut store = root.acquire_after_release().unwrap_or_else(|error| {
+                panic!("synthetic store reacquisition at {:?}: {error:?}", root.0)
+            });
             let authority = AuthenticationAuthority::awaiting_recovery_startup();
             assert_eq!(store.initialize(&authority), Ok(()));
             assert_eq!(
@@ -258,6 +309,7 @@ mod tests {
                 store.initialize(&authority),
                 Err(JournalError::InvalidTransition)
             );
+            drop(store);
         }
     }
     #[test]
@@ -291,10 +343,11 @@ mod tests {
         let namespace = root.0.join("fido-authority-recovery-v1");
         fs::set_permissions(&namespace, fs::Permissions::from_mode(0o770))
             .unwrap_or_else(|_| panic!("synthetic fixture"));
-        assert!(matches!(
-            root.acquire(),
-            Err(InstanceLockError::Unavailable(_))
-        ));
+        match root.acquire_after_release() {
+            Err(InstanceLockError::Unavailable(_)) => {}
+            Err(error) => panic!("synthetic unsafe namespace at {:?}: {error:?}", root.0),
+            Ok(_) => panic!("synthetic unsafe namespace accepted at {:?}", root.0),
+        }
         fs::set_permissions(&namespace, fs::Permissions::from_mode(0o700))
             .unwrap_or_else(|_| panic!("synthetic fixture"));
         fs::remove_dir_all(&namespace).unwrap_or_else(|_| panic!("synthetic fixture"));
@@ -368,10 +421,10 @@ mod process_tests {
             .strip_prefix("fidomanager-g5-process-")
             .unwrap_or_else(|| panic!("synthetic fixture"));
         assert!(suffix.len() >= 16 && suffix.bytes().all(|byte| byte.is_ascii_digit()));
-        let mut holder = SharedAuthority::acquire(
-            AuthorityRoot::open_resolved(&path).unwrap_or_else(|_| panic!("synthetic fixture")),
-        )
-        .unwrap_or_else(|_| panic!("synthetic fixture"));
+        // Parent seeded and dropped its synthetic holder before starting this subprocess.
+        let mut holder = acquire_after_release(&path).unwrap_or_else(|error| {
+            panic!("synthetic subprocess reacquisition at {path:?}: {error:?}")
+        });
         let authority = AuthenticationAuthority::awaiting_recovery_startup();
         assert_eq!(holder.initialize(&authority), Ok(()));
         assert_eq!(
@@ -468,10 +521,9 @@ mod process_tests {
                 .unwrap_or_else(|_| panic!("synthetic fixture"))
                 .success()
         );
-        let mut restarted = SharedAuthority::acquire(
-            AuthorityRoot::open_resolved(&path).unwrap_or_else(|_| panic!("synthetic fixture")),
-        )
-        .unwrap_or_else(|_| panic!("synthetic fixture"));
+        let mut restarted = acquire_after_release(&path).unwrap_or_else(|error| {
+            panic!("synthetic post-termination reacquisition at {path:?}: {error:?}")
+        });
         let authority = AuthenticationAuthority::awaiting_recovery_startup();
         assert_eq!(restarted.initialize(&authority), Ok(()));
         assert_eq!(

@@ -1,0 +1,522 @@
+{
+  "identity": "eu.fidomanager.desktop.mas2authtest",
+  "run_id": "0a1f819464874f59bd94187702f010c3",
+  "started_utc": "2026-10-12T22:04:32.940313+00:00",
+  "macos": "26.5.2",
+  "sip": "System Integrity Protection status: enabled.",
+  "build": {
+    "identifier": "eu.fidomanager.desktop.mas2authtest",
+    "worker_identifier": "eu.fidomanager.desktop.mas.fido-worker.0.1.0.0123456789abcdef0123456789abcdef01234567.mas",
+    "synthetic_commit_label": "0123456789abcdef0123456789abcdef01234567",
+    "worker_build_id": "0.1.0+0123456789abcdef0123456789abcdef01234567.mas",
+    "main_entitlements": {
+      "com.apple.security.app-sandbox": true,
+      "com.apple.security.device.usb": true,
+      "com.apple.security.network.client": true
+    },
+    "worker_entitlements": {
+      "com.apple.security.app-sandbox": true,
+      "com.apple.security.inherit": true
+    },
+    "signature": "ad-hoc",
+    "native_fido_linkage": false,
+    "binary_sha256": {
+      "Contents/MacOS/mas2-auth-test": "bcef873df8404c29c3ed809b3c0a3e5f19370f37a2cbf46845c65557c64fc1ef",
+      "Contents/Resources/cases/correct-b": "3f5d273e982eb96b5655c2cfebb20ec59a03ac2f5a65e1de33bfdb39e77279a2",
+      "Contents/Resources/cases/extra-grant": "36b27018a9367aee13c012a1e5e690f139192892c01bfc1ff5a6af1fff3e0e27",
+      "Contents/Resources/cases/older-release": "c13f6b8a22ddae9060b1f4ab0f88f7ad8a58f3cf08dfe4b9603de3d7ea58ed3d",
+      "Contents/Resources/cases/wrong-commit": "9a3e4e8db8e1f3696eea26f1014da256017900a82a1b1e390b667bb62bf4571e",
+      "Contents/Resources/cases/unexpected-flags": "f4218778aaa16dddc363c22214219b07f116a9f95a036e53d61731a16f740c00",
+      "Contents/Resources/cases/correct-a": "cb1640c7fb7611b6059a7faf096c949a50c60cef86bc8509837fd4eece4e1809",
+      "Contents/Resources/cases/integer-inherit": "29dbbe62443f336ce5386093ec9ca2d6dabb13230aa52e3d2274fb2a3f49ee27",
+      "Contents/Resources/cases/wrong-flavor": "689becb4c39fc07f9ca92d7d67799a7def8fe2bf939f12795ebfcaa6a65c044e",
+      "Contents/Resources/cases/missing-inherit": "c1ed8e9afc146e16933348f8ec866d3d654c789a4f0d2b66e393ef21ddf71e11",
+      "Contents/Resources/cases/false-inherit": "59235effb7ffe543027c10b56b7c86f47484df97f8a3129e5ff7109b7de7713d",
+      "Contents/Resources/cases/fat-worker": "50a449daadb6e8fb643912196a68480672d2b329dc9c4f15c343d6fc8056e3c3",
+      "Contents/Resources/cases/no-runtime": "e80fa9793e2135ba208fa2ba1aa4781320f12978f77509eed70015376f4cf96d"
+    },
+    "source_sha256": {
+      "crates/fido-service/src/mas_worker_authenticity.rs": "0177cb7ed63c9729f3d9575c2838aec231090337009fa063b3a8a22040d1019f",
+      "crates/fido-service/src/mas_worker_policy.rs": "57429bd68cf8380fe04c70a50e41b46c703ca09d4dcbfd10661b0bf9b7a0514b",
+      "crates/fido-service/src/worker_authenticity.rs": "49a34daa26fc16bfac75248bc58205756acab39e0944309146e10b5b6bb4a278",
+      "crates/fido-service/src/process_worker.rs": "46ab4cc265f87c42f563c0b3aeaaedcf074abff0c7378a697f93d445f131f877",
+      "crates/fido-service/src/process_worker/mas2_sandbox_fixture.rs": "358478c02418430a018d4f15449ded99433beef9773afcf5ecd548743049b4cd",
+      "crates/fido-platform/src/macos_code_signing.rs": "0da1e506763c18120f95cf8050326622d039e5bfca0b6424a67bb1aaf4c3750e",
+      "crates/fido-platform/src/build_identity.rs": "c660dbc61c090fb7ec85111361063fe6eded09cde444a6fa6f2416dd547206b3",
+      "crates/fido-worker-fixture/src/bin/mas2-worker-fixture.rs": "dcad5e47cd5db8cfe17ddb320ea9a052806119ebb35573b1730b1d49cc13b5bc"
+    }
+  },
+  "unsandboxed_control": [
+    {
+      "cs_flags": 570556929,
+      "cs_status": 0,
+      "event": "kernel",
+      "pid": 3239,
+      "sandboxed": 0
+    }
+  ],
+  "staging": [
+    {
+      "cs_flags": 570495761,
+      "cs_status": 0,
+      "event": "kernel",
+      "pid": 3240,
+      "sandboxed": 1
+    },
+    {
+      "event": "staged",
+      "root": "/Users/nimafoladi/Library/Containers/eu.fidomanager.desktop.mas2authtest/Data/mas2-runs/0a1f819464874f59bd94187702f010c3"
+    }
+  ],
+  "evidence": [
+    {
+      "cs_flags": 570495761,
+      "cs_status": 0,
+      "event": "kernel",
+      "pid": 3244,
+      "sandboxed": 1
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": true,
+      "case": "correct-release",
+      "child_pid": 3250,
+      "contained": true,
+      "event": "case",
+      "hello": true,
+      "latched": false
+    },
+    {
+      "action": "install",
+      "case": "older-release",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "older-release",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "wrong-flavor",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "wrong-flavor",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "wrong-commit",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "wrong-commit",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "extra-grant",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "extra-grant",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "missing-inherit",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "missing-inherit",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "false-inherit",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "false-inherit",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "integer-inherit",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "integer-inherit",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "no-runtime",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "no-runtime",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "unexpected-flags",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "unexpected-flags",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "fat-worker",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "fat-worker",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "production-publisher-refuses-adhoc",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "unsafe-path",
+      "case": "world-writable",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "world-writable",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "unsafe-path",
+      "case": "group-writable",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "group-writable",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "unsafe-path",
+      "case": "symlink",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "symlink",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "unsafe-path",
+      "case": "directory",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "directory",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "unsafe-path",
+      "case": "missing-worker",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "missing-worker",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "swap",
+      "case": "correct-b",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "static-to-spawn-swap",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "unsafe-path",
+      "case": "missing-worker",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "post-static-exec-refusal",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": true
+    },
+    {
+      "action": "install",
+      "case": "correct-b",
+      "event": "fixture-prep"
+    },
+    {
+      "action": "install",
+      "case": "correct-a",
+      "event": "fixture-prep"
+    },
+    {
+      "accepted": false,
+      "case": "build-id-consistency",
+      "contained": true,
+      "event": "case",
+      "hello": true,
+      "latched": true
+    },
+    {
+      "accepted": false,
+      "case": "no-unsigned-fallback",
+      "contained": true,
+      "event": "case",
+      "hello": false,
+      "latched": false
+    },
+    {
+      "accepted": true,
+      "case": "independent-per-spawn-tokens",
+      "child_pids": [
+        3254,
+        3255
+      ],
+      "contained": true,
+      "cross_hash_rejected": true,
+      "event": "case",
+      "foreign_token_rejected": true,
+      "hello": false,
+      "latched": false,
+      "static_a": "b0382941fc4fbb85f3f6e0cc0f64ca3222032118",
+      "static_b": "3dc96c8c43494f3e98e2000d3eb3792ccdf59edf"
+    },
+    {
+      "event": "complete",
+      "physical_fido_operations": false,
+      "real_recovery_accessed": false
+    },
+    {
+      "cs_flags": 570495761,
+      "cs_status": 0,
+      "event": "child-kernel",
+      "pid": 3250,
+      "sandboxed": 1
+    },
+    {
+      "cs_flags": 570495761,
+      "cs_status": 0,
+      "event": "child-kernel",
+      "pid": 3253,
+      "sandboxed": 1
+    },
+    {
+      "cs_flags": 570495761,
+      "cs_status": 0,
+      "event": "child-kernel",
+      "pid": 3254,
+      "sandboxed": 1
+    },
+    {
+      "cs_flags": 570495761,
+      "cs_status": 0,
+      "event": "child-kernel",
+      "pid": 3255,
+      "sandboxed": 1
+    }
+  ],
+  "apple_signed_validation": "BLOCKED (M1-M6)",
+  "store_main_validation": "BLOCKED (G1/G5)",
+  "real_recovery_accessed": false,
+  "physical_fido_operations": false
+}

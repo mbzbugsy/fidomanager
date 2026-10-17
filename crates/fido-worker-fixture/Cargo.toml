@@ -8,6 +8,9 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+macos-mas-signing = ["fido-service/macos-mas-signing", "fido-worker/macos-mas-signing"]
+
 [dependencies]
 fido-auth = { path = "../fido-auth" }
 fido-native-ui = { path = "../fido-native-ui" }
@@ -17,10 +20,15 @@ fido-platform = { path = "../fido-platform" }
 fido-service = { path = "../fido-service" }
 fido-worker = { path = "../fido-worker", default-features = false }
 fido-worker-protocol = { path = "../fido-worker-protocol" }
+serde_json.workspace = true
 
 [[bin]]
 name = "fido-worker-fixture"
 path = "src/bin/fido-worker-fixture.rs"
+
+[[bin]]
+name = "mas2-worker-fixture"
+path = "src/bin/mas2-worker-fixture.rs"
 
 [lints]
 workspace = true

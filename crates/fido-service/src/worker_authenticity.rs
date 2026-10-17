@@ -2,15 +2,18 @@
 //!
 //! The verification mode is fixed at **compile time**:
 //!
-//! * without the `macos-release-signing` feature: [`WorkerAuthenticity::UnsignedDevelopment`]
+//! * without either production signing feature: [`WorkerAuthenticity::UnsignedDevelopment`]
 //!   (path/layout checks plus the `ChildHello.build_id` consistency check; M7.1 ad-hoc and local
 //!   development builds);
-//! * with it: release startup authentication (S1–S8, `release_identity`) runs once in
+//! * with Developer ID: release startup authentication (S1–S8, `release_identity`) runs once in
 //!   `ProcessWorkerLauncher::beside_current_exe`, the single construction site. Success yields
 //!   [`WorkerAuthenticity::Enforced`]: every spawn is validated statically against the exact
 //!   per-release requirement before exec, and dynamically, by pid, against the running child before
 //!   any byte is written to it. Failure yields [`WorkerAuthenticity::StartupRejected`]: no worker is
 //!   ever spawned in this app session.
+//! * with MAS: the distinct MAS.2 release/publisher policy captures an authenticated C_s in
+//!   an immutable per-spawn token and binds the unreaped child to it before any payload.
+//! * mismatched/unified or conflicting flavors: permanently rejected, never downgraded.
 //!
 //! Nothing at runtime (renderer, environment, arguments, configuration files, `Info.plist` keys
 //! other than the signed record digest) can select a weaker mode, a different Team ID, another
@@ -195,6 +198,7 @@ pub(crate) enum IdentityRejection {
     Entitlements,
     Cdhash,
     FileDigest,
+    Architecture,
 }
 
 /// Result of the post-spawn identity step.
@@ -206,15 +210,58 @@ pub(crate) enum ChildVerification {
     Verified,
 }
 
+/// Immutable, non-cloneable handoff belonging to exactly one spawn. MAS's token owns the
+/// authenticated C_s and compiled dynamic requirement; no mutable last-hash cache exists.
+pub(crate) enum VerifiedSpawn {
+    Development,
+    DeveloperId,
+    #[cfg(all(target_os = "macos", any(test, feature = "macos-mas-signing")))]
+    Mas(crate::mas_worker_authenticity::MasSpawnToken),
+}
+
+pub(crate) fn signing_flavors_match() -> bool {
+    use fido_platform::build_identity as build;
+    !build::CONFLICTING_SIGNING_FLAVORS
+        && cfg!(feature = "macos-release-signing") == build::DEVELOPER_ID_SIGNING_FLAVOR
+        && cfg!(feature = "macos-mas-signing") == build::MAS_SIGNING_FLAVOR
+}
+
+#[cfg(feature = "macos-mas-signing")]
+pub(crate) fn mas_startup() -> WorkerAuthenticity {
+    if !signing_flavors_match() {
+        return WorkerAuthenticity::StartupRejected;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        match crate::mas_worker_authenticity::MasWorkerVerifier::production() {
+            Ok(verifier) => WorkerAuthenticity::MasEnforced(Arc::new(verifier)),
+            Err(_) => WorkerAuthenticity::StartupRejected,
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        WorkerAuthenticity::StartupRejected
+    }
+}
+
 /// What the endpoint asks of the authenticity policy on every spawn.
 pub(crate) trait WorkerIdentityCheck {
     /// Whether the ADR-017 §5.3 step 2 release layout is required (`.app/Contents/MacOS`, no
     /// symlink, not group-writable).
     fn enforces_release_layout(&self) -> bool;
+    /// MAS treats every path-integrity failure as a permanent identity rejection. Preserve
+    /// Developer ID's existing ExecutableRejected category and development behavior.
+    fn latches_path_failure(&self) -> bool {
+        false
+    }
     /// Step 3: static validation of exactly the file about to be executed.
-    fn verify_before_spawn(&self, path: &Path) -> Result<(), IdentityRejection>;
+    fn verify_before_spawn(&self, path: &Path) -> Result<VerifiedSpawn, IdentityRejection>;
     /// Step 5: dynamic validation of the running, still unreaped child `pid`.
-    fn verify_running_child(&self, pid: u32) -> Result<ChildVerification, IdentityRejection>;
+    fn verify_running_child(
+        &self,
+        pid: u32,
+        spawn: &VerifiedSpawn,
+    ) -> Result<ChildVerification, IdentityRejection>;
     /// Step 7: the build identity `ChildHello` must report. Backend-owned.
     fn expected_build_id(&self) -> &str;
 }
@@ -227,8 +274,9 @@ pub(crate) enum WorkerAuthenticity {
     /// Release enforcement with the startup-authenticated expected worker.
     #[cfg(all(target_os = "macos", any(test, feature = "macos-release-signing")))]
     Enforced(Arc<macos::WorkerCodeVerifier>),
+    #[cfg(all(target_os = "macos", any(test, feature = "macos-mas-signing")))]
+    MasEnforced(Arc<crate::mas_worker_authenticity::MasWorkerVerifier>),
     /// Release startup authentication failed: FIDO functionality stays disabled.
-    #[cfg(any(test, feature = "macos-release-signing"))]
     StartupRejected,
 }
 
@@ -238,7 +286,8 @@ impl std::fmt::Debug for WorkerAuthenticity {
             Self::UnsignedDevelopment => "UnsignedDevelopment",
             #[cfg(all(target_os = "macos", any(test, feature = "macos-release-signing")))]
             Self::Enforced(_) => "Enforced",
-            #[cfg(any(test, feature = "macos-release-signing"))]
+            #[cfg(all(target_os = "macos", any(test, feature = "macos-mas-signing")))]
+            Self::MasEnforced(_) => "MasEnforced",
             Self::StartupRejected => "StartupRejected",
         })
     }
@@ -248,26 +297,48 @@ impl WorkerIdentityCheck for WorkerAuthenticity {
     fn enforces_release_layout(&self) -> bool {
         !matches!(self, Self::UnsignedDevelopment)
     }
+    fn latches_path_failure(&self) -> bool {
+        #[cfg(all(target_os = "macos", any(test, feature = "macos-mas-signing")))]
+        {
+            matches!(self, Self::MasEnforced(_))
+        }
+        #[cfg(not(all(target_os = "macos", any(test, feature = "macos-mas-signing"))))]
+        {
+            false
+        }
+    }
 
-    fn verify_before_spawn(&self, _path: &Path) -> Result<(), IdentityRejection> {
+    fn verify_before_spawn(&self, _path: &Path) -> Result<VerifiedSpawn, IdentityRejection> {
         match self {
-            Self::UnsignedDevelopment => Ok(()),
+            Self::UnsignedDevelopment => Ok(VerifiedSpawn::Development),
             #[cfg(all(target_os = "macos", any(test, feature = "macos-release-signing")))]
-            Self::Enforced(verifier) => verifier.check_static(_path),
-            #[cfg(any(test, feature = "macos-release-signing"))]
+            Self::Enforced(verifier) => verifier
+                .check_static(_path)
+                .map(|()| VerifiedSpawn::DeveloperId),
+            #[cfg(all(target_os = "macos", any(test, feature = "macos-mas-signing")))]
+            Self::MasEnforced(verifier) => verifier.check_static(_path).map(VerifiedSpawn::Mas),
             Self::StartupRejected => Err(IdentityRejection::StartupRejected),
         }
     }
 
-    fn verify_running_child(&self, _pid: u32) -> Result<ChildVerification, IdentityRejection> {
-        match self {
-            Self::UnsignedDevelopment => Ok(ChildVerification::NotRequired),
+    fn verify_running_child(
+        &self,
+        _pid: u32,
+        spawn: &VerifiedSpawn,
+    ) -> Result<ChildVerification, IdentityRejection> {
+        match (self, spawn) {
+            (Self::UnsignedDevelopment, VerifiedSpawn::Development) => {
+                Ok(ChildVerification::NotRequired)
+            }
             #[cfg(all(target_os = "macos", any(test, feature = "macos-release-signing")))]
-            Self::Enforced(verifier) => verifier
+            (Self::Enforced(verifier), VerifiedSpawn::DeveloperId) => verifier
                 .check_running(_pid)
                 .map(|()| ChildVerification::Verified),
-            #[cfg(any(test, feature = "macos-release-signing"))]
-            Self::StartupRejected => Err(IdentityRejection::StartupRejected),
+            #[cfg(all(target_os = "macos", any(test, feature = "macos-mas-signing")))]
+            (Self::MasEnforced(verifier), VerifiedSpawn::Mas(token)) => verifier
+                .check_running(_pid, token)
+                .map(|()| ChildVerification::Verified),
+            _ => Err(IdentityRejection::StartupRejected),
         }
     }
 
@@ -276,8 +347,9 @@ impl WorkerIdentityCheck for WorkerAuthenticity {
             Self::UnsignedDevelopment => fido_platform::build_identity::WORKER_BUILD_ID,
             #[cfg(all(target_os = "macos", any(test, feature = "macos-release-signing")))]
             Self::Enforced(verifier) => verifier.build_id(),
+            #[cfg(all(target_os = "macos", any(test, feature = "macos-mas-signing")))]
+            Self::MasEnforced(verifier) => verifier.build_id(),
             // Never matches: an empty expectation is rejected by the handshake validation.
-            #[cfg(any(test, feature = "macos-release-signing"))]
             Self::StartupRejected => "",
         }
     }
@@ -287,6 +359,9 @@ impl WorkerIdentityCheck for WorkerAuthenticity {
 /// the launcher permanently unable to spawn.
 #[cfg(feature = "macos-release-signing")]
 pub(crate) fn release_startup() -> WorkerAuthenticity {
+    if !signing_flavors_match() {
+        return WorkerAuthenticity::StartupRejected;
+    }
     #[cfg(target_os = "macos")]
     {
         std::hint::black_box(&ENFORCING_MARKER);
@@ -724,11 +799,11 @@ mod tests {
     fn startup_rejected_mode_never_spawns_and_never_matches_a_build() {
         let mode = WorkerAuthenticity::StartupRejected;
         assert_eq!(
-            mode.verify_before_spawn(Path::new("/bin/sh")),
-            Err(IdentityRejection::StartupRejected)
+            mode.verify_before_spawn(Path::new("/bin/sh")).err(),
+            Some(IdentityRejection::StartupRejected)
         );
         assert_eq!(
-            mode.verify_running_child(1),
+            mode.verify_running_child(1, &VerifiedSpawn::Development),
             Err(IdentityRejection::StartupRejected)
         );
         assert_eq!(mode.expected_build_id(), "");

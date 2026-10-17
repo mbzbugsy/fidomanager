@@ -13,6 +13,7 @@ default = []
 # (through `fidomanager-app`, `fido-service` and `fido-worker`). It compiles the release source
 # commit into the build identity. There is no runtime, environment, argument or renderer switch.
 macos-release-signing = []
+macos-mas-signing = []
 # The Security.framework binding (ADR-017). Only the trusted service enables it. The worker must
 # never link Security.framework: its dynamic dependencies are pinned by the M7.1 bundle checker.
 macos-code-signing = []

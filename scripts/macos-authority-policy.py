@@ -37,7 +37,7 @@ def check_source():
     assert sorted(path.name for path in DIRECTORY.iterdir()) == ["developer-id-app.entitlements", "store-app.entitlements"]
     for name, identifier, store, features in (
         ("developer-id", DEVELOPER_ID, False, ["macos-release-signing"]),
-        ("store", STORE_ID, True, ["macos-app-sandbox", "macos-shared-authority"]),
+        ("store", STORE_ID, True, ["macos-mas-signing"]),
     ):
         path = DIRECTORY / f"{name}-app.entitlements"
         assert exact(plistlib.loads(path.read_bytes()), store=store), f"unexpected {name} app grants"
@@ -52,7 +52,8 @@ def check_source():
     app = (ROOT / "src-tauri/Cargo.toml").read_text()
     assert re.search(r'macos-release-signing\s*=\s*\["fido-service/macos-release-signing", "macos-shared-authority"\]', app)
     assert re.search(r'macos-shared-authority\s*=\s*\["fido-service/macos-shared-authority"\]', app)
-    assert not re.search(r'^default\s*=.*macos-(?:shared-authority|release-signing|app-sandbox)', app, re.M)
+    assert re.search(r'macos-mas-signing\s*=\s*\["fido-service/macos-mas-signing", "macos-app-sandbox", "macos-shared-authority"\]', app)
+    assert not re.search(r'^default\s*=.*macos-(?:shared-authority|release-signing|mas-signing|app-sandbox)', app, re.M)
     assert "objc2-foundation" not in (ROOT / "crates/fido-platform/Cargo.toml").read_text(), "Foundation belongs only to authority service"
     worker = (ROOT / "crates/fido-worker/Cargo.toml").read_text()
     assert not re.search(r'macos-(?:shared-authority|app-group)', worker), "worker must not acquire group access"
